@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 use crate::manifest::Manifest;
 use candle_core::cuda_backend::cudarc::driver::CudaSlice;
 use memmap2::Mmap;

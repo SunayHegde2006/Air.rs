@@ -3,7 +3,14 @@ pub mod generator;
 pub mod kv_cache;
 pub mod loader;
 pub mod manifest;
+pub mod model;
+pub mod ops;
+#[cfg(feature = "cuda")]
 pub mod orchestrator;
+pub mod sampler;
+pub mod tokenizer;
+pub mod weight_streamer;
+#[cfg(feature = "cuda")]
 pub mod uploader;
 
 #[cfg(feature = "python")]

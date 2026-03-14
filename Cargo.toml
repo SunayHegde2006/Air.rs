@@ -13,9 +13,9 @@ anyhow = "1.0"
 libc = "0.2"
 
 # ML & CUDA
-# candle-core 0.8.0 internally depends on cudarc ^0.19 — we use its re-export
-# instead of adding a separate cudarc dependency to avoid version conflicts.
-candle-core = { version = "0.8.0", features = ["cuda"], optional = true }
+# candle-core is always included for tensor operations (CPU fallback).
+# The "cuda" feature enables GPU acceleration via candle-core's cuda feature.
+candle-core = "0.8.0"
 half = { version = "2.4", features = ["num-traits"] }
 safetensors = "0.5.2"
 
@@ -27,6 +27,7 @@ thiserror = "2.0"
 byteorder = "1.5"
 dashmap = "6.1"
 rayon = "1.10"
+rand = "0.8"
 indicatif = "0.17"
 log = "0.4"
 env_logger = "0.11"
@@ -36,7 +37,7 @@ tracing-subscriber = "0.3"
 
 [features]
 default = ["cuda"]
-cuda = ["candle-core"]
+cuda = ["candle-core/cuda"]
 python = ["pyo3"]
 
 [dependencies.pyo3]

@@ -1,3 +1,5 @@
+#![cfg(feature = "cuda")]
+
 use crate::manifest::LayerChunk;
 use crate::uploader::VramBuffer;
 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
@@ -6,10 +8,31 @@ use candle_core::{DType, Device, Shape, Tensor};
 pub struct LayerGuard<'a> {
     pub chunk_id: usize,
     pub tensors: Vec<Tensor>,
+    /// Tensor names corresponding 1:1 with `tensors` vec.
+    pub tensor_names: Vec<String>,
     // The VramBuffer is held here so it doesn't drop until LayerGuard drops.
     // This strictly enforces the lifetime.
     _buffer: VramBuffer,
     _marker: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> LayerGuard<'a> {
+    /// Look up a tensor by its GGUF name (e.g., "blk.0.attn_q.weight").
+    /// Returns None if not found in this chunk.
+    pub fn get_tensor_by_name(&self, name: &str) -> Option<&Tensor> {
+        self.tensor_names
+            .iter()
+            .position(|n| n == name)
+            .map(|idx| &self.tensors[idx])
+    }
+
+    /// Look up a tensor by a suffix pattern (e.g., "attn_q.weight").
+    pub fn get_tensor_by_suffix(&self, suffix: &str) -> Option<&Tensor> {
+        self.tensor_names
+            .iter()
+            .position(|n| n.ends_with(suffix))
+            .map(|idx| &self.tensors[idx])
+    }
 }
 
 /// The kernel orchestrator that wraps VRAM slices into Candle Tensors.
@@ -59,6 +82,7 @@ impl KernelOrchestrator {
     /// for every TensorRecord in the chunk, offset by the page boundaries.
     pub fn map_chunk<'a>(&self, buffer: VramBuffer, chunk: &LayerChunk) -> candle_core::Result<LayerGuard<'a>> {
         let mut tensors = Vec::new();
+        let mut tensor_names = Vec::new();
 
         // The base VRAM pointer from the uploaded buffer
         let base_vram_ptr = *buffer.slice.device_ptr() as u64;
@@ -80,11 +104,13 @@ impl KernelOrchestrator {
                 self.hydrate_tensor(vram_ptr, &shape, candle_dtype)?
             };
             tensors.push(tensor);
+            tensor_names.push(record.name.clone());
         }
 
         Ok(LayerGuard {
             chunk_id: chunk.id,
             tensors,
+            tensor_names,
             _buffer: buffer,
             _marker: std::marker::PhantomData,
         })

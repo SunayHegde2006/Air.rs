@@ -1,68 +1,118 @@
-use anyhow::Result;
-use candle_core::cuda_backend::cudarc::driver::CudaSlice;
-use std::sync::Arc;
+//! Interleaved Streaming KV-Cache Manager.
+//!
+//! During autoregressive generation, each transformer block produces Key and
+//! Value vectors that must be retained for future tokens to attend to.
+//!
+//! The challenge: For large context windows (128k+), the KV cache for all
+//! layers doesn't fit in VRAM alongside the model weights.
+//!
+//! Solution: Store KV cache in System RAM (virtually unlimited), and stream
+//! only the current layer's KV slice into VRAM when that layer computes.
+//! After computation, save the updated KV back to RAM and free the VRAM.
 
-// In cudarc 0.13, the device type is `CudaDevice` (not CudaStream/CudaContext).
-type CudarCudaDevice = candle_core::cuda_backend::cudarc::driver::CudaDevice;
+use candle_core::{Device, Result, Tensor};
 
+/// Per-layer KV cache stored as Candle tensors in system RAM.
 pub struct LayerKvCache {
     pub layer_id: usize,
-    pub k_cache_ram: Vec<u8>,
-    pub v_cache_ram: Vec<u8>,
+    /// Key cache: [batch, seq_len, n_kv_heads, head_dim] — stored on CPU
+    pub k_cache: Option<Tensor>,
+    /// Value cache: [batch, seq_len, n_kv_heads, head_dim] — stored on CPU
+    pub v_cache: Option<Tensor>,
 }
 
 pub struct KvCacheManager {
-    device: Arc<CudarCudaDevice>,
     layers: Vec<LayerKvCache>,
+    device: Device,  // The GPU device to transfer to/from
 }
 
 impl KvCacheManager {
-    pub fn new(device: Arc<CudarCudaDevice>, num_layers: usize) -> Self {
+    pub fn new(device: Device, num_layers: usize) -> Self {
         let mut layers = Vec::with_capacity(num_layers);
         for id in 0..num_layers {
             layers.push(LayerKvCache {
                 layer_id: id,
-                k_cache_ram: Vec::new(),
-                v_cache_ram: Vec::new(),
+                k_cache: None,
+                v_cache: None,
             });
         }
-        
+
         Self { device, layers }
     }
 
-    /// Loads a specific layer's KV-cache into VRAM.
-    pub fn load_to_vram(&self, layer_id: usize) -> Result<(CudaSlice<u8>, CudaSlice<u8>)> {
+    /// Load a specific layer's KV-cache from CPU RAM to GPU VRAM.
+    /// Returns None if no cache exists yet (first token / prefill).
+    pub fn load_to_device(&self, layer_id: usize) -> Result<(Option<Tensor>, Option<Tensor>)> {
         let layer = &self.layers[layer_id];
-        
-        let k_vram = if layer.k_cache_ram.is_empty() {
-            self.device.alloc_zeros::<u8>(1)
-                .map_err(|e| anyhow::anyhow!("k alloc failed: {e}"))?
-        } else {
-            self.device.htod_sync_copy(&layer.k_cache_ram)
-                .map_err(|e| anyhow::anyhow!("k htod failed: {e}"))?
-        };
-        
-        let v_vram = if layer.v_cache_ram.is_empty() {
-            self.device.alloc_zeros::<u8>(1)
-                .map_err(|e| anyhow::anyhow!("v alloc failed: {e}"))?
-        } else {
-            self.device.htod_sync_copy(&layer.v_cache_ram)
-                .map_err(|e| anyhow::anyhow!("v htod failed: {e}"))?
-        };
-        
-        Ok((k_vram, v_vram))
+
+        let k = layer
+            .k_cache
+            .as_ref()
+            .map(|t| t.to_device(&self.device))
+            .transpose()?;
+        let v = layer
+            .v_cache
+            .as_ref()
+            .map(|t| t.to_device(&self.device))
+            .transpose()?;
+
+        Ok((k, v))
     }
 
-    /// Saves a newly computed/updated KV-cache back to System RAM.
-    pub fn save_from_vram(&mut self, layer_id: usize, k_vram: &CudaSlice<u8>, v_vram: &CudaSlice<u8>) -> Result<()> {
+    /// After computing attention, save the updated K/V tensors back to CPU RAM.
+    /// The tensors on GPU will be freed when they go out of scope.
+    ///
+    /// `new_k` and `new_v` contain ALL keys/values (past + new), already
+    /// concatenated by the attention function.
+    pub fn save_from_device(
+        &mut self,
+        layer_id: usize,
+        new_k: &Tensor,
+        new_v: &Tensor,
+    ) -> Result<()> {
         let layer = &mut self.layers[layer_id];
-        
-        // Download from VRAM to RAM
-        layer.k_cache_ram = self.device.dtoh_sync_copy(k_vram)
-            .map_err(|e| anyhow::anyhow!("k dtoh failed: {e}"))?;
-        layer.v_cache_ram = self.device.dtoh_sync_copy(v_vram)
-            .map_err(|e| anyhow::anyhow!("v dtoh failed: {e}"))?;
-        
+
+        // Move to CPU for storage
+        layer.k_cache = Some(new_k.to_device(&Device::Cpu)?);
+        layer.v_cache = Some(new_v.to_device(&Device::Cpu)?);
+
         Ok(())
+    }
+
+    /// Get the current sequence length stored in the cache for a given layer.
+    pub fn seq_len(&self, layer_id: usize) -> usize {
+        self.layers[layer_id]
+            .k_cache
+            .as_ref()
+            .map(|t| t.dim(1).unwrap_or(0))
+            .unwrap_or(0)
+    }
+
+    /// Clear all cached KV data (e.g., starting a new conversation).
+    pub fn clear(&mut self) {
+        for layer in &mut self.layers {
+            layer.k_cache = None;
+            layer.v_cache = None;
+        }
+    }
+
+    /// Total memory used by KV cache across all layers (in bytes).
+    pub fn memory_usage(&self) -> usize {
+        self.layers
+            .iter()
+            .map(|l| {
+                let k_size = l
+                    .k_cache
+                    .as_ref()
+                    .map(|t| t.elem_count() * t.dtype().size_in_bytes())
+                    .unwrap_or(0);
+                let v_size = l
+                    .v_cache
+                    .as_ref()
+                    .map(|t| t.elem_count() * t.dtype().size_in_bytes())
+                    .unwrap_or(0);
+                k_size + v_size
+            })
+            .sum()
     }
 }
