@@ -1,0 +1,21 @@
+# Build artifacts
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
+*.txt
+!README.md
+!LICENSE
+
+# GGUF model files (too large for git)
+*.gguf

@@ -1,0 +1,2 @@
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-L", "native=C:\\PROGRA~1\\NVIDIA~2\\CUDA\\v12.1\\lib\\x64"]

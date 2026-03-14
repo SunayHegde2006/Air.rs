@@ -1,0 +1,51 @@
+[package]
+name = "air-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sunay Hegde"]
+description = "A high-performance, memory-fluid LLM inference engine."
+
+[dependencies]
+# Standard Async & Memory
+tokio = { version = "1.37", features = ["full", "tracing"] }
+memmap2 = "0.9"
+anyhow = "1.0"
+libc = "0.2"
+
+# ML & CUDA
+# candle-core 0.8.0 internally depends on cudarc ^0.19 — we use its re-export
+# instead of adding a separate cudarc dependency to avoid version conflicts.
+candle-core = { version = "0.8.0", features = ["cuda"], optional = true }
+half = { version = "2.4", features = ["num-traits"] }
+safetensors = "0.5.2"
+
+# API & Utilities
+axum = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+byteorder = "1.5"
+dashmap = "6.1"
+rayon = "1.10"
+indicatif = "0.17"
+log = "0.4"
+env_logger = "0.11"
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[features]
+default = ["cuda"]
+cuda = ["candle-core"]
+python = ["pyo3"]
+
+[dependencies.pyo3]
+version = "0.21"
+optional = true
+features = ["extension-module"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = 3
