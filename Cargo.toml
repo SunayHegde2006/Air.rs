@@ -36,7 +36,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 [features]
-default = ["cuda"]
+default = []
 cuda = ["candle-core/cuda"]
 python = ["pyo3"]
 

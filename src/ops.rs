@@ -106,9 +106,11 @@ pub fn grouped_query_attention(
     let scale = 1.0 / (head_dim as f64).sqrt();
 
     // Transpose to [batch, heads, seq, dim] for matmul
-    let q = q.transpose(1, 2)?; // [batch, n_heads, seq_q, head_dim]
-    let k = k.transpose(1, 2)?; // [batch, n_kv_heads, seq_kv, head_dim]
-    let v = v.transpose(1, 2)?; // [batch, n_kv_heads, seq_kv, head_dim]
+    // .contiguous() is required because transpose() creates non-contiguous
+    // views and Candle's matmul only works on contiguous tensors.
+    let q = q.transpose(1, 2)?.contiguous()?; // [batch, n_heads, seq_q, head_dim]
+    let k = k.transpose(1, 2)?.contiguous()?; // [batch, n_kv_heads, seq_kv, head_dim]
+    let v = v.transpose(1, 2)?.contiguous()?; // [batch, n_kv_heads, seq_kv, head_dim]
 
     // Repeat K/V heads to match Q head count if GQA (n_heads > n_kv_heads)
     let repeat_factor = n_heads / n_kv_heads;
@@ -121,7 +123,8 @@ pub fn grouped_query_attention(
     };
 
     // Q·Kᵀ scaled dot product: [batch, n_heads, seq_q, head_dim] × [batch, n_heads, head_dim, seq_kv]
-    let attn_weights = (q.matmul(&k.transpose(D::Minus2, D::Minus1)?)? * scale)?;
+    let k_t = k.transpose(D::Minus2, D::Minus1)?.contiguous()?;
+    let attn_weights = (q.matmul(&k_t)? * scale)?;
 
     // Causal mask: prevent attending to future positions
     let seq_q = attn_weights.dim(D::Minus2)?;
@@ -132,10 +135,12 @@ pub fn grouped_query_attention(
     let attn_weights = softmax(&attn_weights, D::Minus1)?;
 
     // Weighted sum of values: [batch, n_heads, seq_q, head_dim]
+    let attn_weights = attn_weights.contiguous()?;
+    let v = v.contiguous()?;
     let output = attn_weights.matmul(&v)?;
 
     // Transpose back: [batch, seq_q, n_heads, head_dim]
-    output.transpose(1, 2)
+    output.transpose(1, 2)?.contiguous()
 }
 
 /// Repeat KV heads to match the number of Q heads in GQA.
@@ -149,6 +154,7 @@ fn repeat_kv(x: &Tensor, repeat: usize) -> Result<Tensor> {
     let x = x
         .unsqueeze(2)?
         .expand(&[batch, n_kv_heads, repeat, seq_len, head_dim])?
+        .contiguous()?
         .reshape(&[batch, n_kv_heads * repeat, seq_len, head_dim])?;
     Ok(x)
 }
