@@ -4,7 +4,9 @@
 //! on CUDA devices automatically. No hand-written CUDA kernels needed —
 //! Candle handles the GPU dispatch.
 
-use candle_core::{DType, Result, Tensor, D};
+use candle_core::{DType, Device, Result, Tensor, D};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // RMSNorm — Root Mean Square Layer Normalization
@@ -24,7 +26,7 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
 }
 
 // ---------------------------------------------------------------------------
-// Rotary Position Embeddings (RoPE)
+// Rotary Position Embeddings (RoPE) — with frequency caching
 // ---------------------------------------------------------------------------
 // Encodes absolute position information into Q and K vectors by rotating
 // pairs of dimensions. This is what lets the model know token order.
@@ -33,6 +35,78 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
 //   x_i'     = x_i * cos(θ) - x_{i+1} * sin(θ)
 //   x_{i+1}' = x_i * sin(θ) + x_{i+1} * cos(θ)
 //
+// P0-1 OPTIMIZATION: inv_freq is pre-computed and cached per (head_dim, rope_theta)
+// key, avoiding repeated powf() computations across layers and tokens.
+
+/// Cache for pre-computed RoPE inverse frequency bands.
+///
+/// Key: (head_dim, rope_theta encoded as u64 bits) → inv_freq tensor on device.
+/// Thread-safe via Mutex for concurrent access from multiple generators.
+pub struct RopeCache {
+    inv_freq_cache: Mutex<HashMap<(usize, u64), Tensor>>,
+}
+
+impl Default for RopeCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RopeCache {
+    pub fn new() -> Self {
+        Self {
+            inv_freq_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Get or compute the inverse frequency tensor for the given head_dim and rope_theta.
+    fn get_inv_freq(&self, head_dim: usize, rope_theta: f64, device: &Device) -> Result<Tensor> {
+        let key = (head_dim, rope_theta.to_bits());
+        let mut cache = self.inv_freq_cache.lock().unwrap();
+        if let Some(cached) = cache.get(&key) {
+            return Ok(cached.clone());
+        }
+        let half_dim = head_dim / 2;
+        let inv_freq: Vec<f32> = (0..half_dim)
+            .map(|i| 1.0 / (rope_theta as f32).powf(2.0 * i as f32 / head_dim as f32))
+            .collect();
+        let tensor = Tensor::new(inv_freq, device)?;
+        cache.insert(key, tensor.clone());
+        Ok(tensor)
+    }
+}
+
+/// Apply RoPE using a shared cache for inverse frequencies.
+pub fn rope_cached(
+    q: &Tensor,
+    k: &Tensor,
+    start_pos: usize,
+    head_dim: usize,
+    rope_theta: f64,
+    cache: &RopeCache,
+) -> Result<(Tensor, Tensor)> {
+    let device = q.device();
+    let dtype = q.dtype();
+    let seq_len = q.dim(1)?;
+
+    let inv_freq = cache.get_inv_freq(head_dim, rope_theta, device)?;
+
+    let positions: Vec<f32> = (start_pos..start_pos + seq_len)
+        .map(|p| p as f32)
+        .collect();
+    let positions = Tensor::new(positions, device)?.unsqueeze(1)?;
+    let angles = positions.matmul(&inv_freq.unsqueeze(0)?)?;
+
+    let cos = angles.cos()?.to_dtype(dtype)?;
+    let sin = angles.sin()?.to_dtype(dtype)?;
+
+    let q_rotated = apply_rotary_emb(q, &cos, &sin)?;
+    let k_rotated = apply_rotary_emb(k, &cos, &sin)?;
+
+    Ok((q_rotated, k_rotated))
+}
+
+/// Uncached rope — retained for backward compatibility and tests.
 pub fn rope(
     q: &Tensor,
     k: &Tensor,
@@ -42,23 +116,19 @@ pub fn rope(
 ) -> Result<(Tensor, Tensor)> {
     let device = q.device();
     let dtype = q.dtype();
-    let seq_len = q.dim(1)?; // [batch, seq_len, n_heads, head_dim]
+    let seq_len = q.dim(1)?;
 
-    // Compute frequency bands: θ_i = rope_theta^(-2i/d) for i in 0..d/2
     let half_dim = head_dim / 2;
     let inv_freq: Vec<f32> = (0..half_dim)
         .map(|i| 1.0 / (rope_theta as f32).powf(2.0 * i as f32 / head_dim as f32))
         .collect();
-    let inv_freq = Tensor::new(inv_freq, device)?; // [half_dim]
+    let inv_freq = Tensor::new(inv_freq, device)?;
 
-    // Position indices
     let positions: Vec<f32> = (start_pos..start_pos + seq_len)
         .map(|p| p as f32)
         .collect();
-    let positions = Tensor::new(positions, device)?.unsqueeze(1)?; // [seq_len, 1]
-
-    // Outer product: angles[pos][dim] = pos * inv_freq[dim]
-    let angles = positions.matmul(&inv_freq.unsqueeze(0)?)?; // [seq_len, half_dim]
+    let positions = Tensor::new(positions, device)?.unsqueeze(1)?;
+    let angles = positions.matmul(&inv_freq.unsqueeze(0)?)?;
 
     let cos = angles.cos()?.to_dtype(dtype)?;
     let sin = angles.sin()?.to_dtype(dtype)?;
@@ -90,13 +160,100 @@ fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
 // ---------------------------------------------------------------------------
 // Grouped Query Attention (GQA)
 // ---------------------------------------------------------------------------
-// Standard multi-head attention but K/V can have fewer heads than Q.
-// Each K/V head is shared across (n_heads / n_kv_heads) Q heads.
+// GQA: Multiple Q heads share fewer K/V heads (e.g., 32 Q heads, 8 KV heads)
+// to reduce memory. K/V heads are repeated to match Q head count, then
+// standard multi-head attention is applied.
 //
-//   Attention(Q, K, V) = softmax(Q·Kᵀ / √d_k + mask) · V
-//
+// Uses Flash Attention when available (--features flash-attn) for O(N) memory
+// and ~2× throughput. Falls back to standard matmul attention otherwise.
+
+/// Unified attention dispatcher — picks Flash or Standard path automatically.
+///
+/// Input shapes: [batch, seq, heads, dim]
+pub fn attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    n_heads: usize,
+    n_kv_heads: usize,
+) -> Result<Tensor> {
+    #[cfg(feature = "flash-attn")]
+    {
+        // Flash Attention only works on CUDA with F16/BF16 tensors.
+        // Fall back to standard path on CPU or if dtype isn't supported.
+        let on_cuda = !q.device().is_cpu();
+        let dtype_ok = matches!(q.dtype(), DType::F16 | DType::BF16);
+        if on_cuda && dtype_ok {
+            return flash_grouped_query_attention(q, k, v, n_heads, n_kv_heads);
+        }
+    }
+    grouped_query_attention(q, k, v, n_heads, n_kv_heads)
+}
+
+// ---------------------------------------------------------------------------
+// Flash Attention Path (CUDA only, behind feature flag)
+// ---------------------------------------------------------------------------
+
+/// Flash Attention GQA — O(N) memory, fused softmax+masking in a single kernel.
+///
+/// Requires CUDA device and F16/BF16 inputs.
+/// Input shapes: [batch, seq, heads, dim]
+#[cfg(feature = "flash-attn")]
+pub fn flash_grouped_query_attention(
+    q: &Tensor,     // [batch, seq_q, n_heads, head_dim]
+    k: &Tensor,     // [batch, seq_kv, n_kv_heads, head_dim]
+    v: &Tensor,     // [batch, seq_kv, n_kv_heads, head_dim]
+    n_heads: usize,
+    n_kv_heads: usize,
+) -> Result<Tensor> {
+    let head_dim = q.dim(D::Minus1)?;
+    let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+
+    // Repeat K/V heads to match Q if GQA
+    let repeat_factor = n_heads / n_kv_heads;
+    let (k, v) = if repeat_factor > 1 {
+        // Flash Attention expects [batch, seq, heads, dim]
+        // We need to expand in the heads dimension
+        let (batch, seq_kv, _n_kv, hd) = k.dims4()?;
+        let k = k
+            .unsqueeze(3)?  // [batch, seq_kv, n_kv_heads, 1, head_dim]
+            .expand(&[batch, seq_kv, n_kv_heads, repeat_factor, hd])?
+            .contiguous()?
+            .reshape(&[batch, seq_kv, n_heads, hd])?;
+        let v = v
+            .unsqueeze(3)?
+            .expand(&[batch, seq_kv, n_kv_heads, repeat_factor, hd])?
+            .contiguous()?
+            .reshape(&[batch, seq_kv, n_heads, hd])?;
+        (k, v)
+    } else {
+        (k.clone(), v.clone())
+    };
+
+    // Ensure contiguity for Flash Attention
+    let q = q.contiguous()?;
+    let k = k.contiguous()?;
+    let v = v.contiguous()?;
+
+    // candle-flash-attn: FlashAttn with causal masking built-in
+    let flash = candle_flash_attn::FlashAttn {
+        softmax_scale,
+        alibi_slopes: None,
+        window_size_left: None,
+        window_size_right: Some(0), // causal: can only attend to current + past
+        softcap: None,
+    };
+
+    // Apply the fused flash attention kernel
+    q.apply_op3_no_bwd(&k, &v, &flash)
+}
+
+// ---------------------------------------------------------------------------
+// Standard Attention Path (CPU + GPU fallback)
+// ---------------------------------------------------------------------------
+
 pub fn grouped_query_attention(
-    q: &Tensor,     // [batch, seq_len, n_heads, head_dim]
+    q: &Tensor,     // [batch, seq_q, n_heads, head_dim]
     k: &Tensor,     // [batch, total_seq, n_kv_heads, head_dim]
     v: &Tensor,     // [batch, total_seq, n_kv_heads, head_dim]
     n_heads: usize,
@@ -123,7 +280,9 @@ pub fn grouped_query_attention(
     };
 
     // Q·Kᵀ scaled dot product: [batch, n_heads, seq_q, head_dim] × [batch, n_heads, head_dim, seq_kv]
-    let k_t = k.transpose(D::Minus2, D::Minus1)?.contiguous()?;
+    // P0-2: k is already contiguous from line 199, transpose of a contiguous
+    // tensor yields a view that matmul can handle without explicit contiguous().
+    let k_t = k.transpose(D::Minus2, D::Minus1)?;
     let attn_weights = (q.matmul(&k_t)? * scale)?;
 
     // Causal mask: prevent attending to future positions
@@ -135,8 +294,8 @@ pub fn grouped_query_attention(
     let attn_weights = softmax(&attn_weights, D::Minus1)?;
 
     // Weighted sum of values: [batch, n_heads, seq_q, head_dim]
-    let attn_weights = attn_weights.contiguous()?;
-    let v = v.contiguous()?;
+    // P0-2: softmax output is already contiguous (constructed from exp/div),
+    // and v is contiguous from line 200. No extra .contiguous() needed.
     let output = attn_weights.matmul(&v)?;
 
     // Transpose back: [batch, seq_q, n_heads, head_dim]
@@ -186,14 +345,15 @@ pub fn silu_ffn(
     w_down.forward(&activated)
 }
 
-/// SiLU (Sigmoid Linear Unit): x * σ(x)
+/// SiLU (Sigmoid Linear Unit): x * σ(x) = x / (1 + exp(-x))
+///
+/// P1-2: Optimized 3-op form computing x / (1 + exp(-x)) directly.
+/// Avoids intermediate `ones_like` and `broadcast_div(ones, ...)` allocations.
+/// On CUDA, Candle dispatches each op to cuDNN kernels automatically.
 pub fn silu(x: &Tensor) -> Result<Tensor> {
-    // sigmoid(x) = 1 / (1 + exp(-x))
-    let neg_x = x.neg()?;
-    let exp_neg_x = neg_x.exp()?;
-    let one_plus_exp = (Tensor::ones_like(&exp_neg_x)? + exp_neg_x)?;
-    let sigmoid = Tensor::ones_like(&one_plus_exp)?.broadcast_div(&one_plus_exp)?;
-    x.mul(&sigmoid)
+    // x / (1 + exp(-x))  — numerically equivalent to x * sigmoid(x)
+    let denom = (x.neg()?.exp()? + 1.0)?;
+    x.broadcast_div(&denom)
 }
 
 // ---------------------------------------------------------------------------
@@ -208,7 +368,7 @@ pub fn softmax(x: &Tensor, dim: D) -> Result<Tensor> {
 }
 
 // ---------------------------------------------------------------------------
-// Causal Mask
+// Causal Mask — Fused On-Device
 // ---------------------------------------------------------------------------
 // Creates upper-triangular mask of -inf to prevent attending to future tokens.
 //
@@ -248,6 +408,7 @@ pub fn apply_causal_mask(scores: &Tensor, seq_q: usize, seq_kv: usize) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::Device;
 
     #[test]
     fn test_rms_norm_basic() -> Result<()> {

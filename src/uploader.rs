@@ -9,16 +9,16 @@ use tokio::sync::mpsc;
 // In cudarc 0.13, the device type is `CudaDevice` (not CudaStream/CudaContext).
 type CudarCudaDevice = candle_core::cuda_backend::cudarc::driver::CudaDevice;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn prefetch_page_cache(mmap: &Mmap, offset: usize, len: usize) {
     unsafe {
         let ptr = mmap.as_ptr().add(offset) as *mut libc::c_void;
         libc::madvise(ptr, len, libc::MADV_WILLNEED);
     }
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn prefetch_page_cache(_mmap: &Mmap, _offset: usize, _len: usize) {
-    // Non-Linux platforms stub
+    // Windows: handled via PrefetchVirtualMemory in weight_streamer.rs
 }
 
 pub struct VramBuffer {

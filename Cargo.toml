@@ -16,11 +16,13 @@ libc = "0.2"
 # candle-core is always included for tensor operations (CPU fallback).
 # The "cuda" feature enables GPU acceleration via candle-core's cuda feature.
 candle-core = "0.8.0"
+candle-flash-attn = { version = "0.8.0", optional = true }
 half = { version = "2.4", features = ["num-traits"] }
 safetensors = "0.5.2"
 
 # API & Utilities
-axum = "0.7"
+axum = { version = "0.7", features = ["default"] }
+tokio-stream = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
@@ -29,6 +31,12 @@ dashmap = "6.1"
 rayon = "1.10"
 rand = "0.8"
 indicatif = "0.17"
+
+# Model Hub & Utilities
+dirs = "5.0"
+ureq = { version = "2.10", default-features = false, features = ["native-tls", "gzip"] }
+sha2 = "0.10"
+uuid = { version = "1.10", features = ["v4"] }
 log = "0.4"
 env_logger = "0.11"
 clap = { version = "4.5", features = ["derive"] }
@@ -38,6 +46,9 @@ tracing-subscriber = "0.3"
 [features]
 default = []
 cuda = ["candle-core/cuda"]
+vulkan = []
+metal = ["candle-core/metal"]
+flash-attn = ["candle-flash-attn"]
 python = ["pyo3"]
 
 [dependencies.pyo3]

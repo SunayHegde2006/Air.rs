@@ -19,3 +19,9 @@ Thumbs.db
 
 # GGUF model files (too large for git)
 *.gguf
+
+# Protocols
+air_rs_protocols_v3.md
+competitive_analysis.md
+arb_implementation_plan.md
+strix_protocol.md

@@ -190,6 +190,9 @@ pub struct QBlockWeights {
 /// x → RMSNorm → Q,K,V projections → RoPE → GQA Attention → output_proj → +x (residual)
 ///   → RMSNorm → SwiGLU FFN → +x (residual)
 /// ```
+///
+/// When `rope_cache` is provided, uses pre-computed inverse frequencies for RoPE,
+/// eliminating redundant powf() computations across layers and tokens.
 pub fn transformer_block(
     x: &Tensor,
     weights: &QBlockWeights,
@@ -197,6 +200,7 @@ pub fn transformer_block(
     kv_cache_v: Option<&Tensor>,
     config: &ModelConfig,
     start_pos: usize,
+    rope_cache: Option<&ops::RopeCache>,
 ) -> Result<(Tensor, Tensor, Tensor)> {
     let (batch, seq_len, _hidden) = x.dims3()?;
 
@@ -215,7 +219,11 @@ pub fn transformer_block(
     let v = v.reshape((batch, seq_len, config.n_kv_heads, config.head_dim))?;
 
     // 4. Apply Rotary Position Embeddings to Q and K
-    let (q, k) = ops::rope(&q, &k, start_pos, config.head_dim, config.rope_theta)?;
+    let (q, k) = if let Some(rc) = rope_cache {
+        ops::rope_cached(&q, &k, start_pos, config.head_dim, config.rope_theta, rc)?
+    } else {
+        ops::rope(&q, &k, start_pos, config.head_dim, config.rope_theta)?
+    };
 
     // 5. Concatenate with KV cache (past keys/values for autoregressive generation)
     let (k, v) = if let (Some(cache_k), Some(cache_v)) = (kv_cache_k, kv_cache_v) {

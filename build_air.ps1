@@ -1,56 +1,310 @@
-# Air.rs Build Script — Windows 11 + CUDA 12.1
+<#
+.SYNOPSIS
+    Air.rs Unified Build Script
+    Sets up the environment, asks which features to enable, and builds the project.
 
-# 1. GPU & CUDA Health Check
-Write-Host "`n--- [ Step 1: Health Check ] ---" -ForegroundColor Cyan
-Write-Host "Checking NVIDIA Driver..."
-nvidia-smi -L
-if ($LASTEXITCODE -ne 0) { Write-Error "NVIDIA Driver not found!"; exit 1 }
+.DESCRIPTION
+    This is the one script you need. It:
+      1. Auto-detects Windows SDK, MSVC, and CUDA paths
+      2. Loads the Visual Studio environment (vcvars64)
+      3. Asks which features to enable (cuda, flash-attn, metal, python)
+      4. Cleans stale stdc++ stubs if needed
+      5. Runs cargo build
 
-Write-Host "Checking NVCC..."
-nvcc --version | Select-String "release"
-if ($LASTEXITCODE -ne 0) { Write-Error "CUDA Toolkit (nvcc) not in PATH!"; exit 1 }
+.EXAMPLE
+    .\build_air.ps1              # Interactive feature selection
+    .\build_air.ps1 -Release     # Release mode (default is release)
+    .\build_air.ps1 -Debug       # Debug mode
+    .\build_air.ps1 -SkipPrompt  # Use defaults (cuda + flash-attn)
+#>
 
-# 2. Automatically find Visual Studio (auto-detect toolset)
-Write-Host "`n--- [ Step 2: Hydrating Environment ] ---" -ForegroundColor Cyan
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-$vsInstallPath = & $vswhere -latest -property installationPath
+[CmdletBinding()]
+param(
+    [switch]$DebugBuild,
+    [switch]$Release,
+    [switch]$SkipPrompt
+)
 
-if (-not $vsInstallPath) {
-    Write-Error "Could not detect any Visual Studio installation. Ensure 'Desktop development with C++' workload is installed."
-    exit 1
+$ErrorActionPreference = 'Stop'
+
+# -- Helpers -----------------------------------------------------------------
+function Write-Step  { param([string]$msg) Write-Host "  [+] $msg" -ForegroundColor Green }
+function Write-Info  { param([string]$msg) Write-Host "  [i] $msg" -ForegroundColor Cyan }
+function Write-Warn  { param([string]$msg) Write-Host "  [!] $msg" -ForegroundColor Yellow }
+function Write-Err   { param([string]$msg) Write-Host "  [X] $msg" -ForegroundColor Red }
+
+Write-Host ""
+Write-Host "  ======================================================" -ForegroundColor Magenta
+Write-Host "       Air.rs Build System                               " -ForegroundColor Magenta
+Write-Host "  ======================================================" -ForegroundColor Magenta
+Write-Host ""
+
+# ============================================================================
+# STEP 1: HARDWARE DETECTION
+# ============================================================================
+Write-Host "  --- Step 1: Hardware Detection ---" -ForegroundColor White
+Write-Host ""
+
+$arch = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
+Write-Info "Architecture: $arch"
+
+# GPU check
+$hasGpu = $false
+$gpuName = ""
+try {
+    $nvsmi = nvidia-smi -L 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $hasGpu = $true
+        $gpuName = ($nvsmi | Select-Object -First 1) -replace '^GPU 0: ', '' -replace ' \(UUID:.*', ''
+        Write-Step "NVIDIA GPU: $gpuName"
+    }
+} catch {
+    Write-Info "No NVIDIA GPU detected (CPU-only builds will work)"
 }
 
-$vsPath = Join-Path $vsInstallPath "VC\Auxiliary\Build\vcvars64.bat"
+# CUDA check
+$hasCuda = $false
+$cudaVersion = ""
+try {
+    $nvccOut = nvcc --version 2>&1 | Select-String "release"
+    if ($nvccOut) {
+        $hasCuda = $true
+        $cudaVersion = ($nvccOut -replace '.*release ', '' -replace ',.*', '')
+        Write-Step "CUDA Toolkit: $cudaVersion"
+    }
+} catch {
+    if ($hasGpu) { Write-Warn "NVIDIA GPU found but CUDA Toolkit not in PATH" }
+}
 
-if (Test-Path $vsPath) {
-    Write-Host "Found vcvars64.bat at $vsPath"
-    # Load MSVC environment variables into PowerShell (auto-detects latest toolset)
-    cmd /c " `"$vsPath`" && set " | Foreach-Object {
-        if ($_ -match "^(.*?)=(.*)$") {
-            Set-Content "env:\$($Matches[1])" $Matches[2]
+# ============================================================================
+# STEP 2: VISUAL STUDIO ENVIRONMENT
+# ============================================================================
+Write-Host ""
+Write-Host "  --- Step 2: Build Environment ---" -ForegroundColor White
+Write-Host ""
+
+# Try vswhere first (cleanest approach)
+$vsLoaded = $false
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+if (Test-Path $vswhere) {
+    $vsInstallPath = & $vswhere -latest -property installationPath 2>$null
+    if ($vsInstallPath) {
+        $vcvars = Join-Path $vsInstallPath "VC\Auxiliary\Build\vcvars64.bat"
+        if (Test-Path $vcvars) {
+            Write-Info "Loading Visual Studio environment..."
+            cmd /c " `"$vcvars`" && set " | ForEach-Object {
+                if ($_ -match "^(.*?)=(.*)$") {
+                    Set-Content "env:\$($Matches[1])" $Matches[2]
+                }
+            }
+            $vsLoaded = $true
+            $vsEdition = Split-Path $vsInstallPath -Leaf
+            Write-Step "VS environment loaded ($vsEdition)"
         }
     }
-    Write-Host "MSVC environment variables loaded."
+}
+
+# Fallback: manual SDK/MSVC detection (same as setup_build_env.ps1)
+if (-not $vsLoaded) {
+    Write-Info "vswhere not found, detecting SDK/MSVC manually..."
+
+    $libPaths = @()
+
+    # Windows SDK
+    $sdkRoot = "C:\Program Files (x86)\Windows Kits\10\Lib"
+    if (Test-Path $sdkRoot) {
+        $sdkVersion = (Get-ChildItem $sdkRoot -Directory |
+            Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+            Sort-Object Name | Select-Object -Last 1).Name
+        if ($sdkVersion) {
+            $sdkUm   = Join-Path $sdkRoot "$sdkVersion\um\$arch"
+            $sdkUcrt = Join-Path $sdkRoot "$sdkVersion\ucrt\$arch"
+            if (Test-Path $sdkUm)   { $libPaths += $sdkUm;   Write-Step "SDK um:   $sdkUm" }
+            if (Test-Path $sdkUcrt) { $libPaths += $sdkUcrt;  Write-Step "SDK ucrt: $sdkUcrt" }
+        }
+    }
+
+    # MSVC toolchain
+    $vsEditions = @('Professional', 'Enterprise', 'Community', 'BuildTools')
+    $vsYears    = @('2022', '2019')
+    foreach ($year in $vsYears) {
+        foreach ($edition in $vsEditions) {
+            $msvcBase = "C:\Program Files\Microsoft Visual Studio\$year\$edition\VC\Tools\MSVC"
+            if (Test-Path $msvcBase) {
+                $msvcVer = (Get-ChildItem $msvcBase -Directory | Sort-Object Name | Select-Object -Last 1).Name
+                $candidate = Join-Path $msvcBase "$msvcVer\lib\$arch"
+                if (Test-Path $candidate) {
+                    $libPaths += $candidate
+                    Write-Step "MSVC lib: $candidate"
+                    break
+                }
+            }
+        }
+        if ($libPaths.Count -ge 3) { break }
+    }
+
+    # CUDA lib
+    $cudaRoot = $env:CUDA_PATH
+    if (-not $cudaRoot) {
+        $cudaCandidates = Get-ChildItem "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA" -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending
+        if ($cudaCandidates) { $cudaRoot = $cudaCandidates[0].FullName }
+    }
+    if ($cudaRoot) {
+        $cudaLib = Join-Path $cudaRoot "lib\$arch"
+        if (Test-Path $cudaLib) { $libPaths += $cudaLib; Write-Step "CUDA lib: $cudaLib" }
+    }
+
+    if ($libPaths.Count -eq 0) {
+        Write-Err "No SDK/MSVC found. Install Visual Studio 2022 with 'Desktop development with C++' workload."
+        exit 1
+    }
+
+    $env:LIB = $libPaths -join ';'
+    Write-Step "Set LIB ($($libPaths.Count) paths)"
+}
+
+# CUDA compatibility flags
+if ($hasCuda) {
+    $env:CL = "/D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
+    Write-Info "Set CUDA/MSVC compatibility flag"
+}
+
+# ============================================================================
+# STEP 3: FEATURE SELECTION
+# ============================================================================
+Write-Host ""
+Write-Host "  --- Step 3: Feature Selection ---" -ForegroundColor White
+Write-Host ""
+
+$features = @()
+
+if ($SkipPrompt) {
+    # Default: enable everything available
+    if ($hasCuda) { $features += 'cuda'; $features += 'flash-attn' }
+    Write-Info "SkipPrompt: auto-selected features: $($features -join ', ')"
 } else {
-    Write-Error "Found VS at $vsInstallPath but could not find vcvars64.bat."
-    exit 1
+    Write-Host "  Available features:" -ForegroundColor White
+    Write-Host ""
+
+    # CUDA
+    if ($hasCuda) {
+        $label = "cuda         - NVIDIA GPU acceleration (CUDA $cudaVersion detected)"
+        Write-Host "    [1] $label" -ForegroundColor Green
+    } else {
+        Write-Host "    [1] cuda         - NVIDIA GPU (not available - no CUDA)" -ForegroundColor DarkGray
+    }
+
+    # Flash Attention
+    if ($hasCuda) {
+        Write-Host "    [2] flash-attn   - Flash Attention 2 (requires CUDA)" -ForegroundColor Green
+    } else {
+        Write-Host "    [2] flash-attn   - Flash Attention 2 (requires CUDA)" -ForegroundColor DarkGray
+    }
+
+    # Python
+    Write-Host "    [3] python       - PyO3 Python bindings" -ForegroundColor Green
+
+    # CPU only
+    Write-Host "    [0] (none)       - CPU-only build" -ForegroundColor Yellow
+
+    Write-Host ""
+    $defaultChoice = if ($hasCuda) { "1,2" } else { "0" }
+    $choice = Read-Host "  Select features (comma-separated, e.g. 1,2) [default: $defaultChoice]"
+    if ([string]::IsNullOrWhiteSpace($choice)) { $choice = $defaultChoice }
+
+    $selections = $choice -split ',' | ForEach-Object { $_.Trim() }
+
+    foreach ($sel in $selections) {
+        switch ($sel) {
+            '1' {
+                if ($hasCuda) { $features += 'cuda' }
+                else { Write-Warn "Skipping cuda - CUDA Toolkit not detected" }
+            }
+            '2' {
+                if ($hasCuda) { $features += 'flash-attn' }
+                else { Write-Warn "Skipping flash-attn - requires CUDA" }
+            }
+            '3' { $features += 'python' }
+            '0' { }
+            default { Write-Warn "Unknown selection: $sel (ignored)" }
+        }
+    }
 }
 
-# 3. Set CUDA compute capability and build flags
-$env:CUDA_COMPUTE_CAP = "86"  # RTX 3060
+# ============================================================================
+# STEP 4: PRE-BUILD CLEANUP
+# ============================================================================
+Write-Host ""
+Write-Host "  --- Step 4: Pre-Build ---" -ForegroundColor White
+Write-Host ""
 
-# CUDA 12.1's nvcc doesn't officially support MSVC 19.36+ — suppress the STL version check
-# bindgen_cuda doesn't forward NVCC_APPEND_FLAGS, so we use the CL env var which cl.exe reads directly
-$env:CL = "/D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
+# Clean stale stdc++.lib stubs (the old 8-byte ones that cause LNK1107)
+$staleStubs = Get-ChildItem -Path ".\target" -Recurse -Filter "stdc++.lib" -ErrorAction SilentlyContinue
+foreach ($stub in $staleStubs) {
+    $size = $stub.Length
+    if ($size -lt 72) {
+        Remove-Item $stub.FullName -Force
+        Write-Info "Removed invalid stdc++.lib stub ($size bytes) at $($stub.FullName)"
+    }
+}
 
-# Clear any stale RUSTFLAGS that may contain broken paths with spaces
-$env:RUSTFLAGS = $null
+# Determine build profile
+$profile = if ($DebugBuild) { "" } else { "--release" }
+$profileName = if ($DebugBuild) { "debug" } else { "release" }
 
-# 4. Build
-Write-Host "`n--- [ Step 3: Building Air.rs ] ---" -ForegroundColor Cyan
-cargo build 2>&1 | Tee-Object -Variable buildOutput
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "`n--- BUILD FAILED ---" -ForegroundColor Red
+# Build feature string
+$featureArg = ""
+if ($features.Count -gt 0) {
+    $featureStr = $features -join ','
+    $featureArg = "--features $featureStr"
+}
+
+# ============================================================================
+# STEP 5: BUILD
+# ============================================================================
+Write-Host ""
+Write-Host "  --- Step 5: Building Air.rs ($profileName) ---" -ForegroundColor White
+Write-Host ""
+
+$cmd = "cargo build $profile $featureArg"
+Write-Info "Running: $cmd"
+Write-Host ""
+
+# Execute build
+$buildStart = Get-Date
+Invoke-Expression $cmd
+$buildResult = $LASTEXITCODE
+$buildTime = ((Get-Date) - $buildStart).TotalSeconds
+
+Write-Host ""
+if ($buildResult -eq 0) {
+    Write-Host "  ======================================================" -ForegroundColor Green
+    Write-Host "       BUILD SUCCEEDED                                   " -ForegroundColor Green
+    Write-Host "  ======================================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Profile:  $profileName" -ForegroundColor White
+    Write-Host "  Features: $(if ($features.Count -gt 0) { $features -join ', ' } else { '(none - CPU only)' })" -ForegroundColor White
+    Write-Host "  Time:     $([math]::Round($buildTime, 1))s" -ForegroundColor White
+
+    $binaryPath = ".\target\$profileName\air-rs.exe"
+    if (Test-Path $binaryPath) {
+        $binarySize = [math]::Round((Get-Item $binaryPath).Length / 1MB, 1)
+        Write-Host "  Binary:   $binaryPath ($binarySize MB)" -ForegroundColor White
+    }
+    Write-Host ""
+} else {
+    Write-Host "  ======================================================" -ForegroundColor Red
+    Write-Host "       BUILD FAILED                                      " -ForegroundColor Red
+    Write-Host "  ======================================================" -ForegroundColor Red
+    Write-Host ""
+
+    # Diagnose common failures
+    Write-Host "  Common fixes:" -ForegroundColor Yellow
+    Write-Host "    - LNK1181 (kernel32.lib):  Run .\setup_build_env.ps1" -ForegroundColor Yellow
+    Write-Host "    - LNK1107 (stdc++.lib):    cargo clean, then re-run this script" -ForegroundColor Yellow
+    Write-Host "    - CUDA errors:             Ensure nvcc --version works" -ForegroundColor Yellow
+    Write-Host "    - Out of memory:           Close other programs, try --debug" -ForegroundColor Yellow
+    Write-Host ""
     exit 1
 }
-Write-Host "`n--- BUILD SUCCEEDED ---" -ForegroundColor Green

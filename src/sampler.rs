@@ -152,6 +152,7 @@ impl Sampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::Device;
 
     #[test]
     fn test_greedy_sampling() -> Result<()> {

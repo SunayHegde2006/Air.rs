@@ -91,7 +91,7 @@ fn main() -> Result<()> {
     println!("🚀 Generating (max {} tokens)...", args.max_tokens);
     println!("─────────────────────────────────────────────────");
 
-    let output = generator.generate(
+    let _output = generator.generate(
         &loader.tokenizer,
         &args.prompt,
         args.max_tokens,
@@ -99,7 +99,6 @@ fn main() -> Result<()> {
     )?;
 
     println!("─────────────────────────────────────────────────");
-    println!("✅ Generated {} tokens", output.split_whitespace().count());
 
     Ok(())
 }

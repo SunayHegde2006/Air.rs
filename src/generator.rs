@@ -13,21 +13,59 @@
 //!
 //! Steady-state RSS ≈ embedding + 1–2 layers + KV cache
 //! ```
+//!
+//! Token delivery modes:
+//! - `generate()`: Synchronous, blocking. Prints tokens to stdout.
+//! - `generate_stream()`: Async. Sends `GenerationEvent`s via mpsc channel.
 
 use crate::kv_cache::KvCacheManager;
+use crate::metrics::{InferenceMetrics, LayerTiming};
 use crate::model::{self, ModelConfig};
-use crate::ops;
+use crate::ops::{self, RopeCache};
 use crate::sampler::{Sampler, SamplerConfig};
 use crate::tokenizer::Tokenizer;
 use crate::weight_streamer::WeightStreamer;
 use anyhow::Result;
 use candle_core::{Device, Module, Tensor};
+use std::time::Instant;
+use tokio::sync::mpsc;
+
+/// Maximum tokens processed in a single prefill chunk.
+/// Keeps attention matrix memory bounded for long prompts.
+const PREFILL_CHUNK_SIZE: usize = 512;
+
+// ---------------------------------------------------------------------------
+// Generation Events — async token delivery
+// ---------------------------------------------------------------------------
+
+/// Events emitted during async generation via `generate_stream()`.
+#[derive(Debug, Clone)]
+pub enum GenerationEvent {
+    /// A decoded token string (may be a partial UTF-8 character for BPE tokens).
+    Token(String),
+    /// Generation finished successfully. Contains final metrics.
+    Done(GenerationMetricsSummary),
+    /// Generation encountered an error.
+    Error(String),
+}
+
+/// Lightweight metrics snapshot sent with `GenerationEvent::Done`.
+#[derive(Debug, Clone)]
+pub struct GenerationMetricsSummary {
+    pub prompt_tokens: usize,
+    pub generated_tokens: usize,
+    pub tokens_per_second: f64,
+    pub time_to_first_token_ms: f64,
+    pub total_time_secs: f64,
+}
 
 pub struct InferenceGenerator {
     kv_cache: KvCacheManager,
     sampler: Sampler,
     config: ModelConfig,
     device: Device,
+    metrics: InferenceMetrics,
+    rope_cache: RopeCache,
 }
 
 impl InferenceGenerator {
@@ -42,7 +80,7 @@ impl InferenceGenerator {
             })
             .map_err(|e| anyhow::anyhow!("Failed to create device: {e}"))?;
 
-        let kv_cache = KvCacheManager::new(device.clone(), config.n_layers);
+        let kv_cache = KvCacheManager::new_for_device(device.clone(), config.n_layers);
         let sampler = Sampler::new(sampler_config);
 
         Ok(Self {
@@ -50,10 +88,12 @@ impl InferenceGenerator {
             sampler,
             config,
             device,
+            metrics: InferenceMetrics::new(),
+            rope_cache: RopeCache::new(),
         })
     }
 
-    /// Generate tokens from a prompt using S.L.I.P. layer streaming.
+    /// Generate tokens from a prompt using S.L.I.P. layer streaming (synchronous).
     ///
     /// Weights are streamed from the mmap'd GGUF file one layer at a time.
     /// Only 1–2 layers' worth of quantized data is resident in RAM at any point.
@@ -64,6 +104,10 @@ impl InferenceGenerator {
         max_tokens: usize,
         streamer: &WeightStreamer,
     ) -> Result<String> {
+        // ── Reset metrics for this generation ─────────────────────────
+        self.metrics = InferenceMetrics::new();
+        self.metrics.start();
+
         // ── Load persistent weights (kept for entire session) ─────────
         println!("Loading embedding table...");
         let embedding_table = streamer.load_embedding(&self.device)?;
@@ -74,94 +118,45 @@ impl InferenceGenerator {
         // ── Tokenize prompt ──────────────────────────────────────────
         let mut tokens: Vec<u32> = vec![tokenizer.bos_id];
         tokens.extend(tokenizer.encode(prompt));
+        self.metrics.prompt_tokens = tokens.len();
         println!("Prompt tokens: {:?} ({} tokens)", &tokens, tokens.len());
 
         let mut generated_tokens: Vec<u32> = Vec::new();
         let mut all_tokens = tokens.clone();
 
+        // ── Chunked prefill for long prompts ─────────────────────────
+        // Process prompt in 512-token chunks to avoid OOM on long sequences.
+        // Each chunk builds up the KV cache incrementally.
+        let prefill_done = if all_tokens.len() > PREFILL_CHUNK_SIZE {
+            self.prefill_chunks(
+                &all_tokens,
+                &embedding_table,
+                &final_norm_weight,
+                &lm_head,
+                streamer,
+            )?;
+            true
+        } else {
+            false
+        };
+
         // ── Generation loop ──────────────────────────────────────────
         for step in 0..max_tokens {
-            let input_tokens = if step == 0 {
-                &all_tokens[..]
-            } else {
-                &all_tokens[all_tokens.len() - 1..]
-            };
-            let start_pos = if step == 0 { 0 } else { all_tokens.len() - 1 };
+            let next_token = self.generate_step(
+                step,
+                &all_tokens,
+                &embedding_table,
+                &final_norm_weight,
+                &lm_head,
+                streamer,
+                prefill_done,
+            )?;
 
-            // Embedding lookup
-            let token_tensor = Tensor::new(input_tokens, &self.device)
-                .map_err(|e| anyhow::anyhow!("Token tensor creation failed: {e}"))?;
-            let mut hidden = embedding_table
-                .index_select(&token_tensor, 0)
-                .map_err(|e| anyhow::anyhow!("Embedding lookup failed: {e}"))?;
-            hidden = hidden
-                .unsqueeze(0)
-                .map_err(|e| anyhow::anyhow!("Unsqueeze failed: {e}"))?;
-
-            // ── Layer-streamed forward pass ───────────────────────────
-            // RSS: only 1 layer's quantized weights in memory at a time
-            for layer_id in 0..self.config.n_layers {
-                // Prefetch NEXT layer while GPU processes current
-                if layer_id + 1 < self.config.n_layers {
-                    streamer.prefetch_layer(layer_id + 1);
-                }
-
-                // Materialize this layer's weights (RSS += ~130 MB for 7B)
-                let weights = streamer.load_layer(layer_id, &self.device)?;
-
-                // Load KV cache for this layer
-                let (cached_k, cached_v) = self.kv_cache.load_to_device(layer_id)
-                    .map_err(|e| anyhow::anyhow!("KV cache load failed at layer {layer_id}: {e}"))?;
-
-                // Run transformer block (quantized matmul — weights stay compressed)
-                let (new_hidden, new_k, new_v) = model::transformer_block(
-                    &hidden,
-                    &weights,
-                    cached_k.as_ref(),
-                    cached_v.as_ref(),
-                    &self.config,
-                    start_pos,
-                )
-                .map_err(|e| anyhow::anyhow!("Transformer block {} failed: {e}", layer_id))?;
-
-                hidden = new_hidden;
-
-                // Save updated KV cache
-                self.kv_cache.save_from_device(layer_id, &new_k, &new_v)
-                    .map_err(|e| anyhow::anyhow!("KV save failed at layer {layer_id}: {e}"))?;
-
-                // weights drops here → RSS -= ~130 MB
-                drop(weights);
-
-                // Release previous layer's mmap pages from physical RAM
-                if layer_id > 0 {
-                    streamer.release_layer(layer_id - 1);
-                }
+            // Record timing for this token
+            if step == 0 {
+                self.metrics.mark_first_token();
             }
-            // Release the last layer's pages
-            streamer.release_layer(self.config.n_layers - 1);
-
-            // ── Final norm + logit projection ────────────────────────
-            hidden = ops::rms_norm(&hidden, &final_norm_weight, self.config.rms_norm_eps)
-                .map_err(|e| anyhow::anyhow!("Final RMSNorm failed: {e}"))?;
-
-            let seq_len = hidden.dim(1)
-                .map_err(|e| anyhow::anyhow!("Dim error: {e}"))?;
-            let last_hidden = hidden
-                .narrow(1, seq_len - 1, 1)
-                .map_err(|e| anyhow::anyhow!("Narrow failed: {e}"))?
-                .squeeze(1)
-                .map_err(|e| anyhow::anyhow!("Squeeze failed: {e}"))?;
-
-            // Quantized lm_head projection
-            let logits = lm_head.forward(&last_hidden)
-                .map_err(|e| anyhow::anyhow!("lm_head forward failed: {e}"))?;
-            let logits = logits.squeeze(0)
-                .map_err(|e| anyhow::anyhow!("Logits squeeze failed: {e}"))?;
-
-            // ── Sample next token ────────────────────────────────────
-            let next_token = self.sampler.sample(&logits, &all_tokens)
-                .map_err(|e| anyhow::anyhow!("Sampling failed: {e}"))?;
+            self.metrics.record_token();
 
             if next_token == tokenizer.eos_id {
                 println!("\n[EOS]");
@@ -170,6 +165,9 @@ impl InferenceGenerator {
 
             let token_str = tokenizer.decode_token(next_token);
             print!("{}", token_str);
+            // Flush immediately so tokens appear in real-time
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
 
             generated_tokens.push(next_token);
             all_tokens.push(next_token);
@@ -177,12 +175,378 @@ impl InferenceGenerator {
 
         println!();
 
+        // ── Print metrics summary ─────────────────────────────────────
+        println!("{}", self.metrics.summary());
+
         let output = tokenizer.decode(&generated_tokens);
         Ok(output)
+    }
+
+    /// Generate tokens asynchronously, sending events via an mpsc channel.
+    ///
+    /// Returns a `Receiver<GenerationEvent>` that the caller can poll.
+    /// The generation runs on the current thread (CPU-bound work that shouldn't
+    /// be spawned onto the async runtime's worker pool).
+    pub fn generate_stream(
+        &mut self,
+        tokenizer: &Tokenizer,
+        prompt: &str,
+        max_tokens: usize,
+        streamer: &WeightStreamer,
+    ) -> mpsc::Receiver<GenerationEvent> {
+        let (tx, rx) = mpsc::channel(32);
+
+        // Run synchronously but send events through the channel.
+        // The caller can wrap this in spawn_blocking if needed.
+        let result = self.generate_stream_inner(tokenizer, prompt, max_tokens, streamer, &tx);
+
+        if let Err(e) = result {
+            // Best-effort send — receiver may have been dropped
+            let _ = tx.try_send(GenerationEvent::Error(e.to_string()));
+        }
+
+        rx
+    }
+
+    fn generate_stream_inner(
+        &mut self,
+        tokenizer: &Tokenizer,
+        prompt: &str,
+        max_tokens: usize,
+        streamer: &WeightStreamer,
+        tx: &mpsc::Sender<GenerationEvent>,
+    ) -> Result<()> {
+        self.metrics = InferenceMetrics::new();
+        self.metrics.start();
+
+        let embedding_table = streamer.load_embedding(&self.device)?;
+        let (final_norm_weight, lm_head) = streamer.load_output(&self.device)?;
+
+        let mut tokens: Vec<u32> = vec![tokenizer.bos_id];
+        tokens.extend(tokenizer.encode(prompt));
+        self.metrics.prompt_tokens = tokens.len();
+
+        let mut generated_tokens: Vec<u32> = Vec::new();
+        let mut all_tokens = tokens.clone();
+
+        // ── Chunked prefill for long prompts ─────────────────────────
+        let prefill_done = if all_tokens.len() > PREFILL_CHUNK_SIZE {
+            self.prefill_chunks(
+                &all_tokens,
+                &embedding_table,
+                &final_norm_weight,
+                &lm_head,
+                streamer,
+            )?;
+            true
+        } else {
+            false
+        };
+
+        for step in 0..max_tokens {
+            let next_token = self.generate_step(
+                step,
+                &all_tokens,
+                &embedding_table,
+                &final_norm_weight,
+                &lm_head,
+                streamer,
+                prefill_done,
+            )?;
+
+            if step == 0 {
+                self.metrics.mark_first_token();
+            }
+            self.metrics.record_token();
+
+            if next_token == tokenizer.eos_id {
+                break;
+            }
+
+            let token_str = tokenizer.decode_token(next_token).to_string();
+            // Send token event — if receiver dropped, stop generating
+            if tx.try_send(GenerationEvent::Token(token_str)).is_err() {
+                break;
+            }
+
+            generated_tokens.push(next_token);
+            all_tokens.push(next_token);
+        }
+
+        // Send completion event with metrics
+        let summary = self.metrics.summary();
+        let elapsed = self.metrics.elapsed_secs();
+        let _ = tx.try_send(GenerationEvent::Done(GenerationMetricsSummary {
+            prompt_tokens: self.metrics.prompt_tokens,
+            generated_tokens: generated_tokens.len(),
+            tokens_per_second: if elapsed > 0.0 {
+                generated_tokens.len() as f64 / elapsed
+            } else {
+                0.0
+            },
+            time_to_first_token_ms: self.metrics.ttft_ms(),
+            total_time_secs: elapsed,
+        }));
+
+        // Also print to stdout for parity
+        println!("{}", summary);
+
+        Ok(())
+    }
+
+    /// Chunked prefill: process prompt in PREFILL_CHUNK_SIZE-token chunks.
+    ///
+    /// Runs all chunks except the last remainder through the full transformer
+    /// to build up the KV cache. The remainder is handled by `generate_step()`
+    /// at step 0 to produce logits for sampling.
+    ///
+    /// This prevents OOM from materializing full N×N attention matrices for
+    /// long prompts. Each chunk only creates a (chunk_size × total_past) matrix.
+    fn prefill_chunks(
+        &mut self,
+        all_tokens: &[u32],
+        embedding_table: &Tensor,
+        _final_norm_weight: &Tensor,  // not used — we skip logit projection
+        _lm_head: &candle_core::quantized::QMatMul,
+        streamer: &WeightStreamer,
+    ) -> Result<()> {
+        // Process all complete chunks (leave remainder for generate_step)
+        let n_full_chunks = all_tokens.len() / PREFILL_CHUNK_SIZE;
+        if n_full_chunks == 0 {
+            return Ok(());
+        }
+
+        println!(
+            "Chunked prefill: {} tokens → {} chunks of {}",
+            all_tokens.len(),
+            n_full_chunks,
+            PREFILL_CHUNK_SIZE
+        );
+
+        for chunk_idx in 0..n_full_chunks {
+            let chunk_start = chunk_idx * PREFILL_CHUNK_SIZE;
+            let chunk_end = chunk_start + PREFILL_CHUNK_SIZE;
+            let chunk_tokens = &all_tokens[chunk_start..chunk_end];
+
+            // Embedding lookup for this chunk
+            let token_tensor = Tensor::new(chunk_tokens, &self.device)
+                .map_err(|e| anyhow::anyhow!("Chunk token tensor failed: {e}"))?;
+            let mut hidden = embedding_table
+                .index_select(&token_tensor, 0)
+                .map_err(|e| anyhow::anyhow!("Chunk embedding failed: {e}"))?;
+            hidden = hidden
+                .unsqueeze(0)
+                .map_err(|e| anyhow::anyhow!("Chunk unsqueeze failed: {e}"))?;
+
+            // Layer-streamed forward pass (same as generate_step, but no logits)
+            for layer_id in 0..self.config.n_layers {
+                if layer_id + 1 < self.config.n_layers {
+                    streamer.prefetch_layer(layer_id + 1);
+                }
+
+                let io_start = Instant::now();
+                let weights = streamer.load_layer(layer_id, &self.device)?;
+                let (cached_k, cached_v) = self.kv_cache.load_to_device(layer_id)
+                    .map_err(|e| anyhow::anyhow!("KV cache load failed at layer {layer_id}: {e}"))?;
+                let io_elapsed = io_start.elapsed();
+
+                let compute_start = Instant::now();
+                let (new_hidden, new_k, new_v) = model::transformer_block(
+                    &hidden,
+                    &weights,
+                    cached_k.as_ref(),
+                    cached_v.as_ref(),
+                    &self.config,
+                    chunk_start, // position offset for RoPE
+                    Some(&self.rope_cache),
+                )
+                .map_err(|e| anyhow::anyhow!("Prefill chunk {} layer {} failed: {e}", chunk_idx, layer_id))?;
+                let compute_elapsed = compute_start.elapsed();
+
+                hidden = new_hidden;
+
+                self.metrics.record_layer(LayerTiming {
+                    compute: compute_elapsed,
+                    io: io_elapsed,
+                    h2d: std::time::Duration::ZERO,
+                });
+
+                self.kv_cache.save_from_device(layer_id, &new_k, &new_v)
+                    .map_err(|e| anyhow::anyhow!("KV save failed at layer {layer_id}: {e}"))?;
+
+                drop(weights);
+
+                if layer_id > 0 {
+                    streamer.release_layer(layer_id - 1);
+                }
+            }
+            streamer.release_layer(self.config.n_layers - 1);
+
+            // Hidden state from this chunk is discarded — we only needed the KV cache updates.
+            // (No final norm or logit projection for prefill chunks.)
+            println!("  Chunk {}/{} prefilled ({} tokens at pos {})", chunk_idx + 1, n_full_chunks, PREFILL_CHUNK_SIZE, chunk_start);
+        }
+
+        Ok(())
+    }
+
+    /// Core single-step generation logic shared by sync and async paths.
+    ///
+    /// `prefill_done`: if true, the prompt was already prefilled via `prefill_chunks()`
+    /// and step 0 should only process the last chunk (or single token if fully prefilled).
+    fn generate_step(
+        &mut self,
+        step: usize,
+        all_tokens: &[u32],
+        embedding_table: &Tensor,
+        final_norm_weight: &Tensor,
+        lm_head: &candle_core::quantized::QMatMul,
+        streamer: &WeightStreamer,
+        prefill_done: bool,
+    ) -> Result<u32> {
+        let (input_tokens, start_pos) = if step == 0 && !prefill_done {
+            // First step, no chunked prefill — process entire prompt
+            (&all_tokens[..], 0)
+        } else if step == 0 && prefill_done {
+            // Chunked prefill already processed all but the last chunk.
+            // The last chunk still needs processing to produce logits.
+            let remaining_start = (all_tokens.len() / PREFILL_CHUNK_SIZE) * PREFILL_CHUNK_SIZE;
+            if remaining_start < all_tokens.len() {
+                (&all_tokens[remaining_start..], remaining_start)
+            } else {
+                // All tokens were evenly chunked — single token mode
+                (&all_tokens[all_tokens.len() - 1..], all_tokens.len() - 1)
+            }
+        } else {
+            // Autoregressive — single token
+            (&all_tokens[all_tokens.len() - 1..], all_tokens.len() - 1)
+        };
+
+        // Embedding lookup
+        let token_tensor = Tensor::new(input_tokens, &self.device)
+            .map_err(|e| anyhow::anyhow!("Token tensor creation failed: {e}"))?;
+        let mut hidden = embedding_table
+            .index_select(&token_tensor, 0)
+            .map_err(|e| anyhow::anyhow!("Embedding lookup failed: {e}"))?;
+        hidden = hidden
+            .unsqueeze(0)
+            .map_err(|e| anyhow::anyhow!("Unsqueeze failed: {e}"))?;
+
+        // ── Layer-streamed forward pass ───────────────────────────
+        let layer_loop_start = Instant::now();
+        for layer_id in 0..self.config.n_layers {
+            if layer_id + 1 < self.config.n_layers {
+                streamer.prefetch_layer(layer_id + 1);
+            }
+
+            // ── TIMING: IO (weight loading) ───────────────────────
+            // Only collect per-layer timing during prefill (step 0).
+            // During decode, Instant::now() calls add measurable overhead
+            // across all layers × all tokens. (P2-2: metrics gating)
+            let io_start = if step == 0 { Some(Instant::now()) } else { None };
+            let weights = streamer.load_layer(layer_id, &self.device)?;
+            let (cached_k, cached_v) = self.kv_cache.load_to_device(layer_id)
+                .map_err(|e| anyhow::anyhow!("KV cache load failed at layer {layer_id}: {e}"))?;
+            let io_elapsed = io_start.map(|s| s.elapsed());
+
+            // ── TIMING: Compute (transformer block) ───────────────
+            let compute_start = if step == 0 { Some(Instant::now()) } else { None };
+            let (new_hidden, new_k, new_v) = model::transformer_block(
+                &hidden,
+                &weights,
+                cached_k.as_ref(),
+                cached_v.as_ref(),
+                &self.config,
+                start_pos,
+                Some(&self.rope_cache),
+            )
+            .map_err(|e| anyhow::anyhow!("Transformer block {} failed: {e}", layer_id))?;
+            let compute_elapsed = compute_start.map(|s| s.elapsed());
+
+            hidden = new_hidden;
+
+            // Only record layer metrics during prefill
+            if let (Some(io), Some(compute)) = (io_elapsed, compute_elapsed) {
+                self.metrics.record_layer(LayerTiming {
+                    compute,
+                    io,
+                    h2d: std::time::Duration::ZERO,
+                });
+            }
+
+            // ── TIMING: KV save ───────────────────────────────────
+            let kv_start = if step == 0 { Some(Instant::now()) } else { None };
+            self.kv_cache.save_from_device(layer_id, &new_k, &new_v)
+                .map_err(|e| anyhow::anyhow!("KV save failed at layer {layer_id}: {e}"))?;
+            let kv_elapsed = kv_start.map(|s| s.elapsed());
+
+            // ── Progress logging ──────────────────────────────────
+            // Show per-layer timing on first token (prefill is the slowest step)
+            if let (Some(io), Some(compute), Some(kv)) = (io_elapsed, compute_elapsed, kv_elapsed) {
+                if step == 0 {
+                    eprint!(
+                        "\r  Layer {:>2}/{} │ IO {:>6.1}ms │ Compute {:>6.1}ms │ KV {:>5.1}ms │ Total {:>6.1}ms",
+                        layer_id + 1,
+                        self.config.n_layers,
+                        io.as_secs_f64() * 1000.0,
+                        compute.as_secs_f64() * 1000.0,
+                        kv.as_secs_f64() * 1000.0,
+                        (io + compute + kv).as_secs_f64() * 1000.0,
+                    );
+                }
+            }
+
+            drop(weights);
+
+            if layer_id > 0 {
+                streamer.release_layer(layer_id - 1);
+            }
+        }
+        streamer.release_layer(self.config.n_layers - 1);
+
+        // Print first-token layer summary
+        if step == 0 {
+            let layer_total = layer_loop_start.elapsed();
+            eprintln!(
+                "\n  ✓ Prefill: {} layers in {:.1}ms ({:.1}ms/layer avg)",
+                self.config.n_layers,
+                layer_total.as_secs_f64() * 1000.0,
+                layer_total.as_secs_f64() * 1000.0 / self.config.n_layers as f64,
+            );
+        }
+
+        // ── Final norm + logit projection ────────────────────────
+        hidden = ops::rms_norm(&hidden, final_norm_weight, self.config.rms_norm_eps)
+            .map_err(|e| anyhow::anyhow!("Final RMSNorm failed: {e}"))?;
+
+        let seq_len = hidden.dim(1)
+            .map_err(|e| anyhow::anyhow!("Dim error: {e}"))?;
+        let last_hidden = hidden
+            .narrow(1, seq_len - 1, 1)
+            .map_err(|e| anyhow::anyhow!("Narrow failed: {e}"))?
+            .squeeze(1)
+            .map_err(|e| anyhow::anyhow!("Squeeze failed: {e}"))?;
+
+        let logits = lm_head.forward(&last_hidden)
+            .map_err(|e| anyhow::anyhow!("lm_head forward failed: {e}"))?;
+        let logits = logits.squeeze(0)
+            .map_err(|e| anyhow::anyhow!("Logits squeeze failed: {e}"))?;
+
+        // ── Sample next token ────────────────────────────────────
+        let next_token = self.sampler.sample(&logits, all_tokens)
+            .map_err(|e| anyhow::anyhow!("Sampling failed: {e}"))?;
+
+        Ok(next_token)
     }
 
     /// Reset the KV cache (for starting a new conversation).
     pub fn reset(&mut self) {
         self.kv_cache.clear();
+        self.metrics = InferenceMetrics::new();
+    }
+
+    /// Get a reference to the current metrics (for external consumers).
+    pub fn metrics(&self) -> &InferenceMetrics {
+        &self.metrics
     }
 }
