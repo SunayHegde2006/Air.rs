@@ -34,10 +34,12 @@
 //! | `vulkan_hal`        | 6     | Vulkan 1.2 HAL backend (feature-gated) |
 //! | `metal_hal`         | 6     | Metal framework HAL backend (feature-gated, macOS only) |
 //! | `async_io`          | 6     | Platform async I/O: io_uring (Linux) / IOCP (Windows) |
+//! | `execution_cursor`  | 8     | ExecutionCursor + MoE expert activation hook |
+//! | `gpu_direct`        | 8     | GPUDirect Storage NVMe→GPU DMA integration |
 //!
 //! ## Status
 //!
-//! Phases 1–6 complete. All modules are testable with in-memory mocks
+//! Phases 1–8 complete. All modules are testable with in-memory mocks
 //! and CPU-only HAL backends — no real GPU or storage driver needed.
 
 // Phase 1: Foundation scaffold
@@ -81,6 +83,24 @@ pub mod vulkan_hal;
 pub mod metal_hal;
 pub mod async_io;
 
+// Phase 7: Multi-format readers, mmap, tests, validation
+pub mod safetensors;
+pub mod pytorch;
+pub mod onnx;
+pub mod mmap_storage;
+#[cfg(test)]
+pub mod integration_tests;
+#[cfg(test)]
+pub mod chaos_tests;
+#[cfg(test)]
+pub mod benchmarks;
+#[cfg(test)]
+pub mod e2e_validation;
+
+// Phase 8: ExecutionCursor (MoE), GPUDirect Storage, serde config
+pub mod execution_cursor;
+pub mod gpu_direct;
+
 // Re-export the most commonly used types at crate level.
 pub use types::{DType, GpuPtr, ResidencyState, TensorClass, TensorId, TierId};
 pub use meta::TensorMeta;
@@ -99,6 +119,7 @@ pub use compat::{
     GgufHeader, GgufMetadata, GgufTensorInfo, GgufModel, ModelArchitecture,
     CompatError, normalize_tensor_name, classify_tensor, parse_gguf_header,
     parse_metadata_kv, parse_tensor_index, parse_gguf_model,
+    ModelFormat, UnifiedTensorInfo, UnifiedModel, detect_format, parse_model_file,
 };
 pub use session::{StrixSession, SessionGuard, SessionState, SessionError};
 pub use gpu_alloc::{GpuAllocation, PinnedBuffer};
@@ -108,3 +129,10 @@ pub use scheduler_thread::{SchedulerThread, SchedulerWork, SchedulerStats};
 pub use security::{SecureAllocator, BoundsCheckedPtr, BoundsError, OwnerToken, ShardedRwLock, SecurityAuditLog, SecurityEvent};
 pub use gpu_tensor_view::{GpuTensorView, ViewError};
 pub use async_io::PlatformStorageHal;
+pub use mmap_storage::MmapStorageHal;
+pub use config::ConfigError;
+pub use execution_cursor::{
+    ExecutionCursor, LayerPhase, ExpertActivation,
+    ExpertActivationHook, default_expert_hook,
+};
+pub use gpu_direct::{GdsCapability, GdsStorageHal, GdsTransfer, GdsTransferStatus, GdsStats};

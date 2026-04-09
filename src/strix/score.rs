@@ -8,7 +8,7 @@
 //! ```
 
 /// Weights for the four residency score components.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct ScoreWeights {
     /// Urgency weight (how close is the tensor to being needed?).
     pub urgency: f32,

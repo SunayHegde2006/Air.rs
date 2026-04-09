@@ -250,7 +250,7 @@ foreach ($stub in $staleStubs) {
 }
 
 # Determine build profile
-$profile = if ($DebugBuild) { "" } else { "--release" }
+$buildProfile = if ($DebugBuild) { "" } else { "--release" }
 $profileName = if ($DebugBuild) { "debug" } else { "release" }
 
 # Build feature string
@@ -267,7 +267,7 @@ Write-Host ""
 Write-Host "  --- Step 5: Building Air.rs ($profileName) ---" -ForegroundColor White
 Write-Host ""
 
-$cmd = "cargo build $profile $featureArg"
+$cmd = "cargo build $buildProfile $featureArg"
 Write-Info "Running: $cmd"
 Write-Host ""
 

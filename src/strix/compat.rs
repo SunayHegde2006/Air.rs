@@ -14,11 +14,12 @@
 
 use super::types::{DType, TensorClass, tensor_bytes};
 use std::collections::HashMap;
+use std::path::Path;
 
 // ── GGUF Wire Constants ──────────────────────────────────────────────────
 
-/// GGUF magic number: `GGUF` in little-endian (`0x46475547`).
-pub const GGUF_MAGIC: u32 = 0x4647_5547;
+/// GGUF magic number: `GGUF` in little-endian = bytes [0x47, 0x47, 0x55, 0x46].
+pub const GGUF_MAGIC: u32 = 0x4655_4747;
 /// Minimum supported GGUF version.
 pub const GGUF_VERSION_MIN: u32 = 2;
 /// Maximum supported GGUF version.
@@ -320,8 +321,7 @@ pub fn normalize_tensor_name(raw: &str) -> NormalizedName {
 pub fn classify_tensor(norm: &NormalizedName) -> TensorClass {
     match &norm.component {
         TensorComponent::TokenEmbed
-        | TensorComponent::OutputWeight
-        | TensorComponent::OutputNorm => TensorClass::A,
+        | TensorComponent::OutputWeight => TensorClass::A,
 
         TensorComponent::AttnQ
         | TensorComponent::AttnK
@@ -331,7 +331,9 @@ pub fn classify_tensor(norm: &NormalizedName) -> TensorClass {
         | TensorComponent::FfnUp
         | TensorComponent::FfnDown => TensorClass::B,
 
-        TensorComponent::AttnNorm | TensorComponent::FfnNorm => TensorClass::A,
+        TensorComponent::AttnNorm
+        | TensorComponent::FfnNorm
+        | TensorComponent::OutputNorm => TensorClass::C,
 
         TensorComponent::Other(_) => {
             if norm.layer.is_some() {
@@ -634,6 +636,8 @@ pub enum CompatError {
     UnsupportedKvType(u32),
     /// I/O error reading the model file.
     Io(std::io::Error),
+    /// Error from a non-GGUF format parser.
+    FormatError(String),
 }
 
 impl std::fmt::Display for CompatError {
@@ -647,6 +651,7 @@ impl std::fmt::Display for CompatError {
             CompatError::InvalidString => write!(f, "invalid UTF-8 in GGUF string"),
             CompatError::UnsupportedKvType(t) => write!(f, "unsupported GGUF KV type: {}", t),
             CompatError::Io(e) => write!(f, "I/O error: {}", e),
+            CompatError::FormatError(e) => write!(f, "format error: {}", e),
         }
     }
 }
@@ -819,9 +824,9 @@ mod tests {
     }
 
     #[test]
-    fn classify_norm_as_class_a() {
+    fn classify_norm_as_class_c() {
         let norm = normalize_tensor_name("blk.3.attn_norm.weight");
-        assert_eq!(classify_tensor(&norm), TensorClass::A);
+        assert_eq!(classify_tensor(&norm), TensorClass::C);
     }
 
     #[test]
@@ -863,4 +868,224 @@ mod tests {
         // Unknown falls back to F32
         assert_eq!(gguf_type_to_dtype(255), DType::F32);
     }
+
+    #[test]
+    fn detect_format_by_extension() {
+        assert_eq!(detect_format(Path::new("model.gguf")), ModelFormat::Gguf);
+        assert_eq!(detect_format(Path::new("model.safetensors")), ModelFormat::SafeTensors);
+        assert_eq!(detect_format(Path::new("model.bin")), ModelFormat::PyTorch);
+        assert_eq!(detect_format(Path::new("model.pt")), ModelFormat::PyTorch);
+        assert_eq!(detect_format(Path::new("model.onnx")), ModelFormat::Onnx);
+        assert_eq!(detect_format(Path::new("model.safetensors.index.json")), ModelFormat::SafeTensors);
+        assert_eq!(detect_format(Path::new("model.txt")), ModelFormat::Unknown);
+    }
+
+    #[test]
+    fn unified_tensor_info_from_gguf() {
+        let gguf = GgufTensorInfo {
+            name: "blk.0.attn_q.weight".to_string(),
+            shape: vec![4096, 4096],
+            dtype: DType::Q8_0,
+            offset: 1024,
+            size_bytes: 1_000_000,
+        };
+        let unified = UnifiedTensorInfo::from_gguf(&gguf, Path::new("model.gguf"));
+        assert_eq!(unified.name, "blk.0.attn_q.weight");
+        assert_eq!(unified.format, ModelFormat::Gguf);
+        assert_eq!(unified.dtype, DType::Q8_0);
+    }
 }
+
+// ── Unified Model Format Support ─────────────────────────────────────────
+//
+// These types and functions provide a single dispatch point for all
+// supported model formats (STRIX Protocol §15, Axiom 4).
+
+/// Supported model file formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModelFormat {
+    /// GGUF (llama.cpp native format).
+    Gguf,
+    /// SafeTensors (Hugging Face safe format).
+    SafeTensors,
+    /// PyTorch `.bin` / `.pt` (pickle-based ZIP archives).
+    PyTorch,
+    /// ONNX (Open Neural Network Exchange).
+    Onnx,
+    /// Unknown / unsupported format.
+    Unknown,
+}
+
+impl std::fmt::Display for ModelFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Gguf => write!(f, "GGUF"),
+            Self::SafeTensors => write!(f, "SafeTensors"),
+            Self::PyTorch => write!(f, "PyTorch"),
+            Self::Onnx => write!(f, "ONNX"),
+            Self::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
+/// Unified tensor info that works across all formats.
+#[derive(Debug, Clone)]
+pub struct UnifiedTensorInfo {
+    /// Tensor name.
+    pub name: String,
+    /// Tensor shape.
+    pub shape: Vec<usize>,
+    /// Data type.
+    pub dtype: DType,
+    /// Byte offset within the file (from file start or data section).
+    pub data_offset: u64,
+    /// Size in bytes.
+    pub size_bytes: usize,
+    /// Source file path.
+    pub source_path: std::path::PathBuf,
+    /// Which format this tensor came from.
+    pub format: ModelFormat,
+}
+
+impl UnifiedTensorInfo {
+    /// Create from a GGUF tensor info.
+    pub fn from_gguf(info: &GgufTensorInfo, path: &Path) -> Self {
+        Self {
+            name: info.name.clone(),
+            shape: info.shape.clone(),
+            dtype: info.dtype,
+            data_offset: info.offset,
+            size_bytes: info.size_bytes,
+            source_path: path.to_path_buf(),
+            format: ModelFormat::Gguf,
+        }
+    }
+}
+
+/// Unified parsed model index across all formats.
+#[derive(Debug, Clone)]
+pub struct UnifiedModel {
+    /// Format of the source file(s).
+    pub format: ModelFormat,
+    /// All tensor infos.
+    pub tensors: Vec<UnifiedTensorInfo>,
+    /// Detected model architecture (if available).
+    pub architecture: ModelArchitecture,
+    /// Number of file shards.
+    pub n_shards: usize,
+}
+
+/// Detect the model format from file path extension and magic bytes.
+pub fn detect_format(path: &Path) -> ModelFormat {
+    let name = path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if name.ends_with(".gguf") {
+        ModelFormat::Gguf
+    } else if name.ends_with(".safetensors") || name.ends_with(".safetensors.index.json") {
+        ModelFormat::SafeTensors
+    } else if name.ends_with(".bin") || name.ends_with(".pt") || name.ends_with(".pth")
+        || name.ends_with(".bin.index.json") {
+        ModelFormat::PyTorch
+    } else if name.ends_with(".onnx") {
+        ModelFormat::Onnx
+    } else {
+        ModelFormat::Unknown
+    }
+}
+
+/// Parse any supported model file into a `UnifiedModel`.
+///
+/// Auto-detects format from file extension and dispatches to the
+/// appropriate parser. Returns a unified tensor index.
+pub fn parse_model_file(path: &Path) -> Result<UnifiedModel, CompatError> {
+    let format = detect_format(path);
+
+    match format {
+        ModelFormat::Gguf => {
+            let data = std::fs::read(path)?;
+            let model = parse_gguf_model(&data)?;
+            let tensors = model.tensors.iter()
+                .map(|t| UnifiedTensorInfo::from_gguf(t, path))
+                .collect();
+            Ok(UnifiedModel {
+                format: ModelFormat::Gguf,
+                tensors,
+                architecture: model.architecture,
+                n_shards: 1,
+            })
+        }
+        ModelFormat::SafeTensors => {
+            use super::safetensors;
+            let st_model = safetensors::parse_safetensors_auto(path)
+                .map_err(|e| CompatError::FormatError(e.to_string()))?;
+            let tensors = st_model.tensors.into_iter().map(|t| {
+                UnifiedTensorInfo {
+                    name: t.name,
+                    shape: t.shape,
+                    dtype: t.dtype,
+                    data_offset: t.data_offset,
+                    size_bytes: t.size_bytes,
+                    source_path: t.shard_path,
+                    format: ModelFormat::SafeTensors,
+                }
+            }).collect();
+            Ok(UnifiedModel {
+                format: ModelFormat::SafeTensors,
+                tensors,
+                architecture: ModelArchitecture::Unknown,
+                n_shards: st_model.n_shards,
+            })
+        }
+        ModelFormat::PyTorch => {
+            use super::pytorch;
+            let pt_model = pytorch::parse_pytorch_auto(path)
+                .map_err(|e| CompatError::FormatError(e.to_string()))?;
+            let tensors = pt_model.tensors.into_iter().map(|t| {
+                UnifiedTensorInfo {
+                    name: t.name,
+                    shape: t.shape,
+                    dtype: t.dtype,
+                    data_offset: t.data_offset,
+                    size_bytes: t.size_bytes,
+                    source_path: t.shard_path,
+                    format: ModelFormat::PyTorch,
+                }
+            }).collect();
+            Ok(UnifiedModel {
+                format: ModelFormat::PyTorch,
+                tensors,
+                architecture: ModelArchitecture::Unknown,
+                n_shards: pt_model.n_shards,
+            })
+        }
+        ModelFormat::Onnx => {
+            use super::onnx;
+            let ox_model = onnx::parse_onnx(path)
+                .map_err(|e| CompatError::FormatError(e.to_string()))?;
+            let tensors = ox_model.tensors.into_iter().map(|t| {
+                UnifiedTensorInfo {
+                    name: t.name,
+                    shape: t.shape,
+                    dtype: t.dtype,
+                    data_offset: t.data_offset,
+                    size_bytes: t.size_bytes,
+                    source_path: t.file_path,
+                    format: ModelFormat::Onnx,
+                }
+            }).collect();
+            Ok(UnifiedModel {
+                format: ModelFormat::Onnx,
+                tensors,
+                architecture: ModelArchitecture::Unknown,
+                n_shards: 1,
+            })
+        }
+        ModelFormat::Unknown => {
+            Err(CompatError::FormatError(format!("unsupported format: {}", path.display())))
+        }
+    }
+}
+

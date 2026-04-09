@@ -13,7 +13,8 @@
 
 use super::bridge::{BridgeStats, StrixBridge};
 use super::compat::{
-    classify_tensor, normalize_tensor_name, CompatError, GgufTensorInfo, ModelArchitecture,
+    classify_tensor, normalize_tensor_name, parse_model_file,
+    CompatError, GgufTensorInfo, ModelArchitecture, UnifiedModel,
 };
 use super::config::StrixConfig;
 use super::types::{TensorClass, TensorId};
@@ -147,6 +148,43 @@ impl StrixSession {
             state: SessionState::Created,
             prefetch_window: config.prefetch_window_layers,
         })
+    }
+
+    /// Open a session from a `UnifiedModel` (any format: GGUF, SafeTensors, PyTorch, ONNX).
+    ///
+    /// This bridges the multi-format model compatibility layer into the
+    /// STRIX session lifecycle. The `UnifiedTensorInfo` structs carry the
+    /// same data as `GgufTensorInfo` (name, shape, dtype, size_bytes).
+    pub fn open_unified(
+        model: &UnifiedModel,
+        config: &StrixConfig,
+        vram_bytes: usize,
+    ) -> Result<Self, SessionError> {
+        // Convert UnifiedTensorInfo → GgufTensorInfo for the existing pipeline
+        let tensors: Vec<GgufTensorInfo> = model.tensors.iter().map(|t| {
+            GgufTensorInfo {
+                name: t.name.clone(),
+                shape: t.shape.clone(),
+                dtype: t.dtype,
+                offset: t.data_offset,
+                size_bytes: t.size_bytes,
+            }
+        }).collect();
+
+        Self::open(&tensors, model.architecture, config, vram_bytes)
+    }
+
+    /// Open a session directly from a model file path (auto-detects format).
+    ///
+    /// Combines `parse_model_file()` + `open_unified()` into a single call.
+    /// Supported formats: `.gguf`, `.safetensors`, `.bin`/`.pt`/`.pth`, `.onnx`.
+    pub fn open_from_file(
+        path: &std::path::Path,
+        config: &StrixConfig,
+        vram_bytes: usize,
+    ) -> Result<Self, SessionError> {
+        let model = parse_model_file(path)?;
+        Self::open_unified(&model, config, vram_bytes)
     }
 
     /// Run cold boot — load all Class A (pinned) tensors into VRAM.
@@ -436,10 +474,10 @@ mod tests {
         session.cold_boot().unwrap();
         assert_eq!(session.state(), SessionState::Ready);
 
-        // Class A tensors (token_embd, output_norm) should be loaded
+        // Class A tensors (token_embd) should be loaded; output_norm is Class C
         let stats = session.stats();
         assert!(stats.arena_used > 0);
-        assert!(stats.total_loads >= 2); // at least the 2 Class A tensors
+        assert!(stats.total_loads >= 1); // at least the token_embd Class A tensor
     }
 
     #[test]

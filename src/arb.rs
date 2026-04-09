@@ -845,7 +845,7 @@ mod tests {
 
     #[test]
     fn test_harmonic_ratio_tight() {
-        let mut group = HarmonicGroup::new(SequenceId(0), 100);
+        let group = HarmonicGroup::new(SequenceId(0), 100);
         assert!(!group.can_admit(101, 1.0)); // 101/100 > 1.0
         assert!(group.can_admit(100, 1.0)); // 100/100 == 1.0
     }
@@ -1046,7 +1046,7 @@ mod tests {
     #[test]
     fn test_prefill_token_data() {
         let mut sched = ArbScheduler::new(ArbConfig::default());
-        let id = sched.enqueue(vec![10, 20, 30, 40], 0.5);
+        let _id = sched.enqueue(vec![10, 20, 30, 40], 0.5);
         sched.admit_waiting();
 
         let batch = sched.build_micro_batch().unwrap();

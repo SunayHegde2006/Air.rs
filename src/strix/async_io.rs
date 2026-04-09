@@ -288,14 +288,15 @@ mod iocp_backend {
             })?;
 
             file.seek(SeekFrom::Start(offset))?;
-            let result = file.read(buf);
+            let buf_len = buf.len();
+            let result = file.read_exact(buf);
 
             let mut io_id = self.next_io_id.lock().unwrap();
             let io_handle = IoHandle(*io_id);
             *io_id += 1;
 
             let completion = match result {
-                Ok(n) => IoCompletion { bytes_read: n, failed: false },
+                Ok(()) => IoCompletion { bytes_read: buf_len, failed: false },
                 Err(_) => IoCompletion { bytes_read: 0, failed: true },
             };
             self.completions.lock().unwrap().insert(io_handle.0, completion);
@@ -477,12 +478,22 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static ASYNC_IO_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     fn temp_file_with(content: &[u8]) -> std::path::PathBuf {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("strix_async_io_test_{}.bin", std::process::id()));
+        let id = ASYNC_IO_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!(
+            "strix_async_io_test_{}_{}.bin",
+            std::process::id(),
+            id,
+        ));
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content).unwrap();
         f.flush().unwrap();
+        drop(f); // ensure file is fully closed before reads
         path
     }
 
@@ -568,5 +579,102 @@ mod tests {
         let hal = PlatformStorageHal::new();
         let result = hal.open(Path::new("__nonexistent_async_io_test__.bin"), false);
         assert!(result.is_err());
+    }
+
+    // ── Sustained Load Stress Tests ──────────────────────────────────
+
+    #[test]
+    fn stress_sustained_sequential_reads() {
+        // Simulate sustained layer-streaming: 100 sequential reads
+        // back-to-back, validating data integrity on every read.
+        let chunk_size = 4096;
+        let num_chunks = 100;
+        let data: Vec<u8> = (0..chunk_size * num_chunks)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let path = temp_file_with(&data);
+        let hal = PlatformStorageHal::new();
+        let fh = hal.open(&path, false).unwrap();
+
+        for i in 0..num_chunks {
+            let mut buf = vec![0u8; chunk_size];
+            let offset = (i * chunk_size) as u64;
+            let io = hal.read_async(fh, offset, &mut buf).unwrap();
+            let n = hal.wait_io(io).unwrap();
+            assert_eq!(n, chunk_size, "chunk {i}: expected {chunk_size} bytes, got {n}");
+            // Verify data integrity
+            for (j, &byte) in buf.iter().enumerate() {
+                let expected = ((i * chunk_size + j) % 251) as u8;
+                assert_eq!(
+                    byte, expected,
+                    "chunk {i}, byte {j}: expected {expected}, got {byte}"
+                );
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stress_random_offset_reads() {
+        // Simulate prefetch patterns: random-offset reads across a
+        // 1MB file, mimicking layer-skip and expert-routing access.
+        let file_size = 1024 * 1024;
+        let data: Vec<u8> = (0..file_size).map(|i| (i % 239) as u8).collect();
+        let path = temp_file_with(&data);
+        let hal = PlatformStorageHal::new();
+        let fh = hal.open(&path, false).unwrap();
+
+        // Pseudo-random offsets using LCG (deterministic for reproducibility)
+        let mut rng_state: u64 = 0xDEAD_BEEF;
+        let read_size = 512;
+        for _ in 0..50 {
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let offset = (rng_state % (file_size as u64 - read_size as u64)) as u64;
+
+            let mut buf = vec![0u8; read_size];
+            let io = hal.read_async(fh, offset, &mut buf).unwrap();
+            let n = hal.wait_io(io).unwrap();
+            assert_eq!(n, read_size);
+
+            // Verify first byte integrity
+            let expected = (offset as usize % 239) as u8;
+            assert_eq!(buf[0], expected, "random read at offset {offset}: mismatch");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stress_burst_io_pipeline() {
+        // Simulate burst I/O: submit multiple reads before waiting,
+        // then collect all results. Tests the I/O queue under pressure.
+        let chunk_size = 2048;
+        let num_bursts = 20;
+        let data: Vec<u8> = (0..chunk_size * num_bursts)
+            .map(|i| (i % 199) as u8)
+            .collect();
+        let path = temp_file_with(&data);
+        let hal = PlatformStorageHal::new();
+        let fh = hal.open(&path, false).unwrap();
+
+        // Submit all reads in a burst
+        let mut buffers: Vec<Vec<u8>> = (0..num_bursts).map(|_| vec![0u8; chunk_size]).collect();
+        let mut handles: Vec<IoHandle> = Vec::with_capacity(num_bursts);
+        for i in 0..num_bursts {
+            let offset = (i * chunk_size) as u64;
+            let io = hal.read_async(fh, offset, &mut buffers[i]).unwrap();
+            handles.push(io);
+        }
+
+        // Collect all results
+        for (i, io) in handles.into_iter().enumerate() {
+            let n = hal.wait_io(io).unwrap();
+            assert_eq!(n, chunk_size, "burst {i}: short read ({n}/{chunk_size})");
+            let expected_first = ((i * chunk_size) % 199) as u8;
+            assert_eq!(
+                buffers[i][0], expected_first,
+                "burst {i}: data integrity failure"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

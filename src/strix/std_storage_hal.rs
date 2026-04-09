@@ -76,15 +76,16 @@ impl StorageHal for StdStorageHal {
         })?;
 
         file.seek(SeekFrom::Start(offset))?;
-        let result = file.read(buf);
+        let buf_len = buf.len();
+        let result = file.read_exact(buf);
 
         let mut io_id = self.next_io_id.lock().unwrap();
         let io_handle = IoHandle(*io_id);
         *io_id += 1;
 
         let completion = match result {
-            Ok(n) => IoCompletion {
-                bytes_read: n,
+            Ok(()) => IoCompletion {
+                bytes_read: buf_len,
                 failed: false,
             },
             Err(_) => IoCompletion {
@@ -143,13 +144,22 @@ impl StorageHal for StdStorageHal {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static STD_STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_file_with(content: &[u8]) -> std::path::PathBuf {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("strix_test_{}.bin", std::process::id()));
+        let id = STD_STORAGE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!(
+            "strix_std_test_{}_{}.bin",
+            std::process::id(),
+            id,
+        ));
         let mut f = File::create(&path).unwrap();
         f.write_all(content).unwrap();
         f.flush().unwrap();
+        drop(f); // ensure file is fully closed before reads
         path
     }
 

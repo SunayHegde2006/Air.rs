@@ -97,6 +97,16 @@ impl VramPressureManager {
         }
     }
 
+    /// Total VRAM in bytes (as reported by the HAL at startup).
+    pub fn total_vram(&self) -> usize {
+        self.total_vram
+    }
+
+    /// Safety margin in bytes (reserved for OS/driver overhead).
+    pub fn safety_margin(&self) -> usize {
+        self.safety_margin
+    }
+
     /// Effective VRAM budget (total minus safety margin).
     pub fn budget(&self) -> usize {
         self.budget
