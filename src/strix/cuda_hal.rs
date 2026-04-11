@@ -100,6 +100,12 @@ extern "C" {
     fn cudaStreamDestroy(stream: *mut std::ffi::c_void) -> i32;
     fn cudaGetErrorString(error: i32) -> *const i8;
     fn cudaDeviceGetAttribute(value: *mut i32, attr: i32, device: i32) -> i32;
+    fn cudaMemsetAsync(
+        dev_ptr: *mut u8,
+        value: i32,
+        count: usize,
+        stream: *mut std::ffi::c_void,
+    ) -> i32;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -367,5 +373,22 @@ impl GpuHal for CudaHal {
         let mut total = 0usize;
         unsafe { cuda_check(cudaMemGetInfo(&mut free, &mut total))? };
         Ok(total - free)
+    }
+
+    /// Hardware-optimized VRAM zeroing using `cudaMemsetAsync`.
+    ///
+    /// Runs entirely on the GPU — no host→device copy needed.
+    fn secure_zero_vram(&self, ptr: GpuPtr, size: usize) -> Result<(), HalError> {
+        let cuda_stream = self.get_stream(0);
+        unsafe {
+            cuda_check(cudaMemsetAsync(
+                ptr.0 as *mut u8,
+                0, // zero fill
+                size,
+                cuda_stream,
+            ))?;
+            cuda_check(cudaStreamSynchronize(cuda_stream))?;
+        }
+        Ok(())
     }
 }

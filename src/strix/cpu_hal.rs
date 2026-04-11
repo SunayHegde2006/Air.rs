@@ -165,6 +165,20 @@ impl GpuHal for CpuHal {
         let inner = self.inner.lock().unwrap();
         Ok(inner.allocations.values().map(|a| a.size).sum())
     }
+
+    fn secure_zero_vram(&self, ptr: GpuPtr, size: usize) -> Result<(), HalError> {
+        let mut inner = self.inner.lock().unwrap();
+        let alloc = inner
+            .allocations
+            .get_mut(&ptr.0)
+            .ok_or_else(|| HalError::DriverError {
+                code: -1,
+                message: format!("secure_zero_vram: unknown GpuPtr({:#x})", ptr.0),
+            })?;
+        let zero_len = size.min(alloc.size);
+        alloc.data[..zero_len].fill(0);
+        Ok(())
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────

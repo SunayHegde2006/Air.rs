@@ -47,6 +47,7 @@ tracing-subscriber = "0.3"
 [features]
 default = []
 cuda = ["candle-core/cuda"]
+rocm = []
 vulkan = []
 metal = ["candle-core/metal"]
 flash-attn = ["candle-flash-attn"]

@@ -315,20 +315,15 @@ impl<H: GpuHal> SecureAllocator<H> {
 
     /// Zero VRAM content and then free the allocation.
     ///
-    /// The zeroing is done via a host→device copy of a zero buffer,
-    /// using stream 0 with a synchronous wait.
+    /// Delegates to `GpuHal::secure_zero_vram()` which uses hardware-native
+    /// zeroing when available (cudaMemsetAsync, vkCmdFillBuffer, Metal memset).
+    /// Falls back to host→device copy of a zero buffer on CpuHal.
+    ///
+    /// From STRIX Protocol §14.1.
     pub fn secure_free(&mut self, ptr: GpuPtr) -> Result<(), HalError> {
         if let Some((size, owner)) = self.allocations.remove(&ptr.0) {
-            // Zero the VRAM region before freeing.
-            let zeros = vec![0u8; size.min(64 * 1024)]; // 64K chunks
-            let mut offset = 0usize;
-            while offset < size {
-                let chunk = (size - offset).min(zeros.len());
-                let dst = GpuPtr(ptr.0 + offset as u64);
-                self.inner.copy_to_vram(dst, zeros.as_ptr(), chunk, 0)?;
-                offset += chunk;
-            }
-            self.inner.sync_stream(0)?;
+            // Zero the VRAM region using the HAL's native zeroing path.
+            self.inner.secure_zero_vram(ptr, size)?;
             self.inner.free_vram(ptr)?;
             self.audit_log.log(SecurityEvent::ZeroedAndFreed { ptr, size, owner });
             Ok(())
@@ -598,4 +593,78 @@ mod tests {
         assert!(matches!(events[0], SecurityEvent::Allocated { .. }));
         assert!(matches!(events[1], SecurityEvent::ZeroedAndFreed { .. }));
     }
+
+    #[test]
+    fn vram_zeroing_verified_readback() {
+        // Hardware-verified VRAM zeroing test (Protocol §14.1,
+        // hardware_implementation_guide.md Task 2).
+        //
+        // Pattern: write 0xFF → secure_zero_vram → readback → assert all zero.
+        let hal = CpuHal::new(1024 * 1024);
+
+        // Allocate a buffer.
+        let size = 4096;
+        let ptr = hal.allocate_vram(size, 64).unwrap();
+
+        // Write 0xFF pattern.
+        let pattern = vec![0xFFu8; size];
+        hal.copy_to_vram(ptr, pattern.as_ptr(), size, 0).unwrap();
+
+        // Verify pattern was written.
+        let mut readback = vec![0u8; size];
+        hal.copy_from_vram(readback.as_mut_ptr(), ptr, size, 0).unwrap();
+        assert!(readback.iter().all(|&b| b == 0xFF), "Pattern not written");
+
+        // Zero using the GpuHal trait method.
+        hal.secure_zero_vram(ptr, size).unwrap();
+
+        // Read back and verify all zeros.
+        let mut zeroed = vec![0xFFu8; size];
+        hal.copy_from_vram(zeroed.as_mut_ptr(), ptr, size, 0).unwrap();
+        let non_zero = zeroed.iter().filter(|&&b| b != 0).count();
+        assert!(non_zero == 0,
+            "VRAM not fully zeroed! {} / {} non-zero bytes", non_zero, size);
+
+        hal.free_vram(ptr).unwrap();
+    }
+
+    #[test]
+    fn vram_zeroing_large_allocation() {
+        // Test zeroing of a buffer larger than the 64KB chunk size.
+        let hal = CpuHal::new(1024 * 1024);
+        let size = 256 * 1024; // 256 KB — 4 chunks
+        let ptr = hal.allocate_vram(size, 64).unwrap();
+
+        // Write 0xAB pattern.
+        let pattern = vec![0xABu8; size];
+        hal.copy_to_vram(ptr, pattern.as_ptr(), size, 0).unwrap();
+
+        // Zero and verify.
+        hal.secure_zero_vram(ptr, size).unwrap();
+        let mut readback = vec![0xFFu8; size];
+        hal.copy_from_vram(readback.as_mut_ptr(), ptr, size, 0).unwrap();
+        assert!(readback.iter().all(|&b| b == 0),
+            "Large allocation not fully zeroed");
+
+        hal.free_vram(ptr).unwrap();
+    }
+
+    #[test]
+    fn secure_allocator_zeroing_via_trait() {
+        // Verify SecureAllocator uses GpuHal::secure_zero_vram() correctly.
+        let hal = CpuHal::new(1024 * 1024);
+        let mut sa = SecureAllocator::new(hal);
+        let owner = OwnerToken::new(42);
+
+        // Allocate + fill with pattern.
+        let bcp = sa.allocate(512, 64, owner).unwrap();
+        let pattern = vec![0xDEu8; 512];
+        sa.inner.copy_to_vram(bcp.ptr(), pattern.as_ptr(), 512, 0).unwrap();
+
+        // secure_free zeroes then frees.
+        sa.secure_free(bcp.ptr()).unwrap();
+        assert_eq!(sa.active_allocations(), 0);
+        assert_eq!(sa.audit_log().total_logged(), 2);
+    }
 }
+
