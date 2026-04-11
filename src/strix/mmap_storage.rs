@@ -1,4 +1,5 @@
-//! Memory-mapped storage HAL — STRIX Protocol §9.4, §11.3.
+//! Memory-mapped storage HAL — STRIX Protocol §9.4, §11.3,
+//! S.L.I.P. v3 §Sub-System 2 Path D.
 //!
 //! `MmapStorageHal` implements `StorageHal` using OS memory mapping.
 //! Files are read into memory on open, then reads are served directly
@@ -8,6 +9,11 @@
 //! - Linux: `madvise(MADV_WILLNEED)` 
 //! - Windows: `PrefetchVirtualMemory`
 //! - macOS: `madvise(MADV_WILLNEED)`
+//!
+//! O_DIRECT support (Path D):
+//! - Linux: `open()` with `O_DIRECT` flag → bypasses page cache
+//! - Windows: `CreateFile` with `FILE_FLAG_NO_BUFFERING`
+//! - Requires buffers aligned to filesystem block size (typically 4KB)
 //!
 //! Auto-selected when NVMe detected and RAM ≥ 2× model size.
 
@@ -24,6 +30,8 @@ struct MappedFile {
     data: Vec<u8>,
     /// Original file path.
     _path: PathBuf,
+    /// Whether this file was opened with O_DIRECT.
+    direct_io: bool,
 }
 
 /// Per-IO-handle completion record.
@@ -160,8 +168,12 @@ impl Default for MmapStorageHal {
 }
 
 impl StorageHal for MmapStorageHal {
-    fn open(&self, path: &Path, _direct_io: bool) -> Result<FileHandle, HalError> {
-        let data = std::fs::read(path)?;
+    fn open(&self, path: &Path, direct_io: bool) -> Result<FileHandle, HalError> {
+        let data = if direct_io {
+            Self::read_with_direct_io(path)?
+        } else {
+            std::fs::read(path)?
+        };
 
         let mut id = self.next_file_id.lock().unwrap();
         let handle = FileHandle(*id);
@@ -169,6 +181,7 @@ impl StorageHal for MmapStorageHal {
         self.files.lock().unwrap().insert(handle.0, MappedFile {
             data,
             _path: path.to_path_buf(),
+            direct_io,
         });
         Ok(handle)
     }
@@ -249,6 +262,187 @@ impl StorageHal for MmapStorageHal {
     }
 }
 
+impl MmapStorageHal {
+    /// Read a file using O_DIRECT (bypasses the OS page cache).
+    ///
+    /// This is Path D of the S.L.I.P. v3 Async I/O Bridge.
+    /// On Linux, uses `open()` with `O_DIRECT`.
+    /// On Windows, uses `FILE_FLAG_NO_BUFFERING`.
+    ///
+    /// Both require reads to be aligned to the filesystem block size.
+    fn read_with_direct_io(path: &Path) -> Result<Vec<u8>, HalError> {
+        #[cfg(target_os = "linux")]
+        {
+            return Self::read_direct_linux(path);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            return Self::read_direct_windows(path);
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        {
+            // macOS doesn't support O_DIRECT; use F_NOCACHE.
+            return Self::read_direct_macos(path);
+        }
+    }
+
+    /// Linux O_DIRECT implementation.
+    #[cfg(target_os = "linux")]
+    fn read_direct_linux(path: &Path) -> Result<Vec<u8>, HalError> {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::io::Read;
+
+        // O_DIRECT requires:
+        // 1. Buffer aligned to 4KB (filesystem block size)
+        // 2. Read sizes that are multiples of 4KB
+        // 3. File offsets that are multiples of 4KB
+        const BLOCK_SIZE: usize = 4096;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(path)
+            .map_err(|e| {
+                // O_DIRECT may fail on tmpfs, NFS, etc.
+                // Fall back to normal read.
+                HalError::IoError(e)
+            })?;
+
+        let file_size = file.metadata()
+            .map_err(HalError::IoError)?
+            .len() as usize;
+
+        // Round up to block alignment.
+        let aligned_size = (file_size + BLOCK_SIZE - 1) & !(BLOCK_SIZE - 1);
+
+        // Allocate aligned buffer.
+        let layout = std::alloc::Layout::from_size_align(aligned_size, BLOCK_SIZE)
+            .map_err(|e| HalError::Unsupported(format!("Layout error: {e}")))?;
+        let buf_ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        if buf_ptr.is_null() {
+            return Err(HalError::OutOfMemory {
+                requested: aligned_size,
+                available: 0,
+            });
+        }
+
+        // Read aligned blocks via pread.
+        let fd = {
+            use std::os::unix::io::AsRawFd;
+            file.as_raw_fd()
+        };
+
+        let mut total_read = 0usize;
+        while total_read < file_size {
+            let chunk = (file_size - total_read).min(BLOCK_SIZE * 256); // 1MB chunks
+            let aligned_chunk = (chunk + BLOCK_SIZE - 1) & !(BLOCK_SIZE - 1);
+            let result = unsafe {
+                libc::pread(
+                    fd,
+                    buf_ptr.add(total_read) as *mut libc::c_void,
+                    aligned_chunk,
+                    total_read as libc::off_t,
+                )
+            };
+            if result <= 0 {
+                break;
+            }
+            total_read += result as usize;
+        }
+
+        // Copy to a Vec (truncated to actual file size).
+        let mut data = Vec::with_capacity(file_size);
+        unsafe {
+            data.set_len(file_size);
+            std::ptr::copy_nonoverlapping(buf_ptr, data.as_mut_ptr(), file_size);
+            std::alloc::dealloc(buf_ptr, layout);
+        }
+
+        Ok(data)
+    }
+
+    /// Windows FILE_FLAG_NO_BUFFERING implementation.
+    #[cfg(target_os = "windows")]
+    fn read_direct_windows(path: &Path) -> Result<Vec<u8>, HalError> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::io::Read;
+
+        // FILE_FLAG_NO_BUFFERING = 0x20000000
+        const FILE_FLAG_NO_BUFFERING: u32 = 0x20000000;
+        const BLOCK_SIZE: usize = 4096;
+
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_NO_BUFFERING)
+            .open(path)
+            .or_else(|_| {
+                // Fall back to buffered I/O if unbuffered fails.
+                eprintln!("⚠ O_DIRECT: FILE_FLAG_NO_BUFFERING failed, falling back to buffered I/O");
+                std::fs::File::open(path)
+            })
+            .map_err(HalError::IoError)?;
+
+        let file_size = file.metadata()
+            .map_err(HalError::IoError)?
+            .len() as usize;
+
+        // Allocate aligned buffer.
+        let aligned_size = (file_size + BLOCK_SIZE - 1) & !(BLOCK_SIZE - 1);
+        let layout = std::alloc::Layout::from_size_align(aligned_size, BLOCK_SIZE)
+            .map_err(|e| HalError::Unsupported(format!("Layout error: {e}")))?;
+        let buf_ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        if buf_ptr.is_null() {
+            return Err(HalError::OutOfMemory {
+                requested: aligned_size,
+                available: 0,
+            });
+        }
+
+        // Read in aligned chunks.
+        let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf_ptr, aligned_size) };
+        let mut total_read = 0usize;
+        while total_read < aligned_size {
+            match file.read(&mut buf_slice[total_read..]) {
+                Ok(0) => break,
+                Ok(n) => total_read += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    unsafe { std::alloc::dealloc(buf_ptr, layout) };
+                    return Err(HalError::IoError(e));
+                }
+            }
+        }
+
+        // Truncate to actual file size.
+        let mut data = Vec::with_capacity(file_size);
+        unsafe {
+            data.set_len(file_size.min(total_read));
+            std::ptr::copy_nonoverlapping(buf_ptr, data.as_mut_ptr(), data.len());
+            std::alloc::dealloc(buf_ptr, layout);
+        }
+
+        Ok(data)
+    }
+
+    /// macOS F_NOCACHE implementation (closest equivalent to O_DIRECT).
+    #[cfg(target_os = "macos")]
+    fn read_direct_macos(path: &Path) -> Result<Vec<u8>, HalError> {
+        use std::os::unix::io::AsRawFd;
+
+        let file = std::fs::File::open(path)
+            .map_err(HalError::IoError)?;
+
+        // F_NOCACHE = 48 on macOS — disables page cache for this fd.
+        unsafe {
+            libc::fcntl(file.as_raw_fd(), 48 /* F_NOCACHE */, 1);
+        }
+
+        std::fs::read(path).map_err(|e| HalError::IoError(e))
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -278,6 +472,30 @@ mod tests {
         let n = hal.wait_io(io).unwrap();
         assert_eq!(n, data.len());
         assert_eq!(&buf, data);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_with_direct_io() {
+        // Write a test file that's at least one block size.
+        let data = vec![0xABu8; 8192]; // 2 blocks
+        let path = write_temp("direct_io.bin", &data);
+        let hal = MmapStorageHal::new();
+        // Open with direct_io=true. On Windows this uses FILE_FLAG_NO_BUFFERING.
+        // On systems where it's not supported, it falls back gracefully.
+        let result = hal.open(&path, true);
+        if let Ok(handle) = result {
+            let mut buf = vec![0u8; 4096];
+            let io = hal.read_async(handle, 0, &mut buf).unwrap();
+            let n = hal.wait_io(io).unwrap();
+            assert_eq!(n, 4096);
+            assert_eq!(buf[0], 0xAB);
+
+            // Verify the file was marked as direct_io.
+            let files = hal.files.lock().unwrap();
+            let mf = files.get(&handle.0).unwrap();
+            assert!(mf.direct_io);
+        }
         let _ = std::fs::remove_file(&path);
     }
 

@@ -33,9 +33,13 @@
 //! | `cuda_hal`          | 6     | CUDA Runtime API HAL backend (feature-gated) |
 //! | `vulkan_hal`        | 6     | Vulkan 1.2 HAL backend (feature-gated) |
 //! | `metal_hal`         | 6     | Metal framework HAL backend (feature-gated, macOS only) |
+//! | `rocm_hal`          | 6     | ROCm/HIP HAL backend (feature-gated, AMD GPUs) |
 //! | `async_io`          | 6     | Platform async I/O: io_uring (Linux) / IOCP (Windows) |
+//! | `backend_detect`    | 6     | Sub-100ms backend detection + ranking |
 //! | `execution_cursor`  | 8     | ExecutionCursor + MoE expert activation hook |
 //! | `gpu_direct`        | 8     | GPUDirect Storage NVMe→GPU DMA integration |
+//! | `cufile_ffi`        | 9     | cuFile API FFI bindings for GDS (cuda+linux) |
+//! | `multi_gpu`         | 9     | Multi-GPU topology, NVLink, shard strategies |
 //!
 //! ## Status
 //!
@@ -81,7 +85,10 @@ pub mod cuda_hal;
 pub mod vulkan_hal;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal_hal;
+#[cfg(feature = "rocm")]
+pub mod rocm_hal;
 pub mod async_io;
+pub mod backend_detect;
 
 // Phase 7: Multi-format readers, mmap, tests, validation
 pub mod safetensors;
@@ -100,6 +107,10 @@ pub mod e2e_validation;
 // Phase 8: ExecutionCursor (MoE), GPUDirect Storage, serde config
 pub mod execution_cursor;
 pub mod gpu_direct;
+
+// Phase 9: Hardware polish — cuFile FFI, Multi-GPU, VRAM zeroing verification
+pub mod cufile_ffi;
+pub mod multi_gpu;
 
 // Re-export the most commonly used types at crate level.
 pub use types::{DType, GpuPtr, ResidencyState, TensorClass, TensorId, TierId};
@@ -135,4 +146,10 @@ pub use execution_cursor::{
     ExecutionCursor, LayerPhase, ExpertActivation,
     ExpertActivationHook, default_expert_hook,
 };
-pub use gpu_direct::{GdsCapability, GdsStorageHal, GdsTransfer, GdsTransferStatus, GdsStats};
+pub use gpu_direct::{GdsCapability, GdsStorageHal, GdsTransfer, GdsTransferStatus, GdsStats, TransferMethod, PinnedHostBuffer};
+pub use backend_detect::{
+    BackendDetector, DetectionResult, GpuBackendKind, StorageBackendKind,
+    GpuProbeResult, StorageProbeResult,
+};
+pub use cufile_ffi::CUfileStatus;
+pub use multi_gpu::{GpuTopology, ShardStrategy, PeerTransfer, PeerTransferStatus, Interconnect};

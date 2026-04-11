@@ -106,6 +106,29 @@ pub trait GpuHal: Send + Sync {
 
     /// Current VRAM usage snapshot.
     fn vram_used(&self) -> Result<usize, HalError>;
+
+    /// Securely zero a VRAM region before freeing.
+    ///
+    /// Overwrites `size` bytes at `ptr` with zeros to prevent data leakage
+    /// between sessions. Hardware-specific backends should override with
+    /// GPU-native zeroing (cudaMemsetAsync, vkCmdFillBuffer, Metal memset).
+    ///
+    /// Default implementation: host→device copy of a zero buffer.
+    ///
+    /// From STRIX Protocol §14.1.
+    fn secure_zero_vram(&self, ptr: GpuPtr, size: usize) -> Result<(), HalError> {
+        let chunk_size = 64 * 1024; // 64KB chunks
+        let zeros = vec![0u8; chunk_size];
+        let mut offset = 0usize;
+        while offset < size {
+            let chunk = (size - offset).min(chunk_size);
+            let dst = GpuPtr(ptr.0 + offset as u64);
+            self.copy_to_vram(dst, zeros.as_ptr(), chunk, 0)?;
+            offset += chunk;
+        }
+        self.sync_stream(0)?;
+        Ok(())
+    }
 }
 
 // ── Storage HAL Trait ────────────────────────────────────────────────────

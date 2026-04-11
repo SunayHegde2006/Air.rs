@@ -1,4 +1,4 @@
-//! DriveInquisitor — Storage Speed Detection & Protocol Selection
+//! DriveInquisitor v3 — Storage Speed Detection & Protocol Selection
 //!
 //! Measures actual disk throughput and selects the optimal streaming protocol:
 //!   - S.L.I.P. v3 for NVMe (≥3000 MB/s) and SATA SSD (≥400 MB/s)
@@ -8,7 +8,26 @@
 //! Also computes the adaptive pipeline depth (D_opt) and optimal batch size (B_opt)
 //! based on measured I/O and compute timings.
 //!
-//! Reference: air_rs_protocols_v3.md §2 "Protocol Selection Decision Matrix"
+//! ## DriveInquisitor v3 Decision Matrix
+//!
+//! ```text
+//! BackendInquisitor (UCAL)   → Selects compute backend
+//! DriveInquisitor (Storage)  → Selects streaming protocol
+//!
+//! Combined decision logic:
+//!   measured_speed = burst_read_50ms(model_path)
+//!
+//!   >= 3,000 MB/s → S.L.I.P. v3 (NVMe), D_opt, self-speculative
+//!   >= 400 MB/s   → S.L.I.P. v3 (SATA), D=2, Ghost Drafting
+//!   >= 50 MB/s    → M.I.S.T. v3, B_opt, Ghost Drafting primary
+//!   < 50 MB/s     → M.I.S.T. v3 degraded, Ghost only, user warned
+//!
+//! Special paths:
+//!   CPU + NVMe → S.L.I.P. D=2, ρ>1 (CPU bottleneck), no Ghost, no batch
+//!   CPU + HDD  → M.I.S.T., B_opt=4-5, Ghost on same CPU threads
+//! ```
+//!
+//! Reference: air_rs_protocols_v3.md §Protocol Interaction
 
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -266,6 +285,308 @@ impl DriveInquisitor {
 }
 
 // ---------------------------------------------------------------------------
+// DriveInquisitor v3 Decision Matrix — Full Protocol Routing
+// ---------------------------------------------------------------------------
+
+/// Default layer size in MB (LLaMA 70B Q4_K_M).
+pub const DEFAULT_LAYER_SIZE_MB: f64 = 531.0;
+
+/// Compute backend classification for protocol decisions.
+///
+/// Determines per-token kernel time, Ghost Model TTFT, and CPU-only
+/// special path routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ComputeBackend {
+    /// Discrete NVIDIA GPU (CUDA).
+    CudaGpu,
+    /// Discrete AMD GPU (ROCm).
+    RocmGpu,
+    /// Apple Silicon (Metal, UMA).
+    MetalGpu,
+    /// Intel Arc (Vulkan).
+    VulkanGpu,
+    /// CPU-only (no discrete GPU).
+    CpuOnly,
+}
+
+impl ComputeBackend {
+    /// Whether this is CPU-only inference.
+    pub fn is_cpu_only(&self) -> bool {
+        matches!(self, Self::CpuOnly)
+    }
+
+    /// Typical per-token kernel time in ms for LLaMA 70B.
+    pub fn t_kernel_ms(&self) -> f64 {
+        match self {
+            Self::CudaGpu  => 70.0,
+            Self::RocmGpu  => 80.0,
+            Self::MetalGpu => 50.0,
+            Self::VulkanGpu => 90.0,
+            Self::CpuOnly  => 1_000.0,
+        }
+    }
+
+    /// Ghost Model TTFT in ms (None if N/A — CPU IS the ghost).
+    pub fn ghost_ttft_ms(&self) -> Option<f64> {
+        match self {
+            Self::CudaGpu  => Some(80.0),
+            Self::RocmGpu  => Some(100.0),
+            Self::MetalGpu => Some(60.0),
+            Self::VulkanGpu => Some(110.0),
+            Self::CpuOnly  => None,
+        }
+    }
+}
+
+impl fmt::Display for ComputeBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CudaGpu  => write!(f, "CUDA (NVIDIA GPU)"),
+            Self::RocmGpu  => write!(f, "ROCm (AMD GPU)"),
+            Self::MetalGpu => write!(f, "Metal (Apple Silicon)"),
+            Self::VulkanGpu => write!(f, "Vulkan (Intel Arc)"),
+            Self::CpuOnly  => write!(f, "CPU-only"),
+        }
+    }
+}
+
+/// Full protocol decision from the DriveInquisitor v3 Decision Matrix.
+///
+/// Combines BackendInquisitor (UCAL) + DriveInquisitor (Storage) to produce
+/// the complete inference configuration including protocol, pipeline params,
+/// Ghost Drafting status, and estimated ρ_v3.
+#[derive(Debug, Clone)]
+pub struct ProtocolDecision {
+    /// Selected streaming protocol.
+    pub protocol: StreamingProtocol,
+    /// Compute backend.
+    pub backend: ComputeBackend,
+    /// Measured storage speed in MB/s.
+    pub measured_speed_mbps: f64,
+    /// Pipeline depth (S.L.I.P.) or 0 (M.I.S.T.).
+    pub d_opt: usize,
+    /// Batch size (M.I.S.T.) or 0 (S.L.I.P.).
+    pub b_opt: usize,
+    /// T_io per layer in ms.
+    pub t_io_ms: f64,
+    /// T_kernel per token in ms.
+    pub t_kernel_ms: f64,
+    /// Whether Ghost Drafting is active.
+    pub ghost_drafting: bool,
+    /// Ghost TTFT in ms (0 if inactive).
+    pub ghost_ttft_ms: f64,
+    /// Whether self-speculative residency is active.
+    pub self_speculative: bool,
+    /// ρ_v3 estimate.
+    pub rho: f64,
+    /// User warning message (if any).
+    pub warning: Option<String>,
+}
+
+impl fmt::Display for ProtocolDecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "╔══════════════════════════════════════════════════╗")?;
+        writeln!(f, "║  DriveInquisitor v3 — Protocol Decision           ║")?;
+        writeln!(f, "╠══════════════════════════════════════════════════╣")?;
+        writeln!(f, "║  Protocol:    {:>34} ║", self.protocol)?;
+        writeln!(f, "║  Backend:     {:>34} ║", self.backend)?;
+        writeln!(f, "║  Disk speed:  {:>30.0} MB/s ║", self.measured_speed_mbps)?;
+        writeln!(f, "║  T_io:        {:>30.0} ms   ║", self.t_io_ms)?;
+        writeln!(f, "║  T_kernel:    {:>30.0} ms   ║", self.t_kernel_ms)?;
+        if self.d_opt > 0 {
+            writeln!(f, "║  D_opt:       {:>34} ║", self.d_opt)?;
+        }
+        if self.b_opt > 0 {
+            writeln!(f, "║  B_opt:       {:>34} ║", self.b_opt)?;
+        }
+        let ghost_str = if self.ghost_drafting {
+            format!("YES ({:.0}ms TTFT)", self.ghost_ttft_ms)
+        } else {
+            "NO".to_string()
+        };
+        writeln!(f, "║  Ghost:       {:>34} ║", ghost_str)?;
+        writeln!(f, "║  Self-spec:   {:>34} ║",
+            if self.self_speculative { "YES" } else { "NO" })?;
+        writeln!(f, "║  ρ_v3:        {:>34.2} ║", self.rho)?;
+        if let Some(warn) = &self.warning {
+            writeln!(f, "║  ⚠ {:>44} ║", warn)?;
+        }
+        writeln!(f, "╚══════════════════════════════════════════════════╝")?;
+        Ok(())
+    }
+}
+
+/// Execute the full DriveInquisitor v3 Decision Matrix.
+///
+/// Combines storage speed measurement (burst_read_50ms) with compute backend
+/// classification to produce a complete protocol decision:
+///
+/// ```text
+/// >= 3,000 MB/s → S.L.I.P. v3 (NVMe), D_opt, self-speculative active
+/// >= 400 MB/s   → S.L.I.P. v3 (SATA), D=2, Ghost Drafting active
+/// >= 50 MB/s    → M.I.S.T. v3 (HDD), B_opt, Ghost Drafting primary
+/// < 50 MB/s     → M.I.S.T. v3 degraded, Ghost only, user warned
+/// ```
+///
+/// CPU-only special paths:
+/// - CPU + NVMe: ρ > 1 naturally (CPU bottleneck), D=2, no Ghost
+/// - CPU + HDD: B_opt=4-5 (manageable), Ghost on same CPU threads
+pub fn decide_protocol(
+    measured_speed_mbps: f64,
+    backend: ComputeBackend,
+    layer_size_mb: f64,
+) -> ProtocolDecision {
+    let protocol = select_protocol(measured_speed_mbps);
+    let t_io_ms = if measured_speed_mbps > 0.0 {
+        (layer_size_mb / measured_speed_mbps) * 1000.0
+    } else {
+        f64::INFINITY
+    };
+    let t_kernel_ms = backend.t_kernel_ms();
+
+    // CPU-only special cases from spec §CPU-Only Fallback
+    if backend.is_cpu_only() {
+        return decide_cpu_only(protocol, measured_speed_mbps, t_io_ms, t_kernel_ms);
+    }
+
+    match protocol {
+        StreamingProtocol::SlipNvme => {
+            // S.L.I.P. v3 NVMe: full pipeline + self-speculative residency
+            let d_opt = compute_d_opt_ms(t_kernel_ms, t_io_ms);
+            let ghost_ttft = backend.ghost_ttft_ms().unwrap_or(0.0);
+            let rho = t_kernel_ms / t_io_ms.max(0.001);
+
+            ProtocolDecision {
+                protocol, backend, measured_speed_mbps,
+                d_opt, b_opt: 0, t_io_ms, t_kernel_ms,
+                ghost_drafting: false, // NVMe fast enough without Ghost
+                ghost_ttft_ms: ghost_ttft,
+                self_speculative: true,
+                rho, warning: None,
+            }
+        }
+        StreamingProtocol::SlipSata => {
+            // S.L.I.P. v3 SATA: conservative D=2 + Ghost Drafting
+            let ghost_ttft = backend.ghost_ttft_ms().unwrap_or(0.0);
+            let ghost_active = ghost_ttft > 0.0 && ghost_ttft < t_io_ms;
+            let gc = if ghost_active { 0.75 * 4.0 * t_kernel_ms * 0.75 } else { 0.0 };
+            let rho = (t_kernel_ms + gc) / t_io_ms.max(0.001);
+
+            ProtocolDecision {
+                protocol, backend, measured_speed_mbps,
+                d_opt: 2, b_opt: 0, t_io_ms, t_kernel_ms,
+                ghost_drafting: ghost_active,
+                ghost_ttft_ms: ghost_ttft,
+                self_speculative: false,
+                rho, warning: None,
+            }
+        }
+        StreamingProtocol::Mist => {
+            // M.I.S.T. v3: batch accumulation + Ghost Drafting primary
+            let b_opt = compute_b_opt_ms(t_io_ms, t_kernel_ms);
+            let ghost_ttft = backend.ghost_ttft_ms().unwrap_or(0.0);
+            let ghost_active = ghost_ttft > 0.0 && ghost_ttft < t_io_ms;
+            let gc = if ghost_active { 0.75 * 4.0 * t_kernel_ms * 0.75 } else { 0.0 };
+            let rho = (b_opt as f64 * t_kernel_ms + gc) / (t_io_ms + 1.0);
+
+            ProtocolDecision {
+                protocol, backend, measured_speed_mbps,
+                d_opt: 0, b_opt, t_io_ms, t_kernel_ms,
+                ghost_drafting: ghost_active,
+                ghost_ttft_ms: ghost_ttft,
+                self_speculative: false,
+                rho, warning: None,
+            }
+        }
+        StreamingProtocol::MistDegraded => {
+            // M.I.S.T. v3 degraded: Ghost Drafting only, user warned
+            let b_opt = compute_b_opt_ms(t_io_ms, t_kernel_ms);
+            let ghost_ttft = backend.ghost_ttft_ms().unwrap_or(0.0);
+            let ghost_active = ghost_ttft > 0.0 && ghost_ttft < t_io_ms;
+
+            ProtocolDecision {
+                protocol, backend, measured_speed_mbps,
+                d_opt: 0, b_opt, t_io_ms, t_kernel_ms,
+                ghost_drafting: ghost_active,
+                ghost_ttft_ms: ghost_ttft,
+                self_speculative: false, rho: 0.0,
+                warning: Some(format!(
+                    "Storage is very slow ({:.0} MB/s). TTFT={:.0}ms without Ghost.",
+                    measured_speed_mbps, t_io_ms
+                )),
+            }
+        }
+    }
+}
+
+/// CPU-only decision path from spec §CPU-Only Fallback.
+///
+/// - CPU + NVMe/SATA: S.L.I.P. D=2, ρ > 1 naturally (CPU is bottleneck),
+///   Ghost Drafting NOT applicable (CPU IS the ghost), no batch padding.
+/// - CPU + HDD: M.I.S.T., B_opt=4-5 (very manageable for personal use),
+///   Ghost Model runs on same CPU using available threads (~400ms TTFT).
+fn decide_cpu_only(
+    protocol: StreamingProtocol,
+    measured_speed_mbps: f64,
+    t_io_ms: f64,
+    t_kernel_ms: f64,
+) -> ProtocolDecision {
+    match protocol {
+        StreamingProtocol::SlipNvme | StreamingProtocol::SlipSata => {
+            // CPU-only on fast storage: ρ > 1 naturally
+            let rho = t_kernel_ms / t_io_ms.max(0.001);
+            ProtocolDecision {
+                protocol: StreamingProtocol::SlipNvme,
+                backend: ComputeBackend::CpuOnly,
+                measured_speed_mbps,
+                d_opt: 2, b_opt: 0, t_io_ms, t_kernel_ms,
+                ghost_drafting: false, // CPU IS the ghost
+                ghost_ttft_ms: 0.0,
+                self_speculative: false,
+                rho, warning: None,
+            }
+        }
+        StreamingProtocol::Mist | StreamingProtocol::MistDegraded => {
+            // CPU-only on slow storage: B_opt=4-5
+            let b_opt = compute_b_opt_ms(t_io_ms, t_kernel_ms);
+            let ghost_ttft = 400.0; // CPU Ghost Model TTFT
+            let ghost_active = ghost_ttft < t_io_ms;
+            let rho = (b_opt as f64 * t_kernel_ms) / (t_io_ms + 1.0);
+
+            ProtocolDecision {
+                protocol: StreamingProtocol::Mist,
+                backend: ComputeBackend::CpuOnly,
+                measured_speed_mbps,
+                d_opt: 0, b_opt, t_io_ms, t_kernel_ms,
+                ghost_drafting: ghost_active,
+                ghost_ttft_ms: ghost_ttft,
+                self_speculative: false, rho,
+                warning: if protocol == StreamingProtocol::MistDegraded {
+                    Some(format!(
+                        "Very slow ({:.0} MB/s) + CPU-only. ~{:.0}ms/token.",
+                        measured_speed_mbps, t_kernel_ms
+                    ))
+                } else {
+                    None
+                },
+            }
+        }
+    }
+}
+
+/// Compute D_opt from millisecond times.
+fn compute_d_opt_ms(t_compute_ms: f64, t_io_ms: f64) -> usize {
+    if t_io_ms <= 0.0 { return 2; }
+    ((t_compute_ms / t_io_ms).ceil() as usize + 1).clamp(2, 8)
+}
+
+/// Compute B_opt from millisecond times.
+fn compute_b_opt_ms(t_io_ms: f64, t_kernel_ms: f64) -> usize {
+    if t_kernel_ms <= 0.0 { return 1; }
+    ((t_io_ms / t_kernel_ms).ceil() as usize).clamp(1, 128)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -306,83 +627,51 @@ mod tests {
 
     #[test]
     fn test_d_opt_compute_equals_io() {
-        // When compute == IO, D_opt = ceil(1.0) + 1 = 2
-        let d = calculate_d_opt(
-            Duration::from_millis(10),
-            Duration::from_millis(10),
-        );
+        let d = calculate_d_opt(Duration::from_millis(10), Duration::from_millis(10));
         assert_eq!(d, 2);
     }
 
     #[test]
     fn test_d_opt_compute_slower_than_io() {
-        // T_compute=30ms, T_io=10ms → D_opt = ceil(3.0) + 1 = 4
-        let d = calculate_d_opt(
-            Duration::from_millis(30),
-            Duration::from_millis(10),
-        );
+        let d = calculate_d_opt(Duration::from_millis(30), Duration::from_millis(10));
         assert_eq!(d, 4);
     }
 
     #[test]
     fn test_d_opt_io_slower_than_compute() {
-        // T_compute=5ms, T_io=20ms → D_opt = ceil(0.25) + 1 = 2
-        let d = calculate_d_opt(
-            Duration::from_millis(5),
-            Duration::from_millis(20),
-        );
+        let d = calculate_d_opt(Duration::from_millis(5), Duration::from_millis(20));
         assert_eq!(d, 2);
     }
 
     #[test]
     fn test_d_opt_zero_io() {
-        // Zero I/O time → minimal pipeline
-        let d = calculate_d_opt(
-            Duration::from_millis(10),
-            Duration::ZERO,
-        );
+        let d = calculate_d_opt(Duration::from_millis(10), Duration::ZERO);
         assert_eq!(d, 2);
     }
 
     #[test]
     fn test_d_opt_clamped_to_bounds() {
-        // Very slow IO, fast compute → would give D > 8, but clamped
-        let d = calculate_d_opt(
-            Duration::from_millis(100),
-            Duration::from_millis(1),
-        );
-        assert_eq!(d, 8); // clamped to max
+        let d = calculate_d_opt(Duration::from_millis(100), Duration::from_millis(1));
+        assert_eq!(d, 8);
     }
 
     // ── B_opt Tests ──────────────────────────────────────────────
 
     #[test]
     fn test_b_opt_basic() {
-        // T_io=10ms, T_kernel=2ms → B_opt = ceil(5.0) = 5
-        let b = calculate_b_opt(
-            Duration::from_millis(10),
-            Duration::from_millis(2),
-        );
+        let b = calculate_b_opt(Duration::from_millis(10), Duration::from_millis(2));
         assert_eq!(b, 5);
     }
 
     #[test]
     fn test_b_opt_zero_kernel() {
-        // Zero kernel time → B_opt = 1
-        let b = calculate_b_opt(
-            Duration::from_millis(10),
-            Duration::ZERO,
-        );
+        let b = calculate_b_opt(Duration::from_millis(10), Duration::ZERO);
         assert_eq!(b, 1);
     }
 
     #[test]
     fn test_b_opt_clamped_to_64() {
-        // Very slow IO → large B, but clamped to 64
-        let b = calculate_b_opt(
-            Duration::from_millis(1000),
-            Duration::from_micros(100),
-        );
+        let b = calculate_b_opt(Duration::from_millis(1000), Duration::from_micros(100));
         assert_eq!(b, 64);
     }
 
@@ -390,49 +679,29 @@ mod tests {
 
     #[test]
     fn test_rho_perfect_overlap() {
-        // When compute == IO, ρ = 1.0
-        let rho = calculate_rho(
-            StreamingProtocol::SlipNvme,
-            Duration::from_millis(10),
-            Duration::from_millis(10),
-            1,
-        );
+        let rho = calculate_rho(StreamingProtocol::SlipNvme,
+            Duration::from_millis(10), Duration::from_millis(10), 1);
         assert!((rho - 1.0).abs() < 0.01);
     }
 
     #[test]
     fn test_rho_compute_bound() {
-        // T_compute=20ms, T_io=5ms → ρ = 20/20 = 1.0 (compute dominates)
-        let rho = calculate_rho(
-            StreamingProtocol::SlipNvme,
-            Duration::from_millis(20),
-            Duration::from_millis(5),
-            1,
-        );
+        let rho = calculate_rho(StreamingProtocol::SlipNvme,
+            Duration::from_millis(20), Duration::from_millis(5), 1);
         assert!((rho - 1.0).abs() < 0.01);
     }
 
     #[test]
     fn test_rho_io_bound() {
-        // T_compute=5ms, T_io=20ms → ρ = 5/20 = 0.25
-        let rho = calculate_rho(
-            StreamingProtocol::SlipNvme,
-            Duration::from_millis(5),
-            Duration::from_millis(20),
-            1,
-        );
+        let rho = calculate_rho(StreamingProtocol::SlipNvme,
+            Duration::from_millis(5), Duration::from_millis(20), 1);
         assert!((rho - 0.25).abs() < 0.01);
     }
 
     #[test]
     fn test_rho_mist_batch() {
-        // M.I.S.T.: T_compute=2ms, T_io=10ms, B=5 → ρ = (2*5)/10 = 1.0
-        let rho = calculate_rho(
-            StreamingProtocol::Mist,
-            Duration::from_millis(2),
-            Duration::from_millis(10),
-            5,
-        );
+        let rho = calculate_rho(StreamingProtocol::Mist,
+            Duration::from_millis(2), Duration::from_millis(10), 5);
         assert!((rho - 1.0).abs() < 0.01);
     }
 
@@ -456,5 +725,184 @@ mod tests {
     fn test_protocol_display() {
         assert_eq!(format!("{}", StreamingProtocol::SlipNvme), "S.L.I.P. v3 (NVMe)");
         assert_eq!(format!("{}", StreamingProtocol::Mist), "M.I.S.T. v3");
+    }
+
+    // ── Decision Matrix: GPU + NVMe ──────────────────────────────
+
+    #[test]
+    fn test_decision_gpu_nvme() {
+        // Spec: >= 3,000 MB/s → S.L.I.P. v3, self-speculative active
+        let d = decide_protocol(7_000.0, ComputeBackend::CudaGpu, DEFAULT_LAYER_SIZE_MB);
+        assert_eq!(d.protocol, StreamingProtocol::SlipNvme);
+        assert!(d.self_speculative);
+        assert!(!d.ghost_drafting);
+        assert!(d.d_opt >= 2);
+        assert_eq!(d.b_opt, 0);
+        assert!(d.warning.is_none());
+    }
+
+    // ── Decision Matrix: GPU + SATA ──────────────────────────────
+
+    #[test]
+    fn test_decision_gpu_sata() {
+        // Spec: >= 400 MB/s → S.L.I.P. v3 SATA, D=2, Ghost Drafting active
+        let d = decide_protocol(500.0, ComputeBackend::CudaGpu, DEFAULT_LAYER_SIZE_MB);
+        assert_eq!(d.protocol, StreamingProtocol::SlipSata);
+        assert_eq!(d.d_opt, 2);
+        assert!(d.ghost_drafting);
+        assert!(!d.self_speculative);
+    }
+
+    // ── Decision Matrix: GPU + HDD ───────────────────────────────
+
+    #[test]
+    fn test_decision_gpu_hdd_5400() {
+        // Spec: 110 MB/s (5400 RPM) → M.I.S.T., Ghost primary
+        // B_opt = ceil(4827 / 70) = 69
+        let d = decide_protocol(110.0, ComputeBackend::CudaGpu, DEFAULT_LAYER_SIZE_MB);
+        assert_eq!(d.protocol, StreamingProtocol::Mist);
+        assert!(d.ghost_drafting);
+        assert_eq!(d.b_opt, 69, "B_opt for 5400 RPM + GPU: {}", d.b_opt);
+        assert!(d.rho >= 0.95, "ρ should be ~1.0: {:.2}", d.rho);
+    }
+
+    #[test]
+    fn test_decision_gpu_hdd_7200() {
+        // Spec: 160 MB/s (7200 RPM) → M.I.S.T.
+        // B_opt = ceil(3319 / 70) = 48
+        let d = decide_protocol(160.0, ComputeBackend::CudaGpu, DEFAULT_LAYER_SIZE_MB);
+        assert_eq!(d.protocol, StreamingProtocol::Mist);
+        assert_eq!(d.b_opt, 48, "B_opt for 7200 RPM + GPU: {}", d.b_opt);
+    }
+
+    // ── Decision Matrix: GPU + Degraded ──────────────────────────
+
+    #[test]
+    fn test_decision_gpu_degraded() {
+        // Spec: < 50 MB/s → M.I.S.T. degraded, user warned
+        let d = decide_protocol(30.0, ComputeBackend::CudaGpu, DEFAULT_LAYER_SIZE_MB);
+        assert_eq!(d.protocol, StreamingProtocol::MistDegraded);
+        assert!(d.warning.is_some());
+        assert!(d.ghost_drafting);
+    }
+
+    // ── Decision Matrix: CPU + NVMe (spec §CPU-Only Fallback) ────
+
+    #[test]
+    fn test_decision_cpu_nvme() {
+        // Spec: CPU + NVMe → S.L.I.P. D=2, ρ > 1 (CPU bottleneck),
+        //       Ghost NOT applicable (CPU IS the ghost), no batch padding.
+        let d = decide_protocol(5_000.0, ComputeBackend::CpuOnly, DEFAULT_LAYER_SIZE_MB);
+        assert_eq!(d.protocol, StreamingProtocol::SlipNvme);
+        assert_eq!(d.d_opt, 2);
+        assert!(!d.ghost_drafting, "CPU IS the ghost — no drafting");
+        assert_eq!(d.b_opt, 0, "No batch padding for CPU+NVMe");
+        assert!(!d.self_speculative);
+        // ρ > 1 because CPU (1000ms) >> disk (106ms at 5GB/s)
+        assert!(d.rho > 1.0,
+            "ρ should be > 1 (CPU bottleneck, not disk): {:.1}", d.rho);
+    }
+
+    // ── Decision Matrix: CPU + SATA ──────────────────────────────
+
+    #[test]
+    fn test_decision_cpu_sata() {
+        // CPU + SATA → uses NVMe path (D=2, no Ghost)
+        let d = decide_protocol(500.0, ComputeBackend::CpuOnly, DEFAULT_LAYER_SIZE_MB);
+        assert_eq!(d.protocol, StreamingProtocol::SlipNvme);
+        assert_eq!(d.d_opt, 2);
+        assert!(!d.ghost_drafting);
+    }
+
+    // ── Decision Matrix: CPU + HDD (spec §CPU-Only on HDD) ──────
+
+    #[test]
+    fn test_decision_cpu_hdd_5400() {
+        // Spec: CPU + 5400 HDD → M.I.S.T., B_opt=5
+        // T_io = 531/110 * 1000 = 4827ms, T_kernel = 1000ms
+        // B_opt = ceil(4827/1000) = 5
+        let d = decide_protocol(110.0, ComputeBackend::CpuOnly, DEFAULT_LAYER_SIZE_MB);
+        assert_eq!(d.protocol, StreamingProtocol::Mist);
+        assert_eq!(d.b_opt, 5, "CPU B_opt for 5400 RPM: {}", d.b_opt);
+        assert!(d.ghost_drafting, "CPU Ghost on same threads");
+        assert!((d.ghost_ttft_ms - 400.0).abs() < 1.0, "CPU Ghost TTFT: {}", d.ghost_ttft_ms);
+    }
+
+    #[test]
+    fn test_decision_cpu_hdd_7200() {
+        // Spec: CPU + 7200 HDD → B_opt=4
+        // T_io = 531/160 * 1000 = 3319ms, T_kernel = 1000ms
+        // B_opt = ceil(3319/1000) = 4
+        let d = decide_protocol(160.0, ComputeBackend::CpuOnly, DEFAULT_LAYER_SIZE_MB);
+        assert_eq!(d.b_opt, 4, "CPU B_opt for 7200 RPM: {}", d.b_opt);
+    }
+
+    // ── Decision Matrix: Multiple GPU Backends ───────────────────
+
+    #[test]
+    fn test_decision_amd_hdd() {
+        let d = decide_protocol(160.0, ComputeBackend::RocmGpu, DEFAULT_LAYER_SIZE_MB);
+        assert_eq!(d.protocol, StreamingProtocol::Mist);
+        assert!(d.ghost_drafting);
+        assert!((d.ghost_ttft_ms - 100.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_decision_apple_hdd() {
+        let d = decide_protocol(160.0, ComputeBackend::MetalGpu, DEFAULT_LAYER_SIZE_MB);
+        assert_eq!(d.protocol, StreamingProtocol::Mist);
+        assert!(d.ghost_drafting);
+        assert!((d.ghost_ttft_ms - 60.0).abs() < 1.0); // UMA advantage
+    }
+
+    #[test]
+    fn test_decision_arc_nvme() {
+        let d = decide_protocol(5_000.0, ComputeBackend::VulkanGpu, DEFAULT_LAYER_SIZE_MB);
+        assert_eq!(d.protocol, StreamingProtocol::SlipNvme);
+        assert!(d.self_speculative);
+    }
+
+    // ── Compute Backend ──────────────────────────────────────────
+
+    #[test]
+    fn test_backend_cpu_only() {
+        assert!(ComputeBackend::CpuOnly.is_cpu_only());
+        assert!(!ComputeBackend::CudaGpu.is_cpu_only());
+    }
+
+    #[test]
+    fn test_backend_t_kernel() {
+        assert!((ComputeBackend::CudaGpu.t_kernel_ms() - 70.0).abs() < 0.1);
+        assert!((ComputeBackend::CpuOnly.t_kernel_ms() - 1000.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_backend_ghost_ttft() {
+        assert_eq!(ComputeBackend::CudaGpu.ghost_ttft_ms(), Some(80.0));
+        assert_eq!(ComputeBackend::CpuOnly.ghost_ttft_ms(), None);
+    }
+
+    #[test]
+    fn test_backend_display() {
+        let s = format!("{}", ComputeBackend::CudaGpu);
+        assert!(s.contains("CUDA"));
+    }
+
+    // ── Decision Display ─────────────────────────────────────────
+
+    #[test]
+    fn test_decision_display() {
+        let d = decide_protocol(110.0, ComputeBackend::CudaGpu, DEFAULT_LAYER_SIZE_MB);
+        let s = format!("{}", d);
+        assert!(s.contains("DriveInquisitor"));
+        assert!(s.contains("M.I.S.T."));
+    }
+
+    #[test]
+    fn test_decision_warning_display() {
+        let d = decide_protocol(20.0, ComputeBackend::CudaGpu, DEFAULT_LAYER_SIZE_MB);
+        assert!(d.warning.is_some());
+        let w = d.warning.unwrap();
+        assert!(w.contains("very slow"), "Warning: {}", w);
     }
 }

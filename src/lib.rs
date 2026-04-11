@@ -22,6 +22,11 @@ pub mod ucal;
 pub mod drive_inquisitor;
 pub mod metrics;
 pub mod pipeline;
+pub mod neuron_predicate;
+pub mod residency;
+pub mod batch_optimizer;
+pub mod kv_compress;
+pub mod ghost_drafting;
 pub mod strix;
 #[cfg(feature = "cuda")]
 pub mod uploader;

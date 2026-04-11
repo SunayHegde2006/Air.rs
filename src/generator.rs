@@ -141,6 +141,7 @@ impl InferenceGenerator {
         };
 
         // ── Generation loop ──────────────────────────────────────────
+        let decode_start = Instant::now();
         for step in 0..max_tokens {
             let next_token = self.generate_step(
                 step,
@@ -159,6 +160,8 @@ impl InferenceGenerator {
             self.metrics.record_token();
 
             if next_token == tokenizer.eos_id {
+                // Clear the live status line, then print EOS
+                eprint!("\r{:width$}\r", "", width = 80);
                 println!("\n[EOS]");
                 break;
             }
@@ -171,8 +174,24 @@ impl InferenceGenerator {
 
             generated_tokens.push(next_token);
             all_tokens.push(next_token);
+
+            // ── Live tok/s display ────────────────────────────────────
+            // Show real-time speed on stderr (overwrites same line)
+            let decode_elapsed = decode_start.elapsed().as_secs_f64();
+            if decode_elapsed > 0.0 && generated_tokens.len() > 1 {
+                let live_tps = (generated_tokens.len() - 1) as f64 / decode_elapsed;
+                eprint!(
+                    "\r  ⚡ {:.1} tok/s │ {} tokens │ {:.1}s",
+                    live_tps,
+                    generated_tokens.len(),
+                    decode_elapsed,
+                );
+                let _ = std::io::stderr().flush();
+            }
         }
 
+        // Clear the live status line
+        eprint!("\r{:width$}\r", "", width = 80);
         println!();
 
         // ── Print metrics summary ─────────────────────────────────────
@@ -243,6 +262,7 @@ impl InferenceGenerator {
             false
         };
 
+        let decode_start = Instant::now();
         for step in 0..max_tokens {
             let next_token = self.generate_step(
                 step,
@@ -260,6 +280,7 @@ impl InferenceGenerator {
             self.metrics.record_token();
 
             if next_token == tokenizer.eos_id {
+                eprint!("\r{:width$}\r", "", width = 80);
                 break;
             }
 
@@ -271,7 +292,23 @@ impl InferenceGenerator {
 
             generated_tokens.push(next_token);
             all_tokens.push(next_token);
+
+            // ── Live tok/s on stderr for stream mode too ──────────────
+            let decode_elapsed = decode_start.elapsed().as_secs_f64();
+            if decode_elapsed > 0.0 && generated_tokens.len() > 1 {
+                let live_tps = (generated_tokens.len() - 1) as f64 / decode_elapsed;
+                eprint!(
+                    "\r  ⚡ {:.1} tok/s │ {} tokens │ {:.1}s",
+                    live_tps,
+                    generated_tokens.len(),
+                    decode_elapsed,
+                );
+                use std::io::Write;
+                let _ = std::io::stderr().flush();
+            }
         }
+        // Clear live status line
+        eprint!("\r{:width$}\r", "", width = 80);
 
         // Send completion event with metrics
         let summary = self.metrics.summary();
