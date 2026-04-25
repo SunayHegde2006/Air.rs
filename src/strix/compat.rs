@@ -402,6 +402,15 @@ pub fn gguf_type_to_dtype(type_id: u32) -> DType {
         18 => DType::IQ3_XXS,
         19 => DType::IQ4_NL,
         20 => DType::IQ4_XS,
+        // IQ1/IQ3 ultra-low-bit variants (ggml_type 22-25)
+        22 => DType::IQ3_S,
+        23 => DType::IQ3_M,
+        24 => DType::IQ1_S,
+        25 => DType::IQ1_M,
+        // ARM NEON/SVE tile-optimised Q4_0 variants (ggml_type 31-33)
+        31 => DType::Q4_0_4_4,
+        32 => DType::Q4_0_4_8,
+        33 => DType::Q4_0_8_8,
         28 => DType::BF16,
         30 => DType::I32,
         _ => DType::F32, // fallback

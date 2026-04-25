@@ -100,7 +100,8 @@ impl GgufLoader {
     }
 
     /// Convert GGUF metadata into our simplified MetadataValue map.
-    fn extract_metadata(content: &gguf_file::Content) -> HashMap<String, MetadataValue> {
+    /// Also callable externally (e.g., from the Python bindings layer).
+    pub fn extract_metadata(content: &gguf_file::Content) -> HashMap<String, MetadataValue> {
         let mut map = HashMap::new();
 
         for (key, value) in &content.metadata {
@@ -129,7 +130,8 @@ impl GgufLoader {
     }
 
     /// Extract vocabulary and merge rules from the GGUF tokenizer metadata.
-    fn extract_tokenizer(content: &gguf_file::Content, metadata: &HashMap<String, MetadataValue>) -> Tokenizer {
+    /// Also callable externally (e.g., from the Python bindings layer).
+    pub fn extract_tokenizer(content: &gguf_file::Content, metadata: &HashMap<String, MetadataValue>) -> Tokenizer {
         // Extract vocabulary tokens
         let tokens: Vec<String> = content
             .metadata

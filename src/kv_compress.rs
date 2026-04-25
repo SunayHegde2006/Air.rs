@@ -884,3 +884,442 @@ mod tests {
         assert_eq!(bpt, 524_288);
     }
 }
+
+// ============================================================================
+// OPTIMAL COMPOUNDING STACK — Layer 3: QJL 1-bit JL-Transform KV Keys
+// ============================================================================
+//
+// Based on: "QJL: 1-Bit Quantized JL Transform for KV Cache Quantization" (2025)
+//
+// Johnson-Lindenstrauss random projection:
+//   k_compressed = sign(R × k)    where R ~ N(0,1) ∈ ℝ^{m×d}
+//
+// Similarity estimation via Hamming distance:
+//   dot(q, k) ≈ ‖q‖·‖k‖·cos(π·hamming(q*,k*)/m)
+//
+// Memory savings: d f32 → m bits (e.g., 128 → 64 bits for m=64)
+// Still beats existing 1-bit sign compression because:
+//   1. Independent Gaussian projection destroys correlation between dims
+//   2. JL theorem guarantees ε-similarity preservation w.h.p.
+
+/// Projection dimension for QJL (bits per key).
+/// 64 bits = 8 bytes vs 256 bytes BF16 → 32× compression.
+pub const QJL_PROJ_DIM: usize = 64;
+
+/// QJL-compressed key: 1-bit per projected dimension.
+///
+/// Stores `m` projected bits packed into `ceil(m/64)` u64 words,
+/// plus the original magnitude for similarity rescaling.
+#[derive(Clone, Debug)]
+pub struct QjlKey {
+    /// Packed sign bits of R×k, one bit per projected dimension.
+    pub bits: Vec<u64>,
+    /// ‖k‖ for rescaling the Hamming-based similarity estimate.
+    pub magnitude: f32,
+    /// Original key dimension d.
+    pub orig_dim: usize,
+    /// Projection dimension m.
+    pub proj_dim: usize,
+}
+
+impl QjlKey {
+    /// Compress a key vector using a fixed Gaussian projection matrix R.
+    ///
+    /// # Arguments
+    /// * `key`        — f32 key vector of length `d`
+    /// * `proj_matrix`— flattened Gaussian matrix `[m × d]`, row-major
+    /// * `proj_dim`   — m (number of projected bits)
+    pub fn compress(key: &[f32], proj_matrix: &[f32], proj_dim: usize) -> Self {
+        let orig_dim = key.len();
+        debug_assert_eq!(proj_matrix.len(), proj_dim * orig_dim,
+            "proj_matrix must be [proj_dim × orig_dim]");
+
+        let magnitude = key.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        let n_words = (proj_dim + 63) / 64;
+        let mut bits = vec![0u64; n_words];
+
+        for i in 0..proj_dim {
+            // Dot product of row i of R with key
+            let row = &proj_matrix[i * orig_dim..(i + 1) * orig_dim];
+            let dot: f32 = row.iter().zip(key).map(|(&r, &k)| r * k).sum();
+            // Sign-quantize: positive → 1, non-positive → 0
+            if dot > 0.0 {
+                bits[i / 64] |= 1u64 << (i % 64);
+            }
+        }
+
+        Self { bits, magnitude, orig_dim, proj_dim }
+    }
+
+    /// Estimate cosine similarity between a compressed query and this key.
+    ///
+    /// Query must be compressed with the **same** projection matrix R.
+    ///
+    /// Estimate: cos_sim(q,k) ≈ cos(π·d_H(q*,k*)/m)
+    /// where d_H is the Hamming distance between the bit vectors.
+    pub fn approx_cos_sim(&self, query_bits: &[u64]) -> f32 {
+        debug_assert_eq!(query_bits.len(), self.bits.len());
+        let hamming: u32 = self.bits.iter()
+            .zip(query_bits)
+            .map(|(a, b)| (a ^ b).count_ones())
+            .sum();
+        let angle = std::f32::consts::PI * hamming as f32 / self.proj_dim as f32;
+        // cos(π·d_H/m) — JL estimator
+        angle.cos()
+    }
+
+    /// Full similarity with magnitude rescaling (for ranking, not just ordering).
+    pub fn approx_dot(&self, query_bits: &[u64], query_magnitude: f32) -> f32 {
+        self.approx_cos_sim(query_bits) * self.magnitude * query_magnitude
+    }
+
+    /// Memory footprint in bytes.
+    pub fn size_bytes(&self) -> usize {
+        self.bits.len() * 8 + 4 // bits + magnitude
+    }
+}
+
+/// Generate a deterministic Gaussian projection matrix for QJL.
+///
+/// Uses a seeded LCG to avoid requiring `rand` dependency.
+/// Returns flattened `[proj_dim × orig_dim]` f32 matrix.
+///
+/// In production, generate this once at model load time and cache it.
+pub fn qjl_projection_matrix(proj_dim: usize, orig_dim: usize, seed: u64) -> Vec<f32> {
+    let n = proj_dim * orig_dim;
+    let mut state = seed.wrapping_add(1);
+    let mut out = Vec::with_capacity(n);
+
+    // Box-Muller transform using the LCG for pairs of uniform samples
+    let mut i = 0;
+    while i < n {
+        // Two uniform samples in (0, 1)
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let u1 = (state >> 11) as f32 / (1u64 << 53) as f32;
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let u2 = (state >> 11) as f32 / (1u64 << 53) as f32;
+
+        let u1 = u1.max(1e-10); // avoid log(0)
+        let r = (-2.0 * u1.ln()).sqrt();
+        let theta = 2.0 * std::f32::consts::PI * u2;
+
+        // Scale by 1/sqrt(orig_dim) for JL normalization
+        let scale = 1.0 / (orig_dim as f32).sqrt();
+        out.push(r * theta.cos() * scale);
+        i += 1;
+        if i < n {
+            out.push(r * theta.sin() * scale);
+            i += 1;
+        }
+    }
+    out
+}
+
+// ============================================================================
+// OPTIMAL COMPOUNDING STACK — Layer 3b: Fast KV Compaction
+// ============================================================================
+//
+// Based on: "Fast KV Compaction via Attention Matching" (2025)
+//
+// Instead of naive eviction (drop lowest-score tokens), merge similar tokens:
+//   If cosine_sim(k_i, k_j) > θ, replace (k_i, v_i) and (k_j, v_j) with:
+//     k_merged = (w_i·k_i + w_j·k_j) / (w_i + w_j)
+//     v_merged = (w_i·v_i + w_j·v_j) / (w_i + w_j)
+//
+// This preserves information better than deletion:
+//   - Similar keys represent tokens with the same attention pattern
+//   - Merging reduces KV count while keeping average attention distribution
+
+/// A single KV entry for compaction (raw f32 vectors).
+#[derive(Clone)]
+pub struct KvEntry {
+    /// Key vector [head_dim]
+    pub key: Vec<f32>,
+    /// Value vector [head_dim]
+    pub value: Vec<f32>,
+    /// Original token position (used for ordering after compaction)
+    pub position: usize,
+    /// Attention weight for this entry (used as merge weight)
+    pub attention_weight: f32,
+}
+
+/// Compact a list of KV entries by merging similar key-value pairs.
+///
+/// Algorithm:
+///   1. Compute pairwise cosine similarity for all key pairs.
+///   2. Greedily merge the most similar pair above the threshold.
+///   3. Repeat until no pair exceeds the threshold or budget is reached.
+///
+/// # Arguments
+/// * `entries`   — mutable list of KV entries to compact
+/// * `threshold` — cosine similarity threshold above which to merge (0.0–1.0)
+/// * `target_n`  — stop merging when entry count reaches this value (0 = merge all possible)
+///
+/// # Returns
+/// Compacted list with merged entries. Order is by position.
+pub fn compact_kv_by_similarity(
+    mut entries: Vec<KvEntry>,
+    threshold: f32,
+    target_n: usize,
+) -> Vec<KvEntry> {
+    if entries.len() <= 1 || (target_n > 0 && entries.len() <= target_n) {
+        return entries;
+    }
+
+    loop {
+        if target_n > 0 && entries.len() <= target_n {
+            break;
+        }
+
+        let n = entries.len();
+        // Find best merge pair: highest cosine similarity above threshold.
+        let mut best_sim = threshold;
+        let mut best_i = n;
+        let mut best_j = n;
+
+        for i in 0..n {
+            for j in i + 1..n {
+                let sim = cosine_sim_f32(&entries[i].key, &entries[j].key);
+                if sim > best_sim {
+                    best_sim = sim;
+                    best_i = i;
+                    best_j = j;
+                }
+            }
+        }
+
+        // No pair above threshold → done.
+        if best_i == n {
+            break;
+        }
+
+        // Merge best_j into best_i, then remove best_j.
+        let wi = entries[best_i].attention_weight;
+        let wj = entries[best_j].attention_weight;
+        let total_w = wi + wj;
+        let (w_i, w_j) = if total_w > 0.0 { (wi / total_w, wj / total_w) } else { (0.5, 0.5) };
+
+        let dim = entries[best_i].key.len();
+        let merged_key: Vec<f32> = (0..dim)
+            .map(|d| w_i * entries[best_i].key[d] + w_j * entries[best_j].key[d])
+            .collect();
+        let merged_val: Vec<f32> = (0..dim)
+            .map(|d| w_i * entries[best_i].value[d] + w_j * entries[best_j].value[d])
+            .collect();
+
+        // Use the earlier position for the merged entry.
+        let merged_pos = entries[best_i].position.min(entries[best_j].position);
+        let merged_weight = wi + wj; // Combined weight
+
+        entries[best_i] = KvEntry {
+            key: merged_key,
+            value: merged_val,
+            position: merged_pos,
+            attention_weight: merged_weight,
+        };
+        entries.remove(best_j);
+    }
+
+    // Sort by position to maintain sequence order.
+    entries.sort_by_key(|e| e.position);
+    entries
+}
+
+/// Cosine similarity between two f32 vectors.
+#[inline]
+fn cosine_sim_f32(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let dot: f32 = a.iter().zip(b).map(|(&x, &y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|&x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|&x| x * x).sum::<f32>().sqrt();
+    if norm_a > 0.0 && norm_b > 0.0 { dot / (norm_a * norm_b) } else { 0.0 }
+}
+
+// ── Tests: QJL + Fast KV Compaction ─────────────────────────────────────
+
+#[cfg(test)]
+mod ocs_kv_tests {
+    use super::*;
+
+    // ── QJL Tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn qjl_proj_matrix_length() {
+        let m = qjl_projection_matrix(64, 128, 42);
+        assert_eq!(m.len(), 64 * 128);
+    }
+
+    #[test]
+    fn qjl_proj_matrix_approx_normal() {
+        let m = qjl_projection_matrix(64, 128, 7);
+        let mean: f32 = m.iter().sum::<f32>() / m.len() as f32;
+        // Mean should be near 0 (Gaussian)
+        assert!(mean.abs() < 0.1, "mean={mean}");
+    }
+
+    #[test]
+    fn qjl_compress_size() {
+        let key = vec![1.0f32; 128];
+        let proj = qjl_projection_matrix(QJL_PROJ_DIM, 128, 0);
+        let compressed = QjlKey::compress(&key, &proj, QJL_PROJ_DIM);
+        assert_eq!(compressed.bits.len(), (QJL_PROJ_DIM + 63) / 64);
+        // 64 bits → 1 u64 word → 8 bytes + 4 = 12 bytes vs 256 bytes BF16
+        assert!(compressed.size_bytes() < 256 / 8);
+    }
+
+    #[test]
+    fn qjl_same_key_max_similarity() {
+        let key = vec![0.5f32; 128];
+        let proj = qjl_projection_matrix(QJL_PROJ_DIM, 128, 1);
+        let ck = QjlKey::compress(&key, &proj, QJL_PROJ_DIM);
+        // Same key compressed twice should have Hamming=0 → cos_sim=1
+        let ck2 = QjlKey::compress(&key, &proj, QJL_PROJ_DIM);
+        let sim = ck.approx_cos_sim(&ck2.bits);
+        assert!((sim - 1.0).abs() < 1e-6, "Same key sim={sim}");
+    }
+
+    #[test]
+    fn qjl_opposite_keys_low_similarity() {
+        let key_pos = vec![1.0f32; 128];
+        let key_neg = vec![-1.0f32; 128];
+        let proj = qjl_projection_matrix(QJL_PROJ_DIM, 128, 2);
+        let ck_pos = QjlKey::compress(&key_pos, &proj, QJL_PROJ_DIM);
+        let ck_neg = QjlKey::compress(&key_neg, &proj, QJL_PROJ_DIM);
+        let sim = ck_pos.approx_cos_sim(&ck_neg.bits);
+        // Opposite keys → all bits flipped → Hamming=64 → cos(π)=-1
+        assert!(sim < -0.5, "Opposite keys should be dissimilar: sim={sim}");
+    }
+
+    #[test]
+    fn qjl_approx_dot_scales_with_magnitude() {
+        let key1 = vec![1.0f32; 128];
+        let key2 = vec![2.0f32; 128]; // Same direction, 2× magnitude
+        let proj = qjl_projection_matrix(QJL_PROJ_DIM, 128, 3);
+        let ck1 = QjlKey::compress(&key1, &proj, QJL_PROJ_DIM);
+        let ck2 = QjlKey::compress(&key2, &proj, QJL_PROJ_DIM);
+        let dot = ck1.approx_dot(&ck2.bits, ck2.magnitude);
+        // Should be positive and meaningful
+        assert!(dot > 0.0, "Dot with itself (scaled) should be positive: {dot}");
+    }
+
+    #[test]
+    fn qjl_magnitude_stored_correctly() {
+        let key: Vec<f32> = (0..128).map(|i| i as f32 * 0.01).collect();
+        let expected_mag: f32 = key.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        let proj = qjl_projection_matrix(QJL_PROJ_DIM, 128, 5);
+        let ck = QjlKey::compress(&key, &proj, QJL_PROJ_DIM);
+        assert!((ck.magnitude - expected_mag).abs() < 1e-4, "magnitude mismatch");
+    }
+
+    // ── Fast KV Compaction Tests ─────────────────────────────────────────
+
+    fn make_entry(key: Vec<f32>, val: Vec<f32>, pos: usize, w: f32) -> KvEntry {
+        KvEntry { key, value: val, position: pos, attention_weight: w }
+    }
+
+    #[test]
+    fn compaction_empty_list() {
+        let out = compact_kv_by_similarity(vec![], 0.9, 0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn compaction_single_entry_unchanged() {
+        let entries = vec![make_entry(vec![1.0; 4], vec![0.5; 4], 0, 1.0)];
+        let out = compact_kv_by_similarity(entries, 0.9, 0);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn compaction_identical_keys_merged() {
+        // Two identical keys with threshold=0.9 → should merge into 1
+        let entries = vec![
+            make_entry(vec![1.0, 0.0, 0.0, 0.0], vec![1.0; 4], 0, 1.0),
+            make_entry(vec![1.0, 0.0, 0.0, 0.0], vec![2.0; 4], 1, 1.0),
+        ];
+        let out = compact_kv_by_similarity(entries, 0.9, 0);
+        assert_eq!(out.len(), 1, "Identical keys should merge");
+        // Merged value should be average: (1+2)/2 = 1.5
+        for &v in &out[0].value {
+            assert!((v - 1.5).abs() < 1e-5, "merged value should be 1.5, got {v}");
+        }
+    }
+
+    #[test]
+    fn compaction_orthogonal_keys_not_merged() {
+        // Orthogonal keys → sim=0 → should not merge
+        let entries = vec![
+            make_entry(vec![1.0, 0.0, 0.0, 0.0], vec![1.0; 4], 0, 1.0),
+            make_entry(vec![0.0, 1.0, 0.0, 0.0], vec![2.0; 4], 1, 1.0),
+        ];
+        let out = compact_kv_by_similarity(entries, 0.9, 0);
+        assert_eq!(out.len(), 2, "Orthogonal keys should not merge");
+    }
+
+    #[test]
+    fn compaction_respects_target_n() {
+        // 5 nearly-identical entries → merge until 2 remain
+        let keys = vec![
+            vec![1.0f32, 0.01, 0.0, 0.0],
+            vec![1.0f32, 0.02, 0.0, 0.0],
+            vec![1.0f32, 0.03, 0.0, 0.0],
+            vec![1.0f32, 0.04, 0.0, 0.0],
+            vec![1.0f32, 0.05, 0.0, 0.0],
+        ];
+        let entries: Vec<_> = keys.into_iter().enumerate()
+            .map(|(i, k)| make_entry(k, vec![i as f32; 4], i, 1.0))
+            .collect();
+        let out = compact_kv_by_similarity(entries, 0.8, 2);
+        assert!(out.len() <= 2, "Should compact to ≤2 entries, got {}", out.len());
+    }
+
+    #[test]
+    fn compaction_maintains_position_order() {
+        // After merging, entries should be sorted by position.
+        let entries = vec![
+            make_entry(vec![1.0, 0.0, 0.0, 0.0], vec![1.0; 4], 5, 1.0),
+            make_entry(vec![0.0, 1.0, 0.0, 0.0], vec![2.0; 4], 2, 1.0),
+            make_entry(vec![0.0, 0.0, 1.0, 0.0], vec![3.0; 4], 8, 1.0),
+        ];
+        let out = compact_kv_by_similarity(entries, 0.99, 0);
+        for w in out.windows(2) {
+            assert!(w[0].position <= w[1].position, "positions not ordered");
+        }
+    }
+
+    #[test]
+    fn compaction_weighted_merge() {
+        // Higher-weight entry should bias the merged key/value.
+        let entries = vec![
+            make_entry(vec![1.0, 0.0, 0.0, 0.0], vec![10.0; 4], 0, 9.0), // high weight
+            make_entry(vec![1.0, 0.0, 0.0, 0.0], vec![0.0; 4],  1, 1.0), // low weight
+        ];
+        let out = compact_kv_by_similarity(entries, 0.9, 0);
+        assert_eq!(out.len(), 1);
+        // Merged value = 9/10*10 + 1/10*0 = 9.0
+        for &v in &out[0].value {
+            assert!((v - 9.0).abs() < 1e-4, "weighted merge: got {v}");
+        }
+    }
+
+    #[test]
+    fn cosine_sim_identical() {
+        let a = vec![1.0f32, 2.0, 3.0];
+        assert!((cosine_sim_f32(&a, &a) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_sim_orthogonal() {
+        let a = vec![1.0f32, 0.0];
+        let b = vec![0.0f32, 1.0];
+        assert!(cosine_sim_f32(&a, &b).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_sim_zero_vector() {
+        let a = vec![0.0f32; 4];
+        let b = vec![1.0f32; 4];
+        // Should return 0 safely, no NaN
+        assert_eq!(cosine_sim_f32(&a, &b), 0.0);
+    }
+}

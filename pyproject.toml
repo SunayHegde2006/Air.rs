@@ -1,0 +1,67 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "air-rs"
+version = "0.1.0"
+description = "High-performance, memory-fluid LLM inference engine — Rust speed, Python convenience."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Sunay Hegde" }]
+keywords = ["llm", "inference", "gguf", "machine-learning", "rust"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.11"
+# No Python runtime deps — everything is in the .so
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/sunayhegde/Air.rs"
+Repository = "https://github.com/sunayhegde/Air.rs"
+Issues = "https://github.com/sunayhegde/Air.rs/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "mypy>=1.9", "ruff>=0.4"]
+
+# ── Maturin config ────────────────────────────────────────────────────────────
+
+[tool.maturin]
+# Rust features to activate when building the Python extension
+features = ["python"]
+# The native .so lives inside the package as a private module (_air_rs)
+# __init__.py re-exports everything — same pattern as `tokenizers`/`orjson`
+module-name = "air_rs._air_rs"
+# Pure-Python package source directory
+python-source = "python"
+# PEP 517 sdist includes the Rust source
+include = ["Cargo.toml", "Cargo.lock", "src/**/*", "build.rs"]
+# Strip debug symbols in release builds (already in [profile.release])
+strip = true
+
+# ── Linting ───────────────────────────────────────────────────────────────────
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = false
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+addopts = "-v --tb=short"

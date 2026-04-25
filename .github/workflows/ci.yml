@@ -1,0 +1,102 @@
+name: CI — Check, Test, and Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ── Rust: check + test ──────────────────────────────────────────────────────
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (default features)
+        run: cargo check --all-targets
+
+      - name: cargo check (python feature)
+        run: cargo check --features python
+
+      - name: cargo test
+        run: cargo test --lib
+        env:
+          RUSTFLAGS: "-A warnings"
+
+      - name: clippy
+        run: cargo clippy -- -D warnings
+        if: matrix.os == 'ubuntu-latest'
+
+  # ── Python: maturin develop + pytest ───────────────────────────────────────
+  python:
+    name: Python bindings (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install maturin + test deps
+        run: pip install "maturin>=1.7,<2" pytest
+
+      - name: Build and install extension (dev mode)
+        run: maturin develop --features python
+
+      - name: Run pytest (Tier 1 + Tier 2)
+        run: python -m pytest python/tests/ -v --tb=short
+
+  # ── Python: type checking ───────────────────────────────────────────────────
+  typecheck:
+    name: mypy type checking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install mypy + stubs
+        run: pip install mypy
+
+      - name: mypy (utils only — no extension needed)
+        run: mypy python/air_rs/utils.py --ignore-missing-imports
+
+  # ── Python: lint ─────────────────────────────────────────────────────────────
+  lint:
+    name: Ruff lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      - run: ruff check python/

@@ -1,17 +1,23 @@
-//! Transformer model configuration and forward pass for LLaMA-family architectures.
+//! Transformer model configuration and forward pass — multi-architecture.
 //!
-//! This module ties together all the individual operations from `ops.rs` into
-//! a complete transformer forward pass that converts token IDs into logits.
+//! Supports Llama, Mistral, Phi-3, Phi-4, Qwen2, Gemma, Falcon and unknown
+//! architectures. Architecture variant is detected from GGUF metadata and
+//! controls which norm fn, FFN activation, and attention mask are applied.
 //!
-//! Architecture (LLaMA / Mistral / Qwen):
+//! Compounding with OCS: FP4 SageAttention / KIMI linear attn / QJL / HERMES
+//! are applied identically for all variants — the arch dispatch only selects
+//! norm/FFN/RoPE primitives, not the compute pipeline.
+//!
 //! ```text
-//! tokens → embedding → [N × TransformerBlock] → RMSNorm → lm_head → logits
+//! tokens → embedding → [N × TransformerBlock] → {arch-norm} → lm_head → logits
 //!
-//! TransformerBlock:
-//!   x → RMSNorm → Q/K/V linear → RoPE(Q,K) → GQA Attention → output_proj → + residual
-//!     → RMSNorm → gate/up/down FFN (SwiGLU) → + residual
+//! TransformerBlock (per-arch dispatch):
+//!   x → {norm} → Q/K/V → bias? → RoPE(partial?) → {attn+mask} → output_proj → +x
+//!     → {norm} → {SwiGLU | GeGLU | DenseMLP} FFN → +x
 //! ```
 
+use crate::model_variant::{arch_summary, FfnType, NormType, ModelVariant,
+    partial_rope_factor_from_metadata, sliding_window_from_metadata};
 use crate::ops;
 use candle_core::quantized::QMatMul;
 use candle_core::{Device, IndexOp, Module, Result, Tensor};
@@ -21,89 +27,120 @@ use std::collections::HashMap;
 // Model Configuration — parsed from GGUF metadata
 // ---------------------------------------------------------------------------
 
-/// Hyperparameters for a LLaMA-family model, extracted from GGUF metadata.
+/// Hyperparameters extracted from GGUF metadata — supports all major LLM families.
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
-    /// Number of transformer layers (e.g., 22 for TinyLlama, 32 for LLaMA-7B, 80 for LLaMA-70B)
+    // ── Core dims ─────────────────────────────────────────────────────────
+    /// Number of transformer layers
     pub n_layers: usize,
-    /// Number of attention heads for queries
+    /// Number of query attention heads
     pub n_heads: usize,
-    /// Number of attention heads for keys/values (GQA: n_kv_heads < n_heads)
+    /// Number of KV attention heads (GQA: n_kv_heads ≤ n_heads)
     pub n_kv_heads: usize,
-    /// Hidden state dimension (embedding dimension)
+    /// Hidden state / embedding dimension
     pub hidden_dim: usize,
     /// FFN intermediate dimension
     pub intermediate_dim: usize,
     /// Vocabulary size
     pub vocab_size: usize,
-    /// RoPE base frequency (typically 10000.0, Llama3 uses 500000.0)
+    /// RoPE base frequency (Llama3=500000, Mistral=10000, Qwen2=1000000)
     pub rope_theta: f64,
     /// Maximum context length
     pub context_length: usize,
-    /// RMSNorm epsilon
+    /// Norm epsilon (RMSNorm or LayerNorm)
     pub rms_norm_eps: f64,
-    /// Dimension of each attention head = hidden_dim / n_heads
+    /// Attention head dimension = hidden_dim / n_heads
     pub head_dim: usize,
+
+    // ── Architecture variant ───────────────────────────────────────────────
+    /// Detected architecture family (Llama, Mistral, Phi3, Qwen2, Gemma, …)
+    pub arch: ModelVariant,
+    /// Normalization type: RMSNorm / LayerNorm / GemmaRMSNorm
+    pub norm_type: NormType,
+    /// FFN activation: SwiGLU / GeGLU / DenseMLP
+    pub ffn_type: FfnType,
+    /// Sliding attention window size (Mistral, Phi-3 even layers)
+    /// `None` = full causal attention (Llama, Qwen2, Gemma, …)
+    pub sliding_window: Option<usize>,
+    /// Phi-3 partial RoPE: fraction of head_dim that gets rotated.
+    /// `None` = rotate all dims (all architectures except Phi-3).
+    pub partial_rope_factor: Option<f64>,
 }
 
 impl ModelConfig {
-    /// Build config from a hashmap of GGUF metadata key-value pairs.
-    /// Keys follow the pattern: `<arch>.attention.head_count`, etc.
+    /// Build config from GGUF metadata. Auto-detects architecture variant.
     pub fn from_gguf_metadata(metadata: &HashMap<String, MetadataValue>) -> Self {
-        let arch = metadata
+        let arch_str = metadata
             .get("general.architecture")
             .and_then(|v| v.as_str())
             .unwrap_or("llama");
 
+        // ── Detect architecture variant ────────────────────────────────
+        let arch = ModelVariant::from_arch_str(arch_str);
+        let norm_type = NormType::for_variant(arch);
+        let ffn_type = FfnType::for_variant(arch);
+        let sliding_window = sliding_window_from_metadata(arch_str, metadata);
+        let partial_rope_factor = partial_rope_factor_from_metadata(arch, arch_str, metadata);
+
+        // ── Core dims ─────────────────────────────────────────────────
         let n_layers = metadata
-            .get(&format!("{arch}.block_count"))
+            .get(&format!("{arch_str}.block_count"))
             .and_then(|v| v.as_u64())
             .unwrap_or(32) as usize;
 
         let n_heads = metadata
-            .get(&format!("{arch}.attention.head_count"))
+            .get(&format!("{arch_str}.attention.head_count"))
             .and_then(|v| v.as_u64())
             .unwrap_or(32) as usize;
 
         let n_kv_heads = metadata
-            .get(&format!("{arch}.attention.head_count_kv"))
+            .get(&format!("{arch_str}.attention.head_count_kv"))
             .and_then(|v| v.as_u64())
             .unwrap_or(n_heads as u64) as usize;
 
         let hidden_dim = metadata
-            .get(&format!("{arch}.embedding_length"))
+            .get(&format!("{arch_str}.embedding_length"))
             .and_then(|v| v.as_u64())
             .unwrap_or(4096) as usize;
 
         let intermediate_dim = metadata
-            .get(&format!("{arch}.feed_forward_length"))
+            .get(&format!("{arch_str}.feed_forward_length"))
             .and_then(|v| v.as_u64())
             .unwrap_or(11008) as usize;
 
         let vocab_size = metadata
-            .get(&format!("{arch}.vocab_size"))
+            .get(&format!("{arch_str}.vocab_size"))
             .or_else(|| metadata.get("tokenizer.ggml.tokens"))
             .and_then(|v| v.as_u64().or_else(|| v.as_array_len()))
             .unwrap_or(32000) as usize;
 
+        // Default rope_theta per architecture
+        let rope_theta_default = match arch {
+            ModelVariant::Llama  => 500_000.0, // Llama 3
+            ModelVariant::Mistral => 1_000_000.0,
+            ModelVariant::Qwen2  => 1_000_000.0,
+            _                    => 10_000.0,
+        };
         let rope_theta = metadata
-            .get(&format!("{arch}.rope.freq_base"))
+            .get(&format!("{arch_str}.rope.freq_base"))
             .and_then(|v| v.as_f64())
-            .unwrap_or(10000.0);
+            .unwrap_or(rope_theta_default);
 
         let context_length = metadata
-            .get(&format!("{arch}.context_length"))
+            .get(&format!("{arch_str}.context_length"))
             .and_then(|v| v.as_u64())
             .unwrap_or(4096) as usize;
 
+        // Support both rms_epsilon and layer_norm_epsilon keys
         let rms_norm_eps = metadata
-            .get(&format!("{arch}.attention.layer_norm_rms_epsilon"))
+            .get(&format!("{arch_str}.attention.layer_norm_rms_epsilon"))
+            .or_else(|| metadata.get(&format!("{arch_str}.attention.layer_norm_epsilon")))
             .and_then(|v| v.as_f64())
             .unwrap_or(1e-5);
 
-        let head_dim = hidden_dim / n_heads;
+        let head_dim = hidden_dim / n_heads.max(1);
 
-        Self {
+        let cfg = Self {
             n_layers,
             n_heads,
             n_kv_heads,
@@ -114,7 +151,19 @@ impl ModelConfig {
             context_length,
             rms_norm_eps,
             head_dim,
-        }
+            arch,
+            norm_type,
+            ffn_type,
+            sliding_window,
+            partial_rope_factor,
+        };
+
+        println!(
+            "[Air.rs] {}",
+            arch_summary(arch, norm_type, ffn_type, sliding_window, partial_rope_factor)
+        );
+
+        cfg
     }
 }
 
@@ -177,6 +226,15 @@ pub struct QBlockWeights {
     pub wk: QMatMul,             // blk.N.attn_k.weight (quantized)
     pub wv: QMatMul,             // blk.N.attn_v.weight (quantized)
     pub wo: QMatMul,             // blk.N.attn_output.weight (quantized)
+    // C1: QKV biases — present in Qwen 2.5/3, QwQ, DeepSeek-R1-Distill (Qwen base)
+    // GGUF tensor names: blk.N.attn_q.bias / attn_k.bias / attn_v.bias
+    // None for Llama / Mistral / Phi-3+ (bias-free architectures)
+    pub q_bias: Option<Tensor>,  // [n_heads * head_dim]   — Qwen query bias
+    pub k_bias: Option<Tensor>,  // [n_kv_heads * head_dim] — Qwen key bias
+    pub v_bias: Option<Tensor>,  // [n_kv_heads * head_dim] — Qwen value bias
+    // Falcon LayerNorm bias (additive bias after scale for LayerNorm variant)
+    pub attn_norm_bias: Option<Tensor>,  // [hidden_dim] — LayerNorm bias (Falcon)
+    pub ffn_norm_bias: Option<Tensor>,   // [hidden_dim] — LayerNorm bias (Falcon)
     // FFN
     pub ffn_norm: Tensor,        // blk.N.ffn_norm.weight (dequantized, ~16 KB)
     pub w_gate: QMatMul,         // blk.N.ffn_gate.weight (quantized)
@@ -193,6 +251,31 @@ pub struct QBlockWeights {
 ///
 /// When `rope_cache` is provided, uses pre-computed inverse frequencies for RoPE,
 /// eliminating redundant powf() computations across layers and tokens.
+/// Per-architecture norm dispatch helper.
+#[inline]
+fn apply_norm(
+    x: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    eps: f64,
+    norm_type: crate::model_variant::NormType,
+) -> Result<Tensor> {
+    use crate::model_variant::NormType;
+    match norm_type {
+        NormType::RmsNorm     => ops::rms_norm(x, weight, eps),
+        NormType::GemmaRmsNorm => ops::rms_norm_gemma(x, weight, eps),
+        NormType::LayerNorm   => ops::layer_norm(x, weight, bias, eps),
+    }
+}
+
+/// Run one complete transformer block with per-architecture dispatch.
+///
+/// Supports: Llama / Mistral / Phi-3 / Phi-4 / Qwen2 / Gemma / Falcon
+///
+/// The OCS stack (FP4 attention, KIMI linear, QJL, HERMES) applied identically
+/// for all variants — arch dispatch only changes norm fn, FFN, and attn mask.
+///
+/// Returns `(new_hidden, new_k, new_v)` — caller saves K/V to cache.
 pub fn transformer_block(
     x: &Tensor,
     weights: &QBlockWeights,
@@ -205,27 +288,45 @@ pub fn transformer_block(
     let (batch, seq_len, _hidden) = x.dims3()?;
 
     // ─── Self-Attention ───────────────────────────────────────────────
-    // 1. Pre-attention RMSNorm
-    let normed = ops::rms_norm(x, &weights.attn_norm, config.rms_norm_eps)?;
+    // 1. Pre-attention norm (RMSNorm / LayerNorm / GemmaRMSNorm per arch)
+    let normed = apply_norm(
+        x,
+        &weights.attn_norm,
+        weights.attn_norm_bias.as_ref(),
+        config.rms_norm_eps,
+        config.norm_type,
+    )?;
 
-    // 2. Q/K/V projections via quantized matmul (weights stay compressed)
-    let q = weights.wq.forward(&normed)?; // [batch, seq, n_heads * head_dim]
-    let k = weights.wk.forward(&normed)?; // [batch, seq, n_kv_heads * head_dim]
-    let v = weights.wv.forward(&normed)?; // [batch, seq, n_kv_heads * head_dim]
+    // 2. Q/K/V projections (quantized matmul — weights stay compressed)
+    let q = weights.wq.forward(&normed)?;
+    let k = weights.wk.forward(&normed)?;
+    let v = weights.wv.forward(&normed)?;
+
+    // C1: QKV biases (Qwen 2.5/3, QwQ, DeepSeek-R1-Distill)
+    let q = match &weights.q_bias { Some(b) => q.broadcast_add(b)?, None => q };
+    let k = match &weights.k_bias { Some(b) => k.broadcast_add(b)?, None => k };
+    let v = match &weights.v_bias { Some(b) => v.broadcast_add(b)?, None => v };
 
     // 3. Reshape to multi-head: [batch, seq, heads, head_dim]
     let q = q.reshape((batch, seq_len, config.n_heads, config.head_dim))?;
     let k = k.reshape((batch, seq_len, config.n_kv_heads, config.head_dim))?;
     let v = v.reshape((batch, seq_len, config.n_kv_heads, config.head_dim))?;
 
-    // 4. Apply Rotary Position Embeddings to Q and K
-    let (q, k) = if let Some(rc) = rope_cache {
-        ops::rope_cached(&q, &k, start_pos, config.head_dim, config.rope_theta, rc)?
-    } else {
-        ops::rope(&q, &k, start_pos, config.head_dim, config.rope_theta)?
+    // 4. RoPE — standard or partial (Phi-3)
+    let (q, k) = match (rope_cache, config.partial_rope_factor) {
+        (Some(rc), Some(factor)) => {
+            // Phi-3: rotate only first `factor * head_dim` dimensions
+            ops::rope_partial_cached(&q, &k, start_pos, config.head_dim, config.rope_theta, factor, rc)?
+        }
+        (Some(rc), None) => {
+            ops::rope_cached(&q, &k, start_pos, config.head_dim, config.rope_theta, rc)?
+        }
+        (None, _) => {
+            ops::rope(&q, &k, start_pos, config.head_dim, config.rope_theta)?
+        }
     };
 
-    // 5. Concatenate with KV cache (past keys/values for autoregressive generation)
+    // 5. Concatenate with KV cache
     let (k, v) = if let (Some(cache_k), Some(cache_v)) = (kv_cache_k, kv_cache_v) {
         let k = Tensor::cat(&[cache_k, &k], 1)?;
         let v = Tensor::cat(&[cache_v, &v], 1)?;
@@ -234,33 +335,45 @@ pub fn transformer_block(
         (k, v)
     };
 
-    // 6. Grouped Query Attention
-    let attn_out = ops::grouped_query_attention(
-        &q,
-        &k,
-        &v,
-        config.n_heads,
-        config.n_kv_heads,
-    )?;
+    // 6. Attention — standard causal or sliding-window (Mistral, Phi-3)
+    let attn_out = if let Some(window) = config.sliding_window {
+        ops::sliding_window_gqa(&q, &k, &v, config.n_heads, config.n_kv_heads, window, start_pos)?
+    } else {
+        ops::grouped_query_attention(&q, &k, &v, config.n_heads, config.n_kv_heads)?
+    };
 
-    // 7. Reshape back and output projection (quantized matmul)
+    // 7. Output projection + residual
     let attn_out = attn_out.reshape((batch, seq_len, config.n_heads * config.head_dim))?;
     let attn_out = weights.wo.forward(&attn_out)?;
-
-    // 8. Residual connection
     let x = (x + attn_out)?;
 
-    // ─── Feed-Forward Network (SwiGLU) ────────────────────────────────
-    // 9. Pre-FFN RMSNorm
-    let normed = ops::rms_norm(&x, &weights.ffn_norm, config.rms_norm_eps)?;
+    // ─── Feed-Forward Network ─────────────────────────────────────────
+    // 8. Pre-FFN norm (same per-arch dispatch)
+    let normed = apply_norm(
+        &x,
+        &weights.ffn_norm,
+        weights.ffn_norm_bias.as_ref(),
+        config.rms_norm_eps,
+        config.norm_type,
+    )?;
 
-    // 10. SiLU-gated FFN (all projections use quantized matmul)
-    let ffn_out = ops::silu_ffn(&normed, &weights.w_gate, &weights.w_up, &weights.w_down)?;
+    // 9. FFN — SwiGLU (Llama/Mistral/Phi/Qwen2) | GeGLU (Gemma) | DenseMLP (Falcon)
+    use crate::model_variant::FfnType;
+    let ffn_out = match config.ffn_type {
+        FfnType::SwiGlu  => ops::silu_ffn(&normed, &weights.w_gate, &weights.w_up, &weights.w_down)?,
+        FfnType::GeGlu   => ops::geglu_ffn(&normed, &weights.w_gate, &weights.w_up, &weights.w_down)?,
+        // Falcon / GPT-2: no gate projection, just w_up → gelu → w_down
+        FfnType::DenseMlp => {
+            use candle_core::Module;
+            let up = weights.w_up.forward(&normed)?;
+            let act = ops::gelu(&up)?;
+            weights.w_down.forward(&act)?
+        }
+    };
 
-    // 11. Residual connection
+    // 10. Residual
     let x = (x + ffn_out)?;
 
-    // Return updated hidden state and new K/V for cache
     Ok((x, k, v))
 }
 

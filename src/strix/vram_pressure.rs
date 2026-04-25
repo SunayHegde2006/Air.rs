@@ -175,7 +175,7 @@ impl VramPressureManager {
 /// The factor of 2 accounts for both K and V caches.
 ///
 /// # Example (LLaMA 70B, Q8_0 KV, 4K context)
-/// ```
+/// ```text
 /// let bytes = strix::vram_pressure::kv_cache_budget(
 ///     4096, 64, 128, 80, 1  // seq, heads, head_dim, layers, Q8_0
 /// );

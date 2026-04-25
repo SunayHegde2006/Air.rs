@@ -7,7 +7,7 @@
     This is the one script you need. It:
       1. Auto-detects Windows SDK, MSVC, and CUDA paths
       2. Loads the Visual Studio environment (vcvars64)
-      3. Asks which features to enable (cuda, flash-attn, metal, python)
+      3. Asks which features to enable (cuda, flash-attn, vulkan, python, arb-heap, arb-lockfree)
       4. Cleans stale stdc++ stubs if needed
       5. Runs cargo build
 
@@ -74,6 +74,26 @@ try {
     }
 } catch {
     if ($hasGpu) { Write-Warn "NVIDIA GPU found but CUDA Toolkit not in PATH" }
+}
+
+# Vulkan check
+$hasVulkan = $false
+try {
+    $vkInfo = vulkaninfo 2>&1 | Select-String "Vulkan Instance Version"
+    if ($vkInfo) {
+        $hasVulkan = $true
+        $vkVersion = ($vkInfo -replace '.*: ', '').Trim()
+        Write-Step "Vulkan: $vkVersion"
+    }
+} catch { }
+if (-not $hasVulkan) {
+    # Fallback: check for vulkan-1.dll
+    if (Test-Path "$env:SystemRoot\System32\vulkan-1.dll") {
+        $hasVulkan = $true
+        Write-Step "Vulkan: runtime DLL found (vulkan-1.dll)"
+    } else {
+        Write-Info "Vulkan not detected (install Vulkan SDK to enable)"
+    }
 }
 
 # ============================================================================
@@ -181,7 +201,8 @@ $features = @()
 
 if ($SkipPrompt) {
     # Default: enable everything available
-    if ($hasCuda) { $features += 'cuda'; $features += 'flash-attn' }
+    if ($hasCuda)   { $features += 'cuda'; $features += 'flash-attn' }
+    if ($hasVulkan) { $features += 'vulkan' }
     Write-Info "SkipPrompt: auto-selected features: $($features -join ', ')"
 } else {
     Write-Host "  Available features:" -ForegroundColor White
@@ -189,8 +210,7 @@ if ($SkipPrompt) {
 
     # CUDA
     if ($hasCuda) {
-        $label = "cuda         - NVIDIA GPU acceleration (CUDA $cudaVersion detected)"
-        Write-Host "    [1] $label" -ForegroundColor Green
+        Write-Host "    [1] cuda         - NVIDIA GPU acceleration (CUDA $cudaVersion detected)" -ForegroundColor Green
     } else {
         Write-Host "    [1] cuda         - NVIDIA GPU (not available - no CUDA)" -ForegroundColor DarkGray
     }
@@ -202,8 +222,19 @@ if ($SkipPrompt) {
         Write-Host "    [2] flash-attn   - Flash Attention 2 (requires CUDA)" -ForegroundColor DarkGray
     }
 
+    # Vulkan
+    if ($hasVulkan) {
+        Write-Host "    [3] vulkan       - Vulkan 1.2 GPU compute (STRIX VulkanHal)" -ForegroundColor Green
+    } else {
+        Write-Host "    [3] vulkan       - Vulkan (not detected - install Vulkan SDK)" -ForegroundColor DarkGray
+    }
+
     # Python
-    Write-Host "    [3] python       - PyO3 Python bindings" -ForegroundColor Green
+    Write-Host "    [4] python       - PyO3 Python bindings" -ForegroundColor Green
+
+    # ARB optional deps
+    Write-Host "    [5] arb-heap     - O(log n) priority queue for ARB scheduler (W>512)" -ForegroundColor Green
+    Write-Host "    [6] arb-lockfree - Lock-free enqueue via crossbeam (high-freq HTTP)" -ForegroundColor Green
 
     # CPU only
     Write-Host "    [0] (none)       - CPU-only build" -ForegroundColor Yellow
@@ -225,7 +256,13 @@ if ($SkipPrompt) {
                 if ($hasCuda) { $features += 'flash-attn' }
                 else { Write-Warn "Skipping flash-attn - requires CUDA" }
             }
-            '3' { $features += 'python' }
+            '3' {
+                if ($hasVulkan) { $features += 'vulkan' }
+                else { Write-Warn "Skipping vulkan - Vulkan runtime not detected" }
+            }
+            '4' { $features += 'python' }
+            '5' { $features += 'arb-heap' }
+            '6' { $features += 'arb-lockfree' }
             '0' { }
             default { Write-Warn "Unknown selection: $sel (ignored)" }
         }
@@ -269,6 +306,19 @@ Write-Host ""
 
 $cmd = "cargo build $buildProfile $featureArg"
 Write-Info "Running: $cmd"
+Write-Host ""
+
+# OCS Algorithm Summary
+Write-Host ""
+Write-Host "  --- Optimal Compounding Stack (always enabled) ---" -ForegroundColor White
+Write-Host ""
+Write-Host "  [+] SageAttention3 FP4 microscaling    (fp4_attention, ops.rs)" -ForegroundColor Green
+Write-Host "  [+] KIMI Linear Attention O(N*D2)       (linear_attention_kimi, ops.rs)" -ForegroundColor Green
+Write-Host "  [+] Gated Attention sink-suppression    (gated_attention, ops.rs)" -ForegroundColor Green
+Write-Host "  [+] QJL 1-bit JL-transform KV keys      (QjlKey, kv_compress.rs)" -ForegroundColor Green
+Write-Host "  [+] Fast KV Compaction (cosine merge)   (compact_kv_by_similarity, kv_compress.rs)" -ForegroundColor Green
+Write-Host "  [+] HERMES importance-scored eviction   (HermesTierManager, kv_tier.rs)" -ForegroundColor Green
+Write-Host "  [+] ConceptMoE adaptive token routing   (concept_moe_forward, moe.rs)" -ForegroundColor Green
 Write-Host ""
 
 # Execute build
