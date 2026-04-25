@@ -45,7 +45,7 @@ crossbeam-channel = { version = "0.5", optional = true }
 
 # Model Hub & Utilities
 dirs = "5.0"
-ureq = { version = "2.10", default-features = false, features = ["native-tls", "gzip"] }
+ureq = { version = "2.10", default-features = false, features = ["tls", "gzip"] }
 sha2 = "0.10"
 uuid = { version = "1.10", features = ["v4"] }
 log = "0.4"
