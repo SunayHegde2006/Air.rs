@@ -3,14 +3,21 @@ name: Release — Build Wheels and Publish to PyPI
 on:
   push:
     tags:
-      - "v*.*.*"   # git tag v0.2.0 && git push --tags
+      - "v*.*.*"
 
 permissions:
   contents: read
-  id-token: write   # OIDC trusted publisher — no PYPI_TOKEN needed
+  id-token: write   # OIDC trusted publisher
+
+env:
+  # Suppress Node.js 20 deprecation warnings
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Pure-Rust TLS fallback — avoids needing OpenSSL in manylinux containers
+  OPENSSL_STATIC: 1
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 jobs:
-  # ── Linux wheels (manylinux_2_28, x86_64) ───────────────────────────────────
+  # ── Linux x86_64 (manylinux_2_28) ────────────────────────────────────────────
   linux-x86:
     name: Linux (x86_64)
     runs-on: ubuntu-latest
@@ -21,21 +28,24 @@ jobs:
         with:
           target: x86_64
           manylinux: 2_28
-          args: --release --features python --out dist -i python3.11 python3.12 python3.13
+          args: --release --features python --out dist -i 3.11 3.12 3.13
+          before-script-linux: |
+            # Ensure pkg-config + OpenSSL available (belt-and-suspenders)
+            # ureq uses rustls by default but some transitive deps may need this
+            yum install -y openssl-devel pkg-config || true
 
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-x86_64
           path: dist/*.whl
 
-  # ── Linux wheels (manylinux_2_28, aarch64) ──────────────────────────────────
+  # ── Linux aarch64 (manylinux_2_28 via QEMU) ──────────────────────────────────
   linux-aarch64:
     name: Linux (aarch64)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # QEMU required for cross-compiling aarch64 on x86_64 runner
       - uses: docker/setup-qemu-action@v3
         with:
           platforms: linux/arm64
@@ -44,14 +54,16 @@ jobs:
         with:
           target: aarch64
           manylinux: 2_28
-          args: --release --features python --out dist -i python3.11 python3.12 python3.13
+          args: --release --features python --out dist -i 3.11 3.12 3.13
+          before-script-linux: |
+            yum install -y openssl-devel pkg-config || true
 
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-aarch64
           path: dist/*.whl
 
-  # ── macOS universal2 (arm64 + x86_64) ───────────────────────────────────────
+  # ── macOS universal2 (arm64 + x86_64 via lipo) ───────────────────────────────
   macos:
     name: macOS universal2
     runs-on: macos-latest
@@ -61,6 +73,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: PyO3/maturin-action@v1
         with:
@@ -83,6 +99,8 @@ jobs:
         with:
           python-version: "3.11"
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - uses: PyO3/maturin-action@v1
         with:
           target: x86_64
@@ -93,7 +111,7 @@ jobs:
           name: wheels-windows-x86_64
           path: dist/*.whl
 
-  # ── Source distribution ──────────────────────────────────────────────────────
+  # ── Source distribution ───────────────────────────────────────────────────────
   sdist:
     name: Source distribution
     runs-on: ubuntu-latest
@@ -110,7 +128,7 @@ jobs:
           name: sdist
           path: dist/*.tar.gz
 
-  # ── Publish to PyPI via OIDC trusted publisher ───────────────────────────────
+  # ── Publish to PyPI via OIDC Trusted Publisher ────────────────────────────────
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
@@ -133,11 +151,6 @@ jobs:
       - name: List distribution files
         run: ls -lh dist/
 
-      # One-time PyPI setup: pypi.org -> Your project -> Publishing -> Add publisher
-      #   Repository owner : SunayHegde2006
-      #   Repository name  : Air.rs
-      #   Workflow filename: release.yml
-      #   Environment      : pypi
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
