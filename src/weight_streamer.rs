@@ -204,6 +204,25 @@ impl WeightStreamer {
                 &format!("{pfx}.attn_output.weight"),
                 device,
             )?,
+            // C1: Probe for optional QKV biases (Qwen 2.5/3, QwQ, DeepSeek-R1-Distill Qwen-based).
+            // GGUF tensor names: blk.N.attn_q.bias / attn_k.bias / attn_v.bias
+            // Returns None for bias-free architectures (Llama, Mistral, Phi-3+).
+            q_bias: self
+                .read_dequantized(&mut cursor, &format!("{pfx}.attn_q.bias"), device)
+                .ok(),
+            k_bias: self
+                .read_dequantized(&mut cursor, &format!("{pfx}.attn_k.bias"), device)
+                .ok(),
+            v_bias: self
+                .read_dequantized(&mut cursor, &format!("{pfx}.attn_v.bias"), device)
+                .ok(),
+            // LayerNorm bias tensors (Falcon). Optional — None for all RMSNorm architectures.
+            attn_norm_bias: self
+                .read_dequantized(&mut cursor, &format!("{pfx}.attn_norm.bias"), device)
+                .ok(),
+            ffn_norm_bias: self
+                .read_dequantized(&mut cursor, &format!("{pfx}.ffn_norm.bias"), device)
+                .ok(),
             ffn_norm: self.read_dequantized(
                 &mut cursor,
                 &format!("{pfx}.ffn_norm.weight"),

@@ -1,0 +1,137 @@
+name: Release — Build Wheels and Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*.*.*"   # triggers on: git tag v0.1.0 && git push --tags
+
+permissions:
+  contents: read
+  # OIDC trusted publisher — no PYPI_TOKEN needed in secrets
+  id-token: write
+
+jobs:
+  # ── Linux wheels (manylinux + musllinux, x86_64 + aarch64) ─────────────────
+  linux:
+    name: Linux (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: >-
+            --release
+            --features python
+            --out dist
+          manylinux: 2_28
+          # Also emit a musllinux wheel for Alpine-based containers
+          before-script-linux: |
+            case "${{ matrix.target }}" in
+              x86_64)  yum install -y openssl-devel ;;
+              aarch64) yum install -y openssl-devel ;;
+            esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist/*.whl
+
+  # ── macOS universal2 (arm64 + x86_64) ──────────────────────────────────────
+  macos:
+    name: macOS universal2
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: universal2-apple-darwin
+          args: >-
+            --release
+            --features python
+            --out dist
+          # Rustup targets for cross-compilation
+          before-script-linux: ""
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-universal2
+          path: dist/*.whl
+
+  # ── Windows x86_64 ──────────────────────────────────────────────────────────
+  windows:
+    name: Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          args: >-
+            --release
+            --features python
+            --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64
+          path: dist/*.whl
+
+  # ── Source distribution ─────────────────────────────────────────────────────
+  sdist:
+    name: Source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # ── Publish to PyPI via OIDC trusted publisher ──────────────────────────────
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [linux, macos, windows, sdist]
+    environment:
+      name: pypi
+      url: https://pypi.org/project/air-rs/
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          # Download all wheel + sdist artifacts into dist/
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+      - name: List distribution files
+        run: ls -lh dist/
+
+      # Trusted publisher: PyPI issues a short-lived OIDC token for this
+      # specific repo + workflow + environment. No PYPI_TOKEN secret needed.
+      # One-time setup: pypi.org -> Your project -> Publishing -> Add publisher
+      #   Repository owner : sunayhegde
+      #   Repository name  : Air.rs
+      #   Workflow filename: release.yml
+      #   Environment      : pypi
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true   # idempotent re-runs are safe

@@ -1,6 +1,8 @@
 # Build artifacts
 /target/
-
+/LLM Research Papers Parsed/
+/graphify-out/
+/graphifyy_env/
 # IDE
 .idea/
 .vscode/
@@ -23,4 +25,26 @@ Thumbs.db
 # Protocols
 *.md
 
+#Indentifiers
+*:Zone.Identifier
 
+#Bak files
+*.bak
+
+
+# Benchmark guide assets
+docs/*.png
+docs/*.jpg
+
+# Benchmark results
+results/
+*.json
+
+# Python cache
+__pycache__/
+*.pyc
+scripts/__pycache__/
+
+# Claw Code editor sessions
+.claw/
+.venv/

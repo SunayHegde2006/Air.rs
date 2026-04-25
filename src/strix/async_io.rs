@@ -22,17 +22,22 @@ mod io_uring_backend {
     use super::*;
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom};
+    #[allow(unused_imports)]
     use std::os::unix::io::AsRawFd;
 
     // io_uring syscall numbers (x86_64).
     const SYS_IO_URING_SETUP: i64 = 425;
+    #[allow(dead_code)]
     const SYS_IO_URING_ENTER: i64 = 426;
+    #[allow(dead_code)]
     const SYS_IO_URING_REGISTER: i64 = 427;
 
     // io_uring op codes.
+    #[allow(dead_code)]
     const IORING_OP_READ: u8 = 22;
 
     /// Ring size (power of 2).
+    #[allow(dead_code)]
     const RING_SIZE: u32 = 256;
 
     /// Completion record.

@@ -67,6 +67,15 @@ pub enum DType {
     IQ3_XXS,
     IQ4_NL,
     IQ4_XS,
+    // IQ1/IQ3 ultra-low-bit (P11)
+    IQ1_S,
+    IQ1_M,
+    IQ3_S,
+    IQ3_M,
+    // GGUF ARM NEON/SVE optimised tiles (P12 / GGUF 4.x)
+    Q4_0_4_4,  // Q4_0 with 4×4 tile transposition for ARM NEON
+    Q4_0_4_8,  // Q4_0 with 4×8 tile transposition for ARM NEON
+    Q4_0_8_8,  // Q4_0 with 8×8 tile transposition for ARM SVE
 }
 
 impl DType {
@@ -112,6 +121,12 @@ impl DType {
             Self::IQ3_XXS => 98,
             Self::IQ4_NL => 18,
             Self::IQ4_XS => 36,
+            // IQ1/IQ3 ultra-low-bit (P11)
+            Self::IQ1_S | Self::IQ1_M => 6,   // 6 bytes per 32-weight block
+            Self::IQ3_S => 166, // 256 weights: 32B qs + 32B qh + 16B scales + ...
+            Self::IQ3_M => 162, // same layout, slightly smaller metadata
+            // ARM NEON/SVE tiled Q4_0 (same bits-per-weight, reordered tile layout)
+            Self::Q4_0_4_4 | Self::Q4_0_4_8 | Self::Q4_0_8_8 => 18,
         }
     }
 
@@ -128,9 +143,14 @@ impl DType {
             // K-quants use 256 elements per super-block
             Self::Q2_K | Self::Q3_K | Self::Q4_K | Self::Q5_K
             | Self::Q6_K | Self::Q8_K => 256,
-            // IQ types
+            // IQ types — 256-element super-blocks
             Self::IQ2_XXS | Self::IQ2_XS | Self::IQ3_XXS => 256,
             Self::IQ4_XS => 256,
+            // IQ1/IQ3 ultra-low-bit
+            Self::IQ1_S | Self::IQ1_M => 32,   // 32 weights per 6-byte block
+            Self::IQ3_S | Self::IQ3_M => 256,  // 256 weights per super-block
+            // NEON/SVE tiled — same granularity as Q4_0
+            Self::Q4_0_4_4 | Self::Q4_0_4_8 | Self::Q4_0_8_8 => 32,
         }
     }
 }

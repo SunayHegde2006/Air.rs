@@ -24,6 +24,7 @@ use std::sync::Mutex;
 
 // ── Inner state ──────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 /// An open memory-mapped file.
 struct MappedFile {
     /// The raw bytes (memory-mapped via read-to-RAM).
@@ -292,6 +293,7 @@ impl MmapStorageHal {
     #[cfg(target_os = "linux")]
     fn read_direct_linux(path: &Path) -> Result<Vec<u8>, HalError> {
         use std::os::unix::fs::OpenOptionsExt;
+        #[allow(unused_imports)]
         use std::io::Read;
 
         // O_DIRECT requires:
@@ -367,6 +369,7 @@ impl MmapStorageHal {
     #[cfg(target_os = "windows")]
     fn read_direct_windows(path: &Path) -> Result<Vec<u8>, HalError> {
         use std::os::windows::fs::OpenOptionsExt;
+        #[allow(unused_imports)]
         use std::io::Read;
 
         // FILE_FLAG_NO_BUFFERING = 0x20000000

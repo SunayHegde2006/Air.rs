@@ -18,6 +18,7 @@
 //! - `generate()`: Synchronous, blocking. Prints tokens to stdout.
 //! - `generate_stream()`: Async. Sends `GenerationEvent`s via mpsc channel.
 
+use crate::gbnf::GbnfConstraint;
 use crate::kv_cache::KvCacheManager;
 use crate::metrics::{InferenceMetrics, LayerTiming};
 use crate::model::{self, ModelConfig};
@@ -66,6 +67,9 @@ pub struct InferenceGenerator {
     device: Device,
     metrics: InferenceMetrics,
     rope_cache: RopeCache,
+    /// Optional GBNF grammar constraint applied at each sampling step.
+    /// Set via `set_grammar()`, cleared via `clear_grammar()`.
+    gbnf: Option<GbnfConstraint>,
 }
 
 impl InferenceGenerator {
@@ -90,7 +94,27 @@ impl InferenceGenerator {
             device,
             metrics: InferenceMetrics::new(),
             rope_cache: RopeCache::new(),
+            gbnf: None,
         })
+    }
+
+    /// Attach a GBNF grammar constraint for the next generation.
+    ///
+    /// The constraint is applied at every sampling step, filtering logits so that
+    /// only grammatically valid tokens are sampled. Compounds with OCS: FP4/KIMI
+    /// compute is unchanged; the mask fires after logit projection.
+    pub fn set_grammar(&mut self, constraint: GbnfConstraint) {
+        self.gbnf = Some(constraint);
+    }
+
+    /// Remove any attached grammar constraint (revert to unconstrained sampling).
+    pub fn clear_grammar(&mut self) {
+        self.gbnf = None;
+    }
+
+    /// True if a grammar constraint is currently active.
+    pub fn has_grammar(&self) -> bool {
+        self.gbnf.is_some()
     }
 
     /// Generate tokens from a prompt using S.L.I.P. layer streaming (synchronous).
@@ -171,6 +195,17 @@ impl InferenceGenerator {
             // Flush immediately so tokens appear in real-time
             use std::io::Write;
             let _ = std::io::stdout().flush();
+
+            // Advance GBNF grammar state with the decoded token text
+            if let Some(gbnf) = self.gbnf.as_mut() {
+                gbnf.push_token(&token_str);
+                // If grammar satisfied, stop early
+                if gbnf.is_complete() {
+                    generated_tokens.push(next_token);
+                    all_tokens.push(next_token);
+                    break;
+                }
+            }
 
             generated_tokens.push(next_token);
             all_tokens.push(next_token);
@@ -286,8 +321,18 @@ impl InferenceGenerator {
 
             let token_str = tokenizer.decode_token(next_token).to_string();
             // Send token event — if receiver dropped, stop generating
-            if tx.try_send(GenerationEvent::Token(token_str)).is_err() {
+            if tx.try_send(GenerationEvent::Token(token_str.clone())).is_err() {
                 break;
+            }
+
+            // Advance GBNF grammar state
+            if let Some(gbnf) = self.gbnf.as_mut() {
+                gbnf.push_token(&token_str);
+                if gbnf.is_complete() {
+                    generated_tokens.push(next_token);
+                    all_tokens.push(next_token);
+                    break;
+                }
             }
 
             generated_tokens.push(next_token);
@@ -569,9 +614,12 @@ impl InferenceGenerator {
         let logits = logits.squeeze(0)
             .map_err(|e| anyhow::anyhow!("Logits squeeze failed: {e}"))?;
 
-        // ── Sample next token ────────────────────────────────────
-        let next_token = self.sampler.sample(&logits, all_tokens)
-            .map_err(|e| anyhow::anyhow!("Sampling failed: {e}"))?;
+        // ── Sample next token (with optional GBNF constraint) ────────────
+        let next_token = self.sampler.sample_constrained(
+            &logits,
+            all_tokens,
+            self.gbnf.as_ref(),
+        ).map_err(|e| anyhow::anyhow!("Sampling failed: {e}"))?;
 
         Ok(next_token)
     }

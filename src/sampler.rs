@@ -48,25 +48,54 @@ impl Sampler {
     }
 
     /// Given logits [vocab_size], return the sampled token ID.
+    ///
+    /// Equivalent to `sample_constrained(logits, past_tokens, None)`.
     pub fn sample(&mut self, logits: &Tensor, past_tokens: &[u32]) -> Result<u32> {
+        self.sample_constrained(logits, past_tokens, None)
+    }
+
+    /// Sample next token with optional GBNF grammar constraint.
+    ///
+    /// If `constraint` is `Some`, the token mask is applied to logits before
+    /// temperature scaling — ensuring only grammatically valid tokens are sampled.
+    ///
+    /// # Compounding with OCS
+    /// The GBNF mask fires after the full OCS forward pass. It reduces the valid
+    /// nucleus → temperature/top-k/top-p operate on a cleaner distribution →
+    /// higher P(correct token) without any extra compute cost.
+    pub fn sample_constrained(
+        &mut self,
+        logits: &Tensor,
+        past_tokens: &[u32],
+        constraint: Option<&crate::gbnf::GbnfConstraint>,
+    ) -> Result<u32> {
         let _device = logits.device();
-        // Ensure we're working with a 1D f32 tensor
+        // Ensure 1D f32
         let mut logits = logits.flatten_all()?.to_dtype(DType::F32)?;
+
 
         // 1. Apply repetition penalty
         if self.config.repetition_penalty != 1.0 {
             logits = self.apply_repetition_penalty(&logits, past_tokens)?;
         }
 
-        // 2. Greedy decoding (temperature = 0)
+        // 2. GBNF logit mask — applied before temperature to preserve ranking signal
+        // Tokens that violate the grammar get -inf regardless of confidence.
+        if let Some(c) = constraint {
+            let mut logits_vec: Vec<f32> = logits.to_vec1()?;
+            c.apply_to_logits(&mut logits_vec);
+            logits = Tensor::new(logits_vec, logits.device())?;
+        }
+
+        // 3. Greedy decoding (temperature = 0 or constraint forces single option)
         if self.config.temperature <= 0.0 || self.config.temperature < 1e-6 {
             return self.argmax(&logits);
         }
 
-        // 3. Temperature scaling
+        // 4. Temperature scaling
         logits = (&logits / self.config.temperature as f64)?;
 
-        // 4. Convert to probabilities via softmax
+        // 5. Convert to probabilities via softmax
         let probs = crate::ops::softmax(&logits, D::Minus1)?;
         let probs_vec: Vec<f32> = probs.to_vec1()?;
 
@@ -122,6 +151,89 @@ impl Sampler {
         let idx = logits.argmax(D::Minus1)?;
         let id: u32 = idx.to_scalar()?;
         Ok(id)
+    }
+
+    /// Sample next token AND return the top-1 softmax probability.
+    ///
+    /// Required by §7 ARB Integration Contract: `commit_results` needs
+    /// `(token, top1_prob, is_eos)` to drive confidence-gated coasting.
+    ///
+    /// `top1_prob` is the max softmax probability over the **filtered** nucleus
+    /// (after temperature / top-k / top-p), reflecting the model's confidence
+    /// in the chosen token within the active candidate set.
+    pub fn sample_with_top1(
+        &mut self,
+        logits: &Tensor,
+        past_tokens: &[u32],
+    ) -> Result<(u32, f32)> {
+        // Flatten + cast to f32
+        let mut logits_f32 = logits.flatten_all()?.to_dtype(candle_core::DType::F32)?;
+
+        // Repetition penalty
+        if self.config.repetition_penalty != 1.0 {
+            logits_f32 = self.apply_repetition_penalty(&logits_f32, past_tokens)?;
+        }
+
+        // Greedy path: top1_prob = softmax(argmax) value
+        if self.config.temperature <= 0.0 || self.config.temperature < 1e-6 {
+            let probs = crate::ops::softmax(&logits_f32, D::Minus1)?;
+            let probs_vec: Vec<f32> = probs.to_vec1()?;
+            let token = self.argmax(&logits_f32)?;
+            let top1_prob = probs_vec.get(token as usize).copied().unwrap_or(0.0);
+            return Ok((token, top1_prob));
+        }
+
+        // Temperature scaling
+        let scaled = (&logits_f32 / self.config.temperature as f64)?;
+        let probs = crate::ops::softmax(&scaled, D::Minus1)?;
+        let probs_vec: Vec<f32> = probs.to_vec1()?;
+
+        // Top-K filtering (same as `sample`)
+        let mut indexed: Vec<(usize, f32)> =
+            probs_vec.iter().enumerate().map(|(i, &p)| (i, p)).collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        if self.config.top_k > 0 && self.config.top_k < indexed.len() {
+            indexed.truncate(self.config.top_k);
+        }
+
+        // Top-P (nucleus) filtering
+        if self.config.top_p < 1.0 {
+            let mut cumsum = 0.0f32;
+            let mut cutoff = indexed.len();
+            for (i, (_, p)) in indexed.iter().enumerate() {
+                cumsum += p;
+                if cumsum >= self.config.top_p {
+                    cutoff = i + 1;
+                    break;
+                }
+            }
+            indexed.truncate(cutoff);
+        }
+
+        // top1_prob = highest probability after filtering (first in sorted order)
+        let top1_prob = indexed.first().map(|(_, p)| *p).unwrap_or(0.0);
+
+        // Renormalise + random weighted selection
+        let total: f32 = indexed.iter().map(|(_, p)| p).sum();
+        if total <= 0.0 {
+            let token = self.argmax(&probs)?;
+            let p = probs_vec.get(token as usize).copied().unwrap_or(0.0);
+            return Ok((token, p));
+        }
+
+        let r: f32 = self.rng.gen::<f32>() * total;
+        let mut cumsum = 0.0f32;
+        for (token_id, prob) in &indexed {
+            cumsum += prob;
+            if cumsum >= r {
+                return Ok((*token_id as u32, top1_prob));
+            }
+        }
+
+        // Fallback: highest probability candidate
+        let (token_id, top1) = indexed[0];
+        Ok((token_id as u32, top1))
     }
 
     /// Penalize tokens that have already been generated.

@@ -1,6 +1,8 @@
+// Suppress dead_code: rustc 1.95.0 ICEs on check_mod_deathness for repr(C)
+// structs with large arrays when cuda feature disabled. Remove when fixed upstream.
+#![allow(dead_code)]
 //! GPUDirect Storage integration (STRIX Protocol §9.4, S.L.I.P. v3 §Sub-System 2 Path A).
 //!
-//! GPUDirect Storage (GDS) enables direct DMA transfers from NVMe storage
 //! to GPU VRAM, bypassing the CPU and system RAM entirely:
 //!
 //! ```text
@@ -180,17 +182,14 @@ impl PinnedHostBuffer {
             });
         }
 
-        let mut registered = false;
-
         // Pin the buffer with cudaHostRegister if CUDA is available.
         #[cfg(feature = "cuda")]
-        {
+        let registered = {
             let code = unsafe { cudaHostRegister(ptr, size, CUDA_HOST_REGISTER_PORTABLE) };
-            if code == 0 {
-                registered = true;
-            }
-            // If registration fails, we still have a usable (unpinned) buffer.
-        }
+            code == 0
+        };
+        #[cfg(not(feature = "cuda"))]
+        let registered = false;
 
         Ok(Self {
             ptr,
@@ -500,16 +499,16 @@ impl GdsStorageHal {
     /// host buffer for the fallback staging path.
     pub fn new() -> Self {
         let capability = GdsCapability::probe();
-        let mut driver_initialized = false;
-
-        // Initialize cuFile driver if available.
+        // Initialize cuFile driver if available via cuFileDriverOpen.
         #[cfg(feature = "cuda")]
-        if capability.is_usable() {
+        let driver_initialized = if capability.is_usable() {
             let code = unsafe { cufile_ffi::cuFileDriverOpen() };
-            if code == 0 {
-                driver_initialized = true;
-            }
-        }
+            code == 0
+        } else {
+            false
+        };
+        #[cfg(not(feature = "cuda"))]
+        let driver_initialized = false;
 
         // Allocate pinned staging buffer (16MB — matches max GDS transfer size).
         let pinned_buffer = if capability.has_pinned_fallback() || !capability.is_usable() {
