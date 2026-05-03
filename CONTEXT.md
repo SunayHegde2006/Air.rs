@@ -32,6 +32,10 @@
 
 **Device Selector** — `GpuTopology::discover()` followed by `GpuTopology::device_at(ordinal) -> Option<Device>` or `GpuTopology::best_device() -> Device`. The single point of device selection in the system. `InferenceGenerator::new()` accepts a `candle_core::Device` as a constructor parameter and never constructs one itself. Python exposes this as `Engine.from_gguf(path, gpu_id=0)`. See ADR-0002.
 
+**Dispatcher** — A trait in `src/dispatcher.rs` with one method: `dispatch(model_id, prompt, config) -> BoxStream<TokenChunk>`. The seam between HTTP handlers and the inference runtime. `ApiState` holds `Arc<dyn Dispatcher>`. Concrete adapters: `SingleModelDispatcher` (wraps one `InferenceGenerator`), `ModelMuxDispatcher` (wraps `ModelMux`, v0.3.0), `MockDispatcher` (test double). Non-streaming responses collect the stream. See ADR-0003.
+
+**TokenChunk** — A tagged enum emitted by `Dispatcher::dispatch()`: `Token(String)` for mid-stream tokens, `Done(FinishReason)` for the final signal. `FinishReason` variants: `Stop`, `Length`, `Error(String)`. The enum makes it a compile error to emit token text on the final chunk or a finish reason on a mid-stream chunk.
+
 **Strix** — The hardware subsystem (`src/strix/`) containing all HAL adapters, the VRAM arena, GPU tensor views, and the IO engine.
 
 **ARB Scheduler** — The continuous-batching scheduler (`batching/arb.rs`) that groups requests into decode batches, manages sequence lifetimes, and interacts with the Tick Loop.
