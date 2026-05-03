@@ -19,7 +19,7 @@
 //! - `generate_stream()`: Async. Sends `GenerationEvent`s via mpsc channel.
 
 use crate::gbnf::GbnfConstraint;
-use crate::kv_cache::KvCacheManager;
+use crate::kv_cache::{KvCacheManager, SessionKvCache};
 use crate::metrics::{InferenceMetrics, LayerTiming};
 use crate::model::{self, ModelConfig};
 use crate::ops::{self, RopeCache};
@@ -61,7 +61,7 @@ pub struct GenerationMetricsSummary {
 }
 
 pub struct InferenceGenerator {
-    kv_cache: KvCacheManager,
+    kv_cache: Box<dyn SessionKvCache>,  // ADR-0004 trait seam
     sampler: Sampler,
     config: ModelConfig,
     device: Device,
@@ -73,6 +73,7 @@ pub struct InferenceGenerator {
 }
 
 impl InferenceGenerator {
+    /// Create with auto-detected device (CUDA → CPU fallback).
     pub fn new(
         config: ModelConfig,
         sampler_config: SamplerConfig,
@@ -83,10 +84,21 @@ impl InferenceGenerator {
                 Ok::<Device, candle_core::Error>(Device::Cpu)
             })
             .map_err(|e| anyhow::anyhow!("Failed to create device: {e}"))?;
+        Self::with_device(config, sampler_config, device)
+    }
 
-        let kv_cache = KvCacheManager::new_for_device(device.clone(), config.n_layers);
+    /// Create with an explicitly injected device (ADR-0002).
+    ///
+    /// Use this instead of `new()` when the caller selects the device
+    /// via `DeviceMap::primary()` or `candle_device(&ComputeBackend::...)`.
+    pub fn with_device(
+        config: ModelConfig,
+        sampler_config: SamplerConfig,
+        device: Device,
+    ) -> Result<Self> {
+        let kv_cache: Box<dyn SessionKvCache> =
+            Box::new(KvCacheManager::new_for_device(device.clone(), config.n_layers));
         let sampler = Sampler::new(sampler_config);
-
         Ok(Self {
             kv_cache,
             sampler,
@@ -428,7 +440,7 @@ impl InferenceGenerator {
 
                 let io_start = Instant::now();
                 let weights = streamer.load_layer(layer_id, &self.device)?;
-                let (cached_k, cached_v) = self.kv_cache.load_to_device(layer_id)
+                let (cached_k, cached_v) = self.kv_cache.load(layer_id)  // ADR-0004
                     .map_err(|e| anyhow::anyhow!("KV cache load failed at layer {layer_id}: {e}"))?;
                 let io_elapsed = io_start.elapsed();
 
@@ -453,7 +465,7 @@ impl InferenceGenerator {
                     h2d: std::time::Duration::ZERO,
                 });
 
-                self.kv_cache.save_from_device(layer_id, &new_k, &new_v)
+                self.kv_cache.append(layer_id, &new_k, &new_v)  // ADR-0004
                     .map_err(|e| anyhow::anyhow!("KV save failed at layer {layer_id}: {e}"))?;
 
                 drop(weights);
@@ -527,7 +539,7 @@ impl InferenceGenerator {
             // across all layers × all tokens. (P2-2: metrics gating)
             let io_start = if step == 0 { Some(Instant::now()) } else { None };
             let weights = streamer.load_layer(layer_id, &self.device)?;
-            let (cached_k, cached_v) = self.kv_cache.load_to_device(layer_id)
+            let (cached_k, cached_v) = self.kv_cache.load(layer_id)  // ADR-0004
                 .map_err(|e| anyhow::anyhow!("KV cache load failed at layer {layer_id}: {e}"))?;
             let io_elapsed = io_start.map(|s| s.elapsed());
 
@@ -558,7 +570,7 @@ impl InferenceGenerator {
 
             // ── TIMING: KV save ───────────────────────────────────
             let kv_start = if step == 0 { Some(Instant::now()) } else { None };
-            self.kv_cache.save_from_device(layer_id, &new_k, &new_v)
+            self.kv_cache.append(layer_id, &new_k, &new_v)  // ADR-0004
                 .map_err(|e| anyhow::anyhow!("KV save failed at layer {layer_id}: {e}"))?;
             let kv_elapsed = kv_start.map(|s| s.elapsed());
 
@@ -626,7 +638,7 @@ impl InferenceGenerator {
 
     /// Reset the KV cache (for starting a new conversation).
     pub fn reset(&mut self) {
-        self.kv_cache.clear();
+        self.kv_cache.clear();  // SessionKvCache trait (ADR-0004)
         self.metrics = InferenceMetrics::new();
     }
 
