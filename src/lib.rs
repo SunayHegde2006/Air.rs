@@ -25,7 +25,9 @@ pub mod speculative;
 pub mod tokenizer;
 pub mod tui;
 pub mod weight_streamer;
-pub mod ucal;
+pub mod shared_buffer;     // platform-agnostic SharedBuffer + ComputeBackend (ADR-0005)
+pub mod metal_compute;     // Metal kernels, context, command encoding (ADR-0005)
+pub mod ucal;              // compat shim — re-exports shared_buffer + metal_compute (ADR-0005)
 pub mod drive_inquisitor;
 pub mod metrics;
 pub mod pipeline;
