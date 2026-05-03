@@ -330,6 +330,37 @@ impl KvCacheManager {
         }
     }
 
+    /// Truncate KV cache to `pos` tokens across all layers.
+    ///
+    /// Used by speculative decoding to roll back draft tokens that were
+    /// rejected by the verifier. O(1) metadata update for the float path
+    /// (tensor `narrow` is zero-copy — it just repoints the Arc).
+    ///
+    /// **Q8 path**: Q8 block slicing is unsupported; Q8 should be disabled
+    /// during speculative decoding (per the protocol spec).
+    pub fn truncate_to(&mut self, pos: usize) {
+        for layer in &mut self.layers {
+            // Float path: narrow seq dimension (dim 1) to `pos` tokens.
+            if let Some(ref k) = layer.k_cache.clone() {
+                let seq = k.dim(1).unwrap_or(0);
+                if pos < seq {
+                    layer.k_cache = k.narrow(1, 0, pos).ok();
+                }
+            }
+            if let Some(ref v) = layer.v_cache.clone() {
+                let seq = v.dim(1).unwrap_or(0);
+                if pos < seq {
+                    layer.v_cache = v.narrow(1, 0, pos).ok();
+                }
+            }
+            // Q8 path: full block-slice not implemented; clear if pos == 0.
+            if pos == 0 {
+                layer.k_q8 = None;
+                layer.v_q8 = None;
+            }
+        }
+    }
+
     /// Total memory used by KV cache across all layers (in bytes).
     pub fn memory_usage(&self) -> usize {
         self.layers
@@ -359,6 +390,124 @@ impl KvCacheManager {
     /// Get the storage dtype (for diagnostics).
     pub fn storage_dtype(&self) -> DType {
         self.storage_dtype
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SessionKvCache trait — ADR-0004
+// ---------------------------------------------------------------------------
+
+/// Single-session KV cache abstraction.
+///
+/// Decouples `InferenceGenerator` and `SpeculativeDecoder` from the concrete
+/// `KvCacheManager` implementation. Enables:
+/// - Zero-GPU unit tests via `MockSessionKvCache`
+/// - Future `PrefixAwareSessionCache` wrapper (#3)
+/// - `truncate_to` rollback needed by speculative decoding (#12)
+///
+/// See ADR-0004 and ADR-0006 (amendment adding `truncate_to`).
+pub trait SessionKvCache: Send + Sync {
+    /// Sequence length stored in layer `layer` (0 if empty).
+    fn seq_len(&self, layer: usize) -> usize;
+
+    /// Save new K/V tensors for `layer` to the cache.
+    ///
+    /// Maps to `KvCacheManager::save_from_device`. The tensors are
+    /// expected to be on the compute device; the impl handles dtype
+    /// conversion and transfer to CPU RAM.
+    fn append(&mut self, layer: usize, k: &Tensor, v: &Tensor) -> candle_core::Result<()>;
+
+    /// Load the K/V tensors for `layer` from the cache to the compute device.
+    ///
+    /// Returns `(None, None)` if the layer has no cached tokens yet.
+    fn load(&self, layer: usize) -> candle_core::Result<(Option<Tensor>, Option<Tensor>)>;
+
+    /// Clear all cached KV data (start a new session / conversation).
+    fn clear(&mut self);
+
+    /// Truncate cached sequence to `pos` tokens across all layers.
+    ///
+    /// Required for speculative decoding: after the verifier rejects
+    /// `n_reject` draft tokens, call `truncate_to(verified_len)` to roll
+    /// back the cache without rebuilding it from scratch. See ADR-0006.
+    fn truncate_to(&mut self, pos: usize);
+}
+
+impl SessionKvCache for KvCacheManager {
+    fn seq_len(&self, layer: usize) -> usize {
+        // Delegate to inherent method — avoids ambiguity with trait method name.
+        KvCacheManager::seq_len(self, layer)
+    }
+
+    fn append(&mut self, layer: usize, k: &Tensor, v: &Tensor) -> candle_core::Result<()> {
+        self.save_from_device(layer, k, v)
+    }
+
+    fn load(&self, layer: usize) -> candle_core::Result<(Option<Tensor>, Option<Tensor>)> {
+        self.load_to_device(layer)
+    }
+
+    fn clear(&mut self) {
+        KvCacheManager::clear(self);
+    }
+
+    fn truncate_to(&mut self, pos: usize) {
+        KvCacheManager::truncate_to(self, pos);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockSessionKvCache — test doubles (compiled only in #[cfg(test)])
+// ---------------------------------------------------------------------------
+
+/// A zero-GPU mock that tracks calls without allocating tensors.
+///
+/// Useful for testing `InferenceGenerator` and `SpeculativeDecoder` without
+/// needing a real KV cache or compute device.
+#[cfg(test)]
+pub struct MockSessionKvCache {
+    pub seq_count: usize,
+    pub clear_count: usize,
+    pub truncate_count: usize,
+    pub last_truncate_pos: usize,
+}
+
+#[cfg(test)]
+impl MockSessionKvCache {
+    pub fn new() -> Self {
+        Self { seq_count: 0, clear_count: 0, truncate_count: 0, last_truncate_pos: 0 }
+    }
+
+    /// Simulate having `n` tokens in cache (set directly for test setup).
+    pub fn with_seq(n: usize) -> Self {
+        let mut m = Self::new();
+        m.seq_count = n;
+        m
+    }
+}
+
+#[cfg(test)]
+impl SessionKvCache for MockSessionKvCache {
+    fn seq_len(&self, _layer: usize) -> usize { self.seq_count }
+
+    fn append(&mut self, _layer: usize, _k: &Tensor, _v: &Tensor) -> candle_core::Result<()> {
+        self.seq_count += 1;
+        Ok(())
+    }
+
+    fn load(&self, _layer: usize) -> candle_core::Result<(Option<Tensor>, Option<Tensor>)> {
+        Ok((None, None))
+    }
+
+    fn clear(&mut self) {
+        self.seq_count = 0;
+        self.clear_count += 1;
+    }
+
+    fn truncate_to(&mut self, pos: usize) {
+        self.seq_count = pos;
+        self.last_truncate_pos = pos;
+        self.truncate_count += 1;
     }
 }
 
