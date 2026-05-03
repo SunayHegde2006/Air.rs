@@ -390,13 +390,28 @@ STRIX (**S**treamed **T**ensor **R**esidence & **I**ntelligent e**X**change) man
 - [x] Quantized KV-cache — 1-bit key compression + Q8 value quantization (BF16→Q8, 2× compression) fully implemented in M.I.S.T. v3 (`kv_compress.rs`)
 - [x] ROCm backend — `src/strix/rocm_hal.rs` fully implements `GpuHal` via AMD HIP Runtime API FFI, feature-gated as `--features rocm`
 
-#### 🔜 Next (v0.3.0)
+#### 🔜 Next (v0.3.0) — Multi-Model Concurrent Serving
 
-- [ ] LoRA / PEFT adapter loading from GGUF (standalone fine-tuned adapters, not RWKV internal decay)
-- [ ] Native `async` Python streaming iterator (`async for token in engine.astream(prompt)` without executor)
+> **Theme:** True interleaved multi-model serving on consumer GPUs. Every loaded model emits tokens at the same wall-clock tick. Designed and validated against RTX 3060 12 GB VRAM.
+
+- [ ] **Model Multiplexer** — load N models simultaneously; per-tick interleaved decode loop emits one token per model per step; dynamic count bound by available VRAM (no hard limit — fits as many as VRAM allows)
+- [ ] **VRAM 80% hard cap** — reject model load with a clear error if combined weight footprint would exceed 80% of detected VRAM (9.6 GB on 3060): `Error: insufficient VRAM for simultaneous execution — free {X} MB or use a smaller model`
+- [ ] **Per-model prefix KV cache** — content-addressed block pool (16-token chunks, hash-keyed); ref-counted `KvBlockRef` shared across sessions with identical system prompts; blocks tagged with `CompressionScheme` enum for forward-compatible migration to M.I.S.T. v4
+- [ ] **CUDA multi-stream pipelining** — model A decode on stream 0 overlaps model B weight prefetch on stream 1; extends the existing S.L.I.P. pipeline to N concurrently resident models; no CUDA MPS required
+- [ ] **Native async Python streaming** — `async for token in engine.astream(model_id, prompt)` backed by a `tokio::sync::mpsc` channel; no `run_in_executor` wrapper needed; works across all loaded models concurrently
+
+#### 🔭 Future (v0.4.0) — M.I.S.T. v4 KV Pipeline
+
+> **Theme:** Replace QJL with a research-validated compression pipeline that reduces variance in attention scoring (variance > bias in the QJL regime).
+
+- [ ] **TriAttention** — trigonometric pre-RoPE token importance scoring; selects which KV tokens to retain before quantization; plugs into HERMES eviction as a drop-in scoring replacement
+- [ ] **IsoQuant-Fast** — SO(4) quaternion rotation Stage 1 (4.5× faster than QR decomposition, geometrically lossless); replaces QJL random projection
+- [ ] **TurboQuant Lloyd-Max** — Stage 2 optimal scalar quantization to TQ4_0 (4-bit, MSE-minimizing Lloyd-Max codebook); replaces Q8 uniform quantization
+- [ ] **QJL removal** — deprecate `QjlKey` / `kv_compress.rs` JL path; block format migrates via `CompressionScheme::IsoQuantTQ4`
+- [ ] **LoRA / PEFT hot-swap** — shared base weights in VRAM; only `A`/`B` adapter matrices swapped per request; requests batched by `adapter_id` to avoid per-tick weight mutation
 - [ ] Vision / multimodal input (`llava`, `moondream`, image tokens)
-- [ ] `air-rs` CLI tool (standalone binary wrapping the Rust engine)
-- [ ] Windows ROCm validation (HIP on Windows + AMD GPU hardware test)
+- [ ] `air-rs` standalone CLI binary
+- [ ] Windows ROCm validation (HIP on Windows + real AMD GPU hardware test)
 
 ---
 
