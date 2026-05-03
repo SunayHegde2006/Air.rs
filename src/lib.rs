@@ -29,6 +29,7 @@ pub mod shared_buffer;     // platform-agnostic SharedBuffer + ComputeBackend (A
 pub mod metal_compute;     // Metal kernels, context, command encoding (ADR-0005)
 pub mod ucal;              // compat shim — re-exports shared_buffer + metal_compute (ADR-0005)
 pub mod drive_inquisitor;
+pub mod dispatcher;        // Dispatcher trait + TokenChunk (ADR-0003)
 pub mod metrics;
 pub mod pipeline;
 pub mod neuron_predicate;
