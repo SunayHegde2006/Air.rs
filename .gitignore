@@ -28,6 +28,7 @@ Thumbs.db
 !README.md
 !CONTEXT.md
 !docs/adr/*.md
+!air_rs_speculative_decoding_protocol.md
 
 #Indentifiers
 *:Zone.Identifier
@@ -43,6 +44,10 @@ docs/*.jpg
 # Benchmark results
 results/
 *.json
+!*.draft.json
+
+# Speculative decoding sidecar manifests (derived, never tracked)
+*.draft.json
 
 # Python cache
 __pycache__/
