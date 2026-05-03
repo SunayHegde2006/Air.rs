@@ -30,6 +30,8 @@
 
 **Block Factory** — `blocks::build_blocks(config: &ModelConfig) -> Vec<Box<dyn TransformerBlock>>`. The single construction point for the per-layer block vec. Called inside `InferenceGenerator::new()`. Encapsulates all per-layer architecture variation (e.g. Phi-3 even/odd alternation) so `generate_step` sees a uniform interface.
 
+**Device Selector** — `GpuTopology::discover()` followed by `GpuTopology::device_at(ordinal) -> Option<Device>` or `GpuTopology::best_device() -> Device`. The single point of device selection in the system. `InferenceGenerator::new()` accepts a `candle_core::Device` as a constructor parameter and never constructs one itself. Python exposes this as `Engine.from_gguf(path, gpu_id=0)`. See ADR-0002.
+
 **Strix** — The hardware subsystem (`src/strix/`) containing all HAL adapters, the VRAM arena, GPU tensor views, and the IO engine.
 
 **ARB Scheduler** — The continuous-batching scheduler (`batching/arb.rs`) that groups requests into decode batches, manages sequence lifetimes, and interacts with the Tick Loop.
