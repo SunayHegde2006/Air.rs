@@ -109,6 +109,116 @@ impl TransformerBlock for QBlock {
 }
 
 // ---------------------------------------------------------------------------
+// StreamingQBlock — NVMe-streaming layer (S.L.I.P. compatible)
+// ---------------------------------------------------------------------------
+
+/// A transformer layer that streams its weights on every `forward()` call.
+///
+/// Holds an `Arc<WeightStreamer>` and the target layer index. On each call,
+/// it invokes `streamer.load_layer(layer_id, device)` to bring the quantised
+/// tensors into RAM (backed by the mmap — effectively a page-fault), runs
+/// `model::transformer_block`, and then drops the weights. This keeps RSS at
+/// ≈ 1–2 layers at any point, matching the S.L.I.P. memory budget.
+///
+/// # Prefetch
+/// Prefetching (`madvise WILLNEED`) and page release (`DONTNEED`) are managed
+/// by the generator's outer loop, not by individual blocks. This keeps each
+/// block stateless and object-safe.
+///
+/// # Thread safety
+/// `WeightStreamer` uses an mmap (read-only), which is `Send + Sync`.
+/// Multiple blocks can safely hold `Arc<WeightStreamer>` across threads.
+pub struct StreamingQBlock {
+    layer: usize,
+    streamer: Arc<crate::weight_streamer::WeightStreamer>,
+    config: Arc<ModelConfig>,
+    rope: Option<Arc<RopeCache>>,
+    device: candle_core::Device,
+}
+
+impl StreamingQBlock {
+    pub fn new(
+        layer: usize,
+        streamer: Arc<crate::weight_streamer::WeightStreamer>,
+        config: Arc<ModelConfig>,
+        rope: Option<Arc<RopeCache>>,
+        device: candle_core::Device,
+    ) -> Self {
+        Self { layer, streamer, config, rope, device }
+    }
+}
+
+impl TransformerBlock for StreamingQBlock {
+    fn forward(
+        &self,
+        x: &Tensor,
+        kv_cache_k: Option<&Tensor>,
+        kv_cache_v: Option<&Tensor>,
+        start_pos: usize,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        // Load this layer's quantised weights from the mmap (page-fault path).
+        // Weights are dropped after this function returns — RSS stays bounded.
+        let weights = self.streamer
+            .load_layer(self.layer, &self.device)
+            .map_err(|e| candle_core::Error::Msg(format!(
+                "StreamingQBlock layer {} load failed: {e}", self.layer
+            )))?;
+
+        crate::model::transformer_block(
+            x,
+            &weights,
+            kv_cache_k,
+            kv_cache_v,
+            &self.config,
+            start_pos,
+            self.rope.as_deref(),
+        )
+    }
+
+    fn layer_id(&self) -> usize {
+        self.layer
+    }
+}
+
+/// Build a full streaming block stack from a `WeightStreamer`.
+///
+/// Each block holds a clone of `Arc<WeightStreamer>` (refcount bump, no copy)
+/// and its own layer index. The returned vec can be stored directly in
+/// `InferenceGenerator::blocks`.
+///
+/// # Example
+/// ```ignore
+/// use std::sync::Arc;
+/// use std::path::Path;
+/// use candle_core::Device;
+/// use air_rs::weight_streamer::WeightStreamer;
+/// use air_rs::blocks::build_streaming_blocks;
+///
+/// let streamer = Arc::new(WeightStreamer::open(Path::new("model.gguf")).unwrap());
+/// // config / rope built from metadata at runtime
+/// let blocks = build_streaming_blocks(streamer, config_arc, rope, Device::Cpu);
+/// ```
+pub fn build_streaming_blocks(
+    streamer: Arc<crate::weight_streamer::WeightStreamer>,
+    config: Arc<ModelConfig>,
+    rope: Option<Arc<RopeCache>>,
+    device: candle_core::Device,
+) -> Vec<Box<dyn TransformerBlock>> {
+    let n = streamer.n_layers();
+    (0..n)
+        .map(|layer| -> Box<dyn TransformerBlock> {
+            Box::new(StreamingQBlock::new(
+                layer,
+                Arc::clone(&streamer),
+                Arc::clone(&config),
+                rope.as_ref().map(Arc::clone),
+                device.clone(),
+            ))
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // MockTransformerBlock — zero-GPU test double
 // ---------------------------------------------------------------------------
 
