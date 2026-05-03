@@ -40,6 +40,10 @@
 
 **Strix** — The hardware subsystem (`src/strix/`) containing all HAL adapters, the VRAM arena, GPU tensor views, and the IO engine.
 
+**SharedBuffer** — Platform-agnostic CPU/GPU shared memory type in `src/shared_buffer.rs`. Always compiled (no feature gate). Used by `pipeline.rs` and the VRAM arena for zero-copy buffer hand-off between CPU and GPU.
+
+**ComputeBackend** — Canonical enum in `src/shared_buffer.rs`: `Cuda(usize)`, `Rocm(usize)`, `Metal`, `Vulkan`, `Cpu`. Single source of truth for backend selection across `ModelMux`, `drive_inquisitor`, and `metal_compute`. Replaces the two separate `ComputeBackend` enums that previously existed in `ucal.rs` and `drive_inquisitor.rs`. See ADR-0005.
+
 **ARB Scheduler** — The continuous-batching scheduler (`batching/arb.rs`) that groups requests into decode batches, manages sequence lifetimes, and interacts with the Tick Loop.
 
 **GBNF Constraint** — A grammar object (`GbnfConstraint`) that restricts the token logit distribution to a context-free language at each sampling step. Used for structured output.
