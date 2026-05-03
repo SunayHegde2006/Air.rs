@@ -3,6 +3,7 @@
 /LLM Research Papers Parsed/
 /graphify-out/
 /graphifyy_env/
+/plan/
 # IDE
 .idea/
 .vscode/
@@ -24,6 +25,9 @@ Thumbs.db
 
 # Protocols
 *.md
+!README.md
+!CONTEXT.md
+!docs/adr/*.md
 
 #Indentifiers
 *:Zone.Identifier
@@ -48,3 +52,8 @@ scripts/__pycache__/
 # Claw Code editor sessions
 .claw/
 .venv/
+
+#graphify
+.graphifyignore
+0.80
+
