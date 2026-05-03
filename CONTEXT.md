@@ -14,6 +14,8 @@
 
 **KV Cache** — Per-sequence key/value tensor storage managed by `KvCacheManager`. Hot tier in VRAM, warm tier in RAM (compressed).
 
+**SessionKvCache** — A trait in `src/kv_cache.rs` with 4 methods: `load_layer`, `save_layer`, `reset`, `seq_len`. The seam between `InferenceGenerator` and KV storage. `KvCacheManager` is the primary implementation. `PrefixAwareSessionCache` wraps `Box<dyn SessionKvCache>` and intercepts `load_layer` to check the prefix hash before delegating. Future `IsoQuantSessionCache` intercepts `save_layer` for M.I.S.T. v4 quantization. Kept separate from `SlotKvCache` (the ARB Scheduler's multi-slot interface in `batching/`) which has a different contract. See ADR-0004.
+
 **Prefix Cache** — A content-addressed pool of KV blocks indexed by token-hash chunks. Allows sessions with identical system prompts to skip prefill. Per-Model Slot.
 
 **M.I.S.T. (Memory-Interleaved Streaming Tiers)** — The tiered KV compression protocol. v3: QJL 1-bit keys + Q8 values. v4 (planned): TriAttention + IsoQuant-Fast + TurboQuant TQ4_0.
