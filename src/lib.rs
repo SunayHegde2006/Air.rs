@@ -32,6 +32,7 @@ pub mod drive_inquisitor;
 pub mod dispatcher;        // Dispatcher trait + TokenChunk (ADR-0003)
 pub mod blocks;            // TransformerBlock trait + QBlock (ADR-0001)
 pub mod device_map;        // DeviceMap layer→Device injection (ADR-0002)
+pub mod ghost_drafter;     // GhostDrafter trait + SamplerConfig (ADR-0006)
 pub mod metrics;
 pub mod pipeline;
 pub mod neuron_predicate;
