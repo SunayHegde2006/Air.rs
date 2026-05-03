@@ -589,6 +589,10 @@ pub fn create_router_with_model(model_name: String) -> Router {
 ///
 /// Use this when wiring a real `InferenceGenerator` or `ModelMux`:
 /// ```no_run
+/// use std::sync::Arc;
+/// use air_rs::dispatcher::SingleModelDispatcher;
+/// use air_rs::api::create_router_with_dispatcher;
+///
 /// let dispatcher = Arc::new(SingleModelDispatcher::new("llama-3-8b"));
 /// let app = create_router_with_dispatcher("llama-3-8b".into(), dispatcher);
 /// ```
