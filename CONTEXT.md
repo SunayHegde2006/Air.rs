@@ -14,7 +14,13 @@
 
 **KV Cache** — Per-sequence key/value tensor storage managed by `KvCacheManager`. Hot tier in VRAM, warm tier in RAM (compressed).
 
-**SessionKvCache** — A trait in `src/kv_cache.rs` with 4 methods: `load_layer`, `save_layer`, `reset`, `seq_len`. The seam between `InferenceGenerator` and KV storage. `KvCacheManager` is the primary implementation. `PrefixAwareSessionCache` wraps `Box<dyn SessionKvCache>` and intercepts `load_layer` to check the prefix hash before delegating. Future `IsoQuantSessionCache` intercepts `save_layer` for M.I.S.T. v4 quantization. Kept separate from `SlotKvCache` (the ARB Scheduler's multi-slot interface in `batching/`) which has a different contract. See ADR-0004.
+**SessionKvCache** — A trait in `src/kv_cache.rs` with 5 methods: `load_layer`, `save_layer`, `reset`, `seq_len`, `truncate_to`. The seam between `InferenceGenerator` and KV storage. `truncate_to(n)` is an O(1) pointer rollback used by the speculative rejection loop — no memcopy, no zeroing. `KvCacheManager` is the primary implementation. `PrefixAwareSessionCache` wraps `Box<dyn SessionKvCache>` and intercepts `load_layer` to check the prefix hash before delegating. Future `IsoQuantSessionCache` intercepts `save_layer` for M.I.S.T. v4 quantization. See ADR-0004 + ADR-0006.
+
+**GhostDrafter** — A trait in `src/ghost_drafter.rs` with 3 methods: `draft_pass(context, k, sampler) -> DraftResult`, `on_accept(n_accept, context_len)`, `reset()`. The seam between `Speculative` and the draft strategy. Concrete adapters: `StreamingLayerSkipDrafter` (self-speculative layer skipping, protocol §4.1), `VramResidentDrafter` (models that fit fully in VRAM, v0.4.0), `MockDrafter` (canned tokens for unit tests). `Speculative` holds `Box<dyn GhostDrafter>`. See ADR-0006.
+
+**DraftManifest** — JSON sidecar at `{gguf_path}.draft.json`. Contains GGUF mtime, size, `draft_layer_ratio`, `air_version`, draft layer indices + byte offsets into the GGUF, and offsets for `output.weight` (LM head) and `model.norm`. Invalidated and re-derived if any field mismatches (mtime/size/ratio/version). Built by `DraftManifestBuilder` in `manifest.rs`. Never tracked in git (`*.draft.json` in `.gitignore`).
+
+**DraftResult** — Value type returned by `GhostDrafter::draft_pass`: `{ tokens: Vec<u32>, logits: Vec<Vec<f32>> }`. `tokens` is k proposed IDs; `logits` is k probability distributions `[k, vocab_size]`. Used directly by `Speculative::rejection_sample`.
 
 **Prefix Cache** — A content-addressed pool of KV blocks indexed by token-hash chunks. Allows sessions with identical system prompts to skip prefill. Per-Model Slot.
 
