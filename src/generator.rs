@@ -20,6 +20,7 @@
 
 use crate::gbnf::GbnfConstraint;
 use crate::blocks::{TransformerBlock, build_streaming_blocks};
+use crate::vram_guard::VramBudget;
 use crate::kv_cache::{KvCacheManager, SessionKvCache};
 use crate::metrics::{InferenceMetrics, LayerTiming};
 use crate::model::{self, ModelConfig};
@@ -128,6 +129,18 @@ impl InferenceGenerator {
         streamer: std::sync::Arc<WeightStreamer>,
         rope: Option<std::sync::Arc<crate::ops::RopeCache>>,
     ) -> Result<Self> {
+        // ── VRAM 80% hard cap guard (issue #2) ───────────────────────────
+        let budget = VramBudget::check(
+            &device,
+            0,  // device_idx: consumer single-GPU default; override via DeviceMap for multi-GPU
+            config.n_layers,
+            config.n_kv_heads,
+            config.head_dim,
+            config.hidden_dim,
+            config.context_length,
+        )?;
+        eprintln!("{}", budget.summary());
+
         let config_arc = std::sync::Arc::new(config.clone());
         let blocks = build_streaming_blocks(
             streamer,
