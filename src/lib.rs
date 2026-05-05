@@ -36,6 +36,7 @@ pub mod ghost_drafter;     // GhostDrafter trait + SamplerConfig (ADR-0006)
 pub mod vram_guard;        // VRAM 80% hard cap guard (issue #2)
 pub mod prefix_kv;         // Per-model prefix KV cache + CompressionScheme (issue #3)
 pub mod model_mux;         // ModelMux interleaved multi-model tick loop (issue #4)
+pub mod cuda_pipeline;     // CUDA multi-stream pipelining (issue #5)
 pub mod metrics;
 pub mod pipeline;
 pub mod neuron_predicate;
