@@ -23,7 +23,9 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 # No Python runtime deps — everything is in the .so
-dependencies = []
+dependencies = [
+    "semble>=0.1.1",
+]
 
 [project.urls]
 Homepage = "https://github.com/sunayhegde/Air.rs"
@@ -65,3 +67,10 @@ ignore_missing_imports = false
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
 addopts = "-v --tb=short"
+
+
+[tool.pyright]
+include = ["python"]
+exclude = ["src", "target", "benches"]
+venvPath = "."
+venv = ".venv"

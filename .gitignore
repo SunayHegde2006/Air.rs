@@ -8,6 +8,9 @@
 /.agent/
 /.agents/
 /.pytest_cache/
+*.abi3.so
+*.so
+uv.lock
 
 # IDE
 .idea/
