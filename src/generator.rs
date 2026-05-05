@@ -531,7 +531,7 @@ impl InferenceGenerator {
     ///
     /// `prefill_done`: if true, the prompt was already prefilled via `prefill_chunks()`
     /// and step 0 should only process the last chunk (or single token if fully prefilled).
-    fn generate_step(
+    pub(crate) fn generate_step(
         &mut self,
         step: usize,
         all_tokens: &[u32],
@@ -682,8 +682,16 @@ impl InferenceGenerator {
         self.metrics = InferenceMetrics::new();
     }
 
+    /// Alias for `reset()` used by `ModelMux` to be self-documenting.
+    pub fn reset_kv_cache(&mut self) { self.reset(); }
+
     /// Get a reference to the current metrics (for external consumers).
     pub fn metrics(&self) -> &InferenceMetrics {
         &self.metrics
+    }
+
+    /// The device this generator runs on.
+    pub fn device(&self) -> &candle_core::Device {
+        &self.device
     }
 }
