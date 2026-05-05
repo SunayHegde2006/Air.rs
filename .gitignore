@@ -4,6 +4,11 @@
 /graphify-out/
 /graphifyy_env/
 /plan/
+/.sentrux/
+/.agent/
+/.agents/
+/.pytest_cache/
+
 # IDE
 .idea/
 .vscode/
