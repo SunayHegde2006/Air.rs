@@ -23,6 +23,7 @@ use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::ReceiverStream;
+use crate::dispatcher::{Dispatcher, SingleModelDispatcher};
 
 // ---------------------------------------------------------------------------
 // Request / Response types (OpenAI-compatible)
@@ -295,27 +296,42 @@ pub struct ApiState {
     pub start_time: u64,
     /// Total requests served (atomic counter).
     pub request_count: AtomicU64,
-    /// Registered model entries.
+    /// Registered model entries (derived from dispatcher.list_models()).
     pub models: RwLock<Vec<ModelEntry>>,
+    /// Inference dispatcher — decouples handlers from the engine (ADR-0003).
+    pub dispatcher: Arc<dyn Dispatcher>,
 }
 
 impl ApiState {
+    /// Create state backed by the default `SingleModelDispatcher` stub.
+    ///
+    /// Drop-in replacement for the old `ApiState::new`; behaviorally identical
+    /// until issues #7/#8 land and `SingleModelDispatcher` gets a real engine.
     pub fn new(model_name: String) -> Self {
+        let dispatcher = Arc::new(SingleModelDispatcher::new(model_name.clone())) as Arc<dyn Dispatcher>;
+        Self::with_dispatcher(model_name, dispatcher)
+    }
+
+    /// Create state with an explicit dispatcher (used for testing and ModelMux).
+    pub fn with_dispatcher(model_name: String, dispatcher: Arc<dyn Dispatcher>) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
+        let models = dispatcher.list_models().into_iter().map(|id| ModelEntry {
+            id,
+            object: "model".to_string(),
+            created: now,
+            owned_by: "air-rs".to_string(),
+        }).collect();
+
         Self {
-            model_name: model_name.clone(),
+            model_name,
             start_time: now,
             request_count: AtomicU64::new(0),
-            models: RwLock::new(vec![ModelEntry {
-                id: model_name,
-                object: "model".to_string(),
-                created: now,
-                owned_by: "air-rs".to_string(),
-            }]),
+            models: RwLock::new(models),
+            dispatcher,
         }
     }
 
@@ -559,10 +575,32 @@ pub fn create_router() -> Router {
     create_router_with_model("air-rs-default".to_string())
 }
 
-/// Create the router with a specific model name.
+/// Create the router with a specific model name (uses `SingleModelDispatcher` stub).
 pub fn create_router_with_model(model_name: String) -> Router {
     let state = Arc::new(ApiState::new(model_name));
+    Router::new()
+        .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/models", get(list_models))
+        .route("/health", get(health))
+        .with_state(state)
+}
 
+/// Create the router with an explicit dispatcher (ADR-0003).
+///
+/// Use this when wiring a real `InferenceGenerator` or `ModelMux`:
+/// ```no_run
+/// use std::sync::Arc;
+/// use air_rs::dispatcher::SingleModelDispatcher;
+/// use air_rs::api::create_router_with_dispatcher;
+///
+/// let dispatcher = Arc::new(SingleModelDispatcher::new("llama-3-8b"));
+/// let app = create_router_with_dispatcher("llama-3-8b".into(), dispatcher);
+/// ```
+pub fn create_router_with_dispatcher(
+    model_name: String,
+    dispatcher: Arc<dyn Dispatcher>,
+) -> Router {
+    let state = Arc::new(ApiState::with_dispatcher(model_name, dispatcher));
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/models", get(list_models))

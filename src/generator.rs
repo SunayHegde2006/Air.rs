@@ -19,7 +19,9 @@
 //! - `generate_stream()`: Async. Sends `GenerationEvent`s via mpsc channel.
 
 use crate::gbnf::GbnfConstraint;
-use crate::kv_cache::KvCacheManager;
+use crate::blocks::{TransformerBlock, build_streaming_blocks};
+use crate::vram_guard::VramBudget;
+use crate::kv_cache::{KvCacheManager, SessionKvCache};
 use crate::metrics::{InferenceMetrics, LayerTiming};
 use crate::model::{self, ModelConfig};
 use crate::ops::{self, RopeCache};
@@ -61,7 +63,8 @@ pub struct GenerationMetricsSummary {
 }
 
 pub struct InferenceGenerator {
-    kv_cache: KvCacheManager,
+    kv_cache: Box<dyn SessionKvCache>,       // ADR-0004 trait seam
+    blocks: Vec<Box<dyn TransformerBlock>>,  // ADR-0001: empty = legacy streaming
     sampler: Sampler,
     config: ModelConfig,
     device: Device,
@@ -73,6 +76,7 @@ pub struct InferenceGenerator {
 }
 
 impl InferenceGenerator {
+    /// Create with auto-detected device (CUDA → CPU fallback).
     pub fn new(
         config: ModelConfig,
         sampler_config: SamplerConfig,
@@ -83,12 +87,24 @@ impl InferenceGenerator {
                 Ok::<Device, candle_core::Error>(Device::Cpu)
             })
             .map_err(|e| anyhow::anyhow!("Failed to create device: {e}"))?;
+        Self::with_device(config, sampler_config, device)
+    }
 
-        let kv_cache = KvCacheManager::new_for_device(device.clone(), config.n_layers);
+    /// Create with an explicitly injected device (ADR-0002).
+    ///
+    /// Use this instead of `new()` when the caller selects the device
+    /// via `DeviceMap::primary()` or `candle_device(&ComputeBackend::...)`.
+    pub fn with_device(
+        config: ModelConfig,
+        sampler_config: SamplerConfig,
+        device: Device,
+    ) -> Result<Self> {
+        let kv_cache: Box<dyn SessionKvCache> =
+            Box::new(KvCacheManager::new_for_device(device.clone(), config.n_layers));
         let sampler = Sampler::new(sampler_config);
-
         Ok(Self {
             kv_cache,
+            blocks: Vec::new(),  // populated by with_streamer()
             sampler,
             config,
             device,
@@ -96,6 +112,45 @@ impl InferenceGenerator {
             rope_cache: RopeCache::new(),
             gbnf: None,
         })
+    }
+
+    /// Create with device injection + pre-built block stack (ADR-0001 + ADR-0002).
+    ///
+    /// Builds a [`StreamingQBlock`] for every layer in the GGUF file and stores
+    /// them in `self.blocks`. The `generate_step` layer loop will use
+    /// `block.forward()` instead of direct `streamer.load_layer()` calls,
+    /// enabling future heterogeneous stacks (MoE, device-split, etc.).
+    ///
+    /// Pass `None` for `rope` to use per-step RoPE computation (slightly slower).
+    pub fn with_streamer(
+        config: ModelConfig,
+        sampler_config: SamplerConfig,
+        device: Device,
+        streamer: std::sync::Arc<WeightStreamer>,
+        rope: Option<std::sync::Arc<crate::ops::RopeCache>>,
+    ) -> Result<Self> {
+        // ── VRAM 80% hard cap guard (issue #2) ───────────────────────────
+        let budget = VramBudget::check(
+            &device,
+            0,  // device_idx: consumer single-GPU default; override via DeviceMap for multi-GPU
+            config.n_layers,
+            config.n_kv_heads,
+            config.head_dim,
+            config.hidden_dim,
+            config.context_length,
+        )?;
+        eprintln!("{}", budget.summary());
+
+        let config_arc = std::sync::Arc::new(config.clone());
+        let blocks = build_streaming_blocks(
+            streamer,
+            config_arc,
+            rope,
+            device.clone(),
+        );
+        let mut gen = Self::with_device(config, sampler_config, device)?;
+        gen.blocks = blocks;
+        Ok(gen)
     }
 
     /// Attach a GBNF grammar constraint for the next generation.
@@ -173,7 +228,7 @@ impl InferenceGenerator {
                 &embedding_table,
                 &final_norm_weight,
                 &lm_head,
-                streamer,
+                Some(streamer),
                 prefill_done,
             )?;
 
@@ -305,7 +360,7 @@ impl InferenceGenerator {
                 &embedding_table,
                 &final_norm_weight,
                 &lm_head,
-                streamer,
+                Some(streamer),
                 prefill_done,
             )?;
 
@@ -428,7 +483,7 @@ impl InferenceGenerator {
 
                 let io_start = Instant::now();
                 let weights = streamer.load_layer(layer_id, &self.device)?;
-                let (cached_k, cached_v) = self.kv_cache.load_to_device(layer_id)
+                let (cached_k, cached_v) = self.kv_cache.load(layer_id)  // ADR-0004
                     .map_err(|e| anyhow::anyhow!("KV cache load failed at layer {layer_id}: {e}"))?;
                 let io_elapsed = io_start.elapsed();
 
@@ -453,7 +508,7 @@ impl InferenceGenerator {
                     h2d: std::time::Duration::ZERO,
                 });
 
-                self.kv_cache.save_from_device(layer_id, &new_k, &new_v)
+                self.kv_cache.append(layer_id, &new_k, &new_v)  // ADR-0004
                     .map_err(|e| anyhow::anyhow!("KV save failed at layer {layer_id}: {e}"))?;
 
                 drop(weights);
@@ -476,14 +531,14 @@ impl InferenceGenerator {
     ///
     /// `prefill_done`: if true, the prompt was already prefilled via `prefill_chunks()`
     /// and step 0 should only process the last chunk (or single token if fully prefilled).
-    fn generate_step(
+    pub(crate) fn generate_step(
         &mut self,
         step: usize,
         all_tokens: &[u32],
         embedding_table: &Tensor,
         final_norm_weight: &Tensor,
         lm_head: &candle_core::quantized::QMatMul,
-        streamer: &WeightStreamer,
+        streamer: Option<&WeightStreamer>,  // None when self.blocks is populated
         prefill_done: bool,
     ) -> Result<u32> {
         let (input_tokens, start_pos) = if step == 0 && !prefill_done {
@@ -516,75 +571,72 @@ impl InferenceGenerator {
 
         // ── Layer-streamed forward pass ───────────────────────────
         let layer_loop_start = Instant::now();
+        let use_blocks = !self.blocks.is_empty();
         for layer_id in 0..self.config.n_layers {
-            if layer_id + 1 < self.config.n_layers {
-                streamer.prefetch_layer(layer_id + 1);
-            }
-
-            // ── TIMING: IO (weight loading) ───────────────────────
-            // Only collect per-layer timing during prefill (step 0).
-            // During decode, Instant::now() calls add measurable overhead
-            // across all layers × all tokens. (P2-2: metrics gating)
-            let io_start = if step == 0 { Some(Instant::now()) } else { None };
-            let weights = streamer.load_layer(layer_id, &self.device)?;
-            let (cached_k, cached_v) = self.kv_cache.load_to_device(layer_id)
-                .map_err(|e| anyhow::anyhow!("KV cache load failed at layer {layer_id}: {e}"))?;
-            let io_elapsed = io_start.map(|s| s.elapsed());
-
-            // ── TIMING: Compute (transformer block) ───────────────
-            let compute_start = if step == 0 { Some(Instant::now()) } else { None };
-            let (new_hidden, new_k, new_v) = model::transformer_block(
-                &hidden,
-                &weights,
-                cached_k.as_ref(),
-                cached_v.as_ref(),
-                &self.config,
-                start_pos,
-                Some(&self.rope_cache),
-            )
-            .map_err(|e| anyhow::anyhow!("Transformer block {} failed: {e}", layer_id))?;
-            let compute_elapsed = compute_start.map(|s| s.elapsed());
-
-            hidden = new_hidden;
-
-            // Only record layer metrics during prefill
-            if let (Some(io), Some(compute)) = (io_elapsed, compute_elapsed) {
-                self.metrics.record_layer(LayerTiming {
-                    compute,
-                    io,
-                    h2d: std::time::Duration::ZERO,
-                });
-            }
-
-            // ── TIMING: KV save ───────────────────────────────────
-            let kv_start = if step == 0 { Some(Instant::now()) } else { None };
-            self.kv_cache.save_from_device(layer_id, &new_k, &new_v)
-                .map_err(|e| anyhow::anyhow!("KV save failed at layer {layer_id}: {e}"))?;
-            let kv_elapsed = kv_start.map(|s| s.elapsed());
-
-            // ── Progress logging ──────────────────────────────────
-            // Show per-layer timing on first token (prefill is the slowest step)
-            if let (Some(io), Some(compute), Some(kv)) = (io_elapsed, compute_elapsed, kv_elapsed) {
-                if step == 0 {
-                    eprint!(
-                        "\r  Layer {:>2}/{} │ IO {:>6.1}ms │ Compute {:>6.1}ms │ KV {:>5.1}ms │ Total {:>6.1}ms",
-                        layer_id + 1,
-                        self.config.n_layers,
-                        io.as_secs_f64() * 1000.0,
-                        compute.as_secs_f64() * 1000.0,
-                        kv.as_secs_f64() * 1000.0,
-                        (io + compute + kv).as_secs_f64() * 1000.0,
-                    );
+            let (new_hidden, new_k, new_v) = if use_blocks {
+                // ── ADR-0001 block-trait path ─────────────────────
+                // StreamingQBlock.forward() handles weight load internally;
+                // prefetch/release managed by the block's Arc<WeightStreamer>.
+                let (cached_k, cached_v) = self.kv_cache.load(layer_id)
+                    .map_err(|e| anyhow::anyhow!("KV load failed at layer {layer_id}: {e}"))?;
+                self.blocks[layer_id]
+                    .forward(&hidden, cached_k.as_ref(), cached_v.as_ref(), start_pos)
+                    .map_err(|e| anyhow::anyhow!("Block {} forward failed: {e}", layer_id))?
+            } else {
+                // ── S.L.I.P. streaming path (legacy) ─────────────
+                let s = streamer.expect("streamer required when blocks not populated");
+                if layer_id + 1 < self.config.n_layers {
+                    s.prefetch_layer(layer_id + 1);
                 }
-            }
+                let io_start = if step == 0 { Some(Instant::now()) } else { None };
+                let weights = s.load_layer(layer_id, &self.device)?;
+                let (cached_k, cached_v) = self.kv_cache.load(layer_id)
+                    .map_err(|e| anyhow::anyhow!("KV cache load failed at layer {layer_id}: {e}"))?;
+                let io_elapsed = io_start.map(|t| t.elapsed());
+                let compute_start = if step == 0 { Some(Instant::now()) } else { None };
+                let result = model::transformer_block(
+                    &hidden,
+                    &weights,
+                    cached_k.as_ref(),
+                    cached_v.as_ref(),
+                    &self.config,
+                    start_pos,
+                    Some(&self.rope_cache),
+                )
+                .map_err(|e| anyhow::anyhow!("Transformer block {} failed: {e}", layer_id))?;
+                let compute_elapsed = compute_start.map(|t| t.elapsed());
+                if let (Some(io), Some(compute)) = (io_elapsed, compute_elapsed) {
+                    self.metrics.record_layer(LayerTiming {
+                        compute,
+                        io,
+                        h2d: std::time::Duration::ZERO,
+                    });
+                    if step == 0 {
+                        let kv_approx = std::time::Duration::ZERO;
+                        eprint!(
+                            "\r  Layer {:>2}/{} │ IO {:>6.1}ms │ Compute {:>6.1}ms │ KV {:>5.1}ms │ Total {:>6.1}ms",
+                            layer_id + 1,
+                            self.config.n_layers,
+                            io.as_secs_f64() * 1000.0,
+                            compute.as_secs_f64() * 1000.0,
+                            kv_approx.as_secs_f64() * 1000.0,
+                            (io + compute).as_secs_f64() * 1000.0,
+                        );
+                    }
+                }
+                drop(weights);
+                if layer_id > 0 { s.release_layer(layer_id - 1); }
+                result
+            };
 
-            drop(weights);
-
-            if layer_id > 0 {
-                streamer.release_layer(layer_id - 1);
-            }
+            self.kv_cache.append(layer_id, &new_k, &new_v)
+                .map_err(|e| anyhow::anyhow!("KV save failed at layer {layer_id}: {e}"))?;
+            hidden = new_hidden;
         }
-        streamer.release_layer(self.config.n_layers - 1);
+        // Release final layer page in streamer path
+        if !use_blocks {
+            if let Some(s) = streamer { s.release_layer(self.config.n_layers - 1); }
+        }
 
         // Print first-token layer summary
         if step == 0 {
@@ -626,12 +678,20 @@ impl InferenceGenerator {
 
     /// Reset the KV cache (for starting a new conversation).
     pub fn reset(&mut self) {
-        self.kv_cache.clear();
+        self.kv_cache.clear();  // SessionKvCache trait (ADR-0004)
         self.metrics = InferenceMetrics::new();
     }
+
+    /// Alias for `reset()` used by `ModelMux` to be self-documenting.
+    pub fn reset_kv_cache(&mut self) { self.reset(); }
 
     /// Get a reference to the current metrics (for external consumers).
     pub fn metrics(&self) -> &InferenceMetrics {
         &self.metrics
+    }
+
+    /// The device this generator runs on.
+    pub fn device(&self) -> &candle_core::Device {
+        &self.device
     }
 }

@@ -25,8 +25,18 @@ pub mod speculative;
 pub mod tokenizer;
 pub mod tui;
 pub mod weight_streamer;
-pub mod ucal;
+pub mod shared_buffer;     // platform-agnostic SharedBuffer + ComputeBackend (ADR-0005)
+pub mod metal_compute;     // Metal kernels, context, command encoding (ADR-0005)
+pub mod ucal;              // compat shim — re-exports shared_buffer + metal_compute (ADR-0005)
 pub mod drive_inquisitor;
+pub mod dispatcher;        // Dispatcher trait + TokenChunk (ADR-0003)
+pub mod blocks;            // TransformerBlock trait + QBlock (ADR-0001)
+pub mod device_map;        // DeviceMap layer→Device injection (ADR-0002)
+pub mod ghost_drafter;     // GhostDrafter trait + SamplerConfig (ADR-0006)
+pub mod vram_guard;        // VRAM 80% hard cap guard (issue #2)
+pub mod prefix_kv;         // Per-model prefix KV cache + CompressionScheme (issue #3)
+pub mod model_mux;         // ModelMux interleaved multi-model tick loop (issue #4)
+pub mod cuda_pipeline;     // CUDA multi-stream pipelining (issue #5)
 pub mod metrics;
 pub mod pipeline;
 pub mod neuron_predicate;
