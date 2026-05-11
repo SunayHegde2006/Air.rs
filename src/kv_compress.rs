@@ -78,7 +78,7 @@ impl CompressedKey {
     /// Formula: ĥ = sign(k − μ_k), stored as packed bits.
     pub fn compress(key: &[f32]) -> Self {
         let dim = key.len();
-        let n_words = (dim + 63) / 64;
+        let n_words = dim.div_ceil(64);
 
         // Compute mean.
         let mean = if dim > 0 {
@@ -117,6 +117,7 @@ impl CompressedKey {
         };
 
         let mut result = vec![0.0f32; self.dim];
+        #[allow(clippy::needless_range_loop)]
         for i in 0..self.dim {
             let sign_bit = (self.sign_bits[i / 64] >> (i % 64)) & 1;
             let sign = if sign_bit == 1 { 1.0f32 } else { -1.0f32 };
@@ -203,8 +204,8 @@ impl CompressedValue {
         let data: Vec<u8> = value
             .iter()
             .map(|&v| {
-                let q = ((v - min_val) / scale).round().clamp(0.0, 255.0) as u8;
-                q
+                
+                ((v - min_val) / scale).round().clamp(0.0, 255.0) as u8
             })
             .collect();
 
@@ -935,7 +936,7 @@ impl QjlKey {
             "proj_matrix must be [proj_dim × orig_dim]");
 
         let magnitude = key.iter().map(|&x| x * x).sum::<f32>().sqrt();
-        let n_words = (proj_dim + 63) / 64;
+        let n_words = proj_dim.div_ceil(64);
         let mut bits = vec![0u64; n_words];
 
         for i in 0..proj_dim {

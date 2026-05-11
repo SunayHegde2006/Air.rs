@@ -87,7 +87,7 @@ fn bench_kv_compress(c: &mut Criterion) {
     group.bench_function("sign_projection_512x128", |b| {
         b.iter(|| {
             // Simulate JL sign projection: dot key with random ±1 projection row
-            let compressed: Vec<u64> = key_data
+            let checksum: u64 = key_data
                 .chunks(head_dim)
                 .map(|key| {
                     let mut bits = 0u64;
@@ -97,7 +97,7 @@ fn bench_kv_compress(c: &mut Criterion) {
                     bits
                 })
                 .fold(0u64, |acc, bits| acc ^ bits);
-            black_box(compressed)
+            black_box(checksum)
         })
     });
     group.finish();

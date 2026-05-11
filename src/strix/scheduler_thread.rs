@@ -137,11 +137,7 @@ impl SchedulerThread {
     pub fn stats(&self) -> SchedulerStats {
         let ticks = self.state.tick_count.load(Ordering::Relaxed);
         let cumulative_us = self.state.cumulative_tick_us.load(Ordering::Relaxed);
-        let avg_tick_us = if ticks > 0 {
-            cumulative_us / ticks
-        } else {
-            0
-        };
+        let avg_tick_us = cumulative_us.checked_div(ticks).unwrap_or(0);
         SchedulerStats {
             ticks,
             started_at: self.started_at,
@@ -175,12 +171,13 @@ mod tests {
             Duration::from_millis(1),
         );
 
-        // Let it tick a few times.
-        thread::sleep(Duration::from_millis(20));
+        // Allow enough wall-clock time for even slow CI runners (macOS sleep
+        // granularity can be ~10 ms, so we wait 100 ms and only require ≥3 ticks).
+        thread::sleep(Duration::from_millis(100));
         thread.shutdown();
 
         let ticks = counter.load(Ordering::SeqCst);
-        assert!(ticks >= 5, "expected ≥5 ticks in 20ms, got {ticks}");
+        assert!(ticks >= 3, "expected ≥3 ticks in 100ms, got {ticks}");
 
         let stats = thread.stats();
         assert_eq!(stats.ticks, ticks as u64);

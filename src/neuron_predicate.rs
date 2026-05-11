@@ -69,7 +69,7 @@ pub struct NeuronMask {
 impl NeuronMask {
     /// Create a mask with all neurons active (no sparsity).
     pub fn all_active(d_ffn: usize) -> Self {
-        let n_words = (d_ffn + 63) / 64;
+        let n_words = d_ffn.div_ceil(64);
         let mut bits = vec![u64::MAX; n_words];
 
         // Clear unused high bits in the last word.
@@ -87,7 +87,7 @@ impl NeuronMask {
 
     /// Create a mask with all neurons inactive.
     pub fn all_inactive(d_ffn: usize) -> Self {
-        let n_words = (d_ffn + 63) / 64;
+        let n_words = d_ffn.div_ceil(64);
         Self {
             bits: vec![0u64; n_words],
             d_ffn,
@@ -101,7 +101,7 @@ impl NeuronMask {
     /// The mask is then rounded to bundle boundaries (groups of 64).
     pub fn from_scores(scores: &[f32], threshold: f32) -> Self {
         let d_ffn = scores.len();
-        let n_words = (d_ffn + 63) / 64;
+        let n_words = d_ffn.div_ceil(64);
         let mut bits = vec![0u64; n_words];
         let mut active_count = 0;
 
@@ -127,7 +127,7 @@ impl NeuronMask {
     ///
     /// `active_bundles[i]` = true means neurons [i*64 .. (i+1)*64) are active.
     pub fn from_bundles(active_bundles: &[bool], d_ffn: usize) -> Self {
-        let n_words = (d_ffn + 63) / 64;
+        let n_words = d_ffn.div_ceil(64);
         let mut bits = vec![0u64; n_words];
         let mut active_count = 0;
 
@@ -211,7 +211,7 @@ impl NeuronMask {
 
     /// Number of 64-neuron bundles.
     pub fn n_bundles(&self) -> usize {
-        (self.d_ffn + BUNDLE_SIZE - 1) / BUNDLE_SIZE
+        self.d_ffn.div_ceil(BUNDLE_SIZE)
     }
 
     /// Number of active bundles.
@@ -498,6 +498,7 @@ impl NeuronPredictor {
     /// 3. `mask = bundle_align(scores >= threshold)`
     ///
     /// Runtime: < 1ms for LLaMA 70B (8192 → 3584 → 28672, ~200M FLOPs).
+    #[allow(clippy::needless_range_loop)]
     pub fn predict(&self, hidden_state: &[f32]) -> NeuronMask {
         assert_eq!(
             hidden_state.len(),
@@ -539,6 +540,7 @@ impl NeuronPredictor {
     }
 
     /// Predict and return the raw activation scores (for analysis).
+    #[allow(clippy::needless_range_loop)]
     pub fn predict_scores(&self, hidden_state: &[f32]) -> Vec<f32> {
         assert_eq!(hidden_state.len(), self.hidden_dim);
 

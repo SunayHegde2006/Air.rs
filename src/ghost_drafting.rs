@@ -581,7 +581,7 @@ impl fmt::Display for GhostSession {
         writeln!(f, "║  RAM:      {:>29} MB ║", self.available_ram_mb)?;
         writeln!(f, "║  TTFT:     {:>29.0} ms ║", self.perceived_ttft_ms())?;
         writeln!(f, "║  Speedup:  {:>29.0}× ║", self.ttft_speedup())?;
-        writeln!(f, "║  {} ║", format!("{:>44}", self.tracker))?;
+        writeln!(f, "║  {:>44} ║", self.tracker)?;
         writeln!(f, "╚══════════════════════════════════════════════╝")?;
         Ok(())
     }
@@ -785,7 +785,7 @@ pub fn prefetch_read_time_ms(entry_size_bytes: usize, disk_speed_mbps: f64) -> f
 ///
 /// 2 × 80 × 8 × 128 × 1 byte = 163,840 bytes
 pub fn default_entry_size() -> usize {
-    2 * 80 * 8 * 128 * 1
+    2 * 80 * 8 * 128
 }
 
 // ── Sequential Magnetism (Dual-File) ─────────────────────────────────────

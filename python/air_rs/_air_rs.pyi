@@ -6,6 +6,8 @@ all public classes. The actual implementation is in src/python.rs.
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+
 __version__: str
 
 class GenerateConfig:
@@ -68,6 +70,32 @@ class Metrics:
     prompt_tokens: int
     generated_tokens: int
 
+class TokenChannel:
+    """Per-request token stream returned by ``Engine._stream_channel()``.
+
+    Not constructed directly — obtain via ``Engine._stream_channel()`` and
+    consume through ``air_rs.astream()``.
+    """
+
+    def recv_sync(self) -> str | None:
+        """Block (GIL released) until the next token is ready.
+
+        Returns the decoded token string, or ``None`` when generation is done.
+
+        Raises
+        ------
+        RuntimeError
+            If the generator hit an internal error.
+        """
+        ...
+
+    def recv_or_stop(self) -> str:
+        """Like ``recv_sync`` but raises ``StopAsyncIteration`` on exhaustion.
+
+        Used internally by ``air_rs.astream()``.
+        """
+        ...
+
 class Engine:
     """High-performance LLM inference engine."""
 
@@ -100,6 +128,19 @@ class Engine:
         """Stream generated tokens as a list of strings."""
         ...
 
+    def _stream_channel(
+        self,
+        prompt: str,
+        config: GenerateConfig | None = None,
+    ) -> TokenChannel:
+        """Start generation and return a live ``TokenChannel``.
+
+        Generation runs synchronously in a GIL-free thread; tokens are
+        buffered in the channel as they are produced.  Consume via
+        ``air_rs.astream()`` for a proper ``async for`` interface.
+        """
+        ...
+
     def set_grammar(self, constraint: GbnfConstraint) -> None:
         """Set a persistent grammar constraint for all subsequent calls."""
         ...
@@ -119,3 +160,24 @@ class Engine:
     def metrics(self) -> Metrics:
         """Return metrics from the last generation call."""
         ...
+
+# ---------------------------------------------------------------------------
+# Free async helper — re-exported from air_rs.__init__
+# ---------------------------------------------------------------------------
+
+async def astream(
+    engine: Engine,
+    prompt: str,
+    config: GenerateConfig | None = None,
+) -> AsyncGenerator[str]:
+    """Async generator yielding one decoded token per iteration.
+
+    Wraps ``Engine._stream_channel()`` + a thread-pool executor so the
+    Python event loop never blocks during generation.
+
+    Examples
+    --------
+    >>> async for token in air_rs.astream(engine, "Once upon a time"):
+    ...     print(token, end="", flush=True)
+    """
+    ...

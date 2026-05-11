@@ -229,7 +229,7 @@ impl SpeculativeDecoder {
             let mut accepted = 0;
             let mut bonus_token: Option<u32> = None;
 
-            for (_i, &draft_token) in draft_tokens.iter().enumerate() {
+            for &draft_token in draft_tokens.iter() {
                 // Get target model's prediction at this position
                 let target_result = self.target.generate(
                     tokenizer,

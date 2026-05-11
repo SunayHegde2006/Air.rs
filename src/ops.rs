@@ -1037,7 +1037,7 @@ pub fn parallel_attn_ffn(
 ) -> Result<Tensor> {
     // Two adds: (residual + attn_out) + ffn_out
     // Both attn_out and ffn_out must be the same shape as residual.
-    (residual.broadcast_add(attn_out)?.broadcast_add(ffn_out))
+    residual.broadcast_add(attn_out)?.broadcast_add(ffn_out)
 }
 
 /// Falcon-style single shared LayerNorm for both attn + FFN paths.
@@ -1050,7 +1050,7 @@ pub fn parallel_attn_ffn(
 /// This is a documentation helper — the actual norm is `layer_norm()`.
 /// Call `layer_norm()` once, reuse result for both paths.
 #[inline(always)]
-pub fn falcon_shared_norm<'a>(normed: &'a Tensor) -> &'a Tensor {
+pub fn falcon_shared_norm(normed: &Tensor) -> &Tensor {
     normed // pass-through; serves as documentation/naming
 }
 
@@ -1096,7 +1096,7 @@ pub fn rope_partial(
 ) -> Result<(Tensor, Tensor)> {
     let head_dim = q.dim(D::Minus1)?;
     assert!(
-        rotary_dim <= head_dim && rotary_dim % 2 == 0,
+        rotary_dim <= head_dim && rotary_dim.is_multiple_of(2),
         "rotary_dim ({rotary_dim}) must be even and ≤ head_dim ({head_dim})"
     );
 
@@ -1512,7 +1512,7 @@ fn quantize_fp4(x: f32) -> f32 {
 /// Returns (quantized values as f32, per-block scale factors).
 fn fp4_quantize_blocked(data: &[f32]) -> (Vec<f32>, Vec<f32>) {
     let n = data.len();
-    let n_blocks = (n + FP4_BLOCK - 1) / FP4_BLOCK;
+    let n_blocks = n.div_ceil(FP4_BLOCK);
     let mut quant = Vec::with_capacity(n);
     let mut scales = Vec::with_capacity(n_blocks);
 

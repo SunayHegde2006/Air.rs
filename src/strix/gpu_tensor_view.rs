@@ -152,7 +152,7 @@ impl<'a> GpuTensorView<'a> {
             // Element count for sub-view is approximate — caller should
             // interpret based on their use case.
             elements: if self.dtype.block_size_bytes() > 0 {
-                (len / self.dtype.block_size_bytes()) * self.dtype.block_elements() as usize
+                (len / self.dtype.block_size_bytes()) * self.dtype.block_elements()
             } else {
                 0
             },
@@ -177,10 +177,10 @@ impl<'a> GpuTensorView<'a> {
                 byte_size: self.size,
             });
         }
-        let block_elems = self.dtype.block_elements() as usize;
+        let block_elems = self.dtype.block_elements();
         // Round up to block boundaries.
         let start_block = start_elem / block_elems;
-        let end_block = (start_elem + count + block_elems - 1) / block_elems;
+        let end_block = (start_elem + count).div_ceil(block_elems);
         let byte_offset = start_block * elem_bytes;
         let byte_len = (end_block - start_block) * elem_bytes;
 
