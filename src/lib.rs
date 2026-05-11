@@ -51,6 +51,9 @@ pub mod tensor_parallel;      // Megatron-LM tensor parallelism — column/row p
 pub mod prefix_cache;         // RadixAttention prefix KV cache — LRU Patricia trie (v0.6.0)
 pub mod pd_disagg;            // PD disaggregation — Mooncake-style TCP/SHM KV transfer (v0.6.0)
 pub mod pipeline_parallel;    // Pipeline parallelism — 1F1B schedule, SPSC channels (v0.6.0)
+pub mod aqlm;                 // AQLM 2-bit quantisation — additive codebook matmul (v0.7.0)
+pub mod fp8;                  // FP8 E4M3/E5M2 — weight/activation quantisation (v0.7.0)
+pub mod qlora;                // QLoRA — AQLM base + low-rank FP32 adapter (v0.7.0)
 pub mod metrics;
 pub mod pipeline;
 pub mod neuron_predicate;
