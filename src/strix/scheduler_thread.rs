@@ -175,12 +175,13 @@ mod tests {
             Duration::from_millis(1),
         );
 
-        // Let it tick a few times.
-        thread::sleep(Duration::from_millis(20));
+        // Allow enough wall-clock time for even slow CI runners (macOS sleep
+        // granularity can be ~10 ms, so we wait 100 ms and only require ≥3 ticks).
+        thread::sleep(Duration::from_millis(100));
         thread.shutdown();
 
         let ticks = counter.load(Ordering::SeqCst);
-        assert!(ticks >= 5, "expected ≥5 ticks in 20ms, got {ticks}");
+        assert!(ticks >= 3, "expected ≥3 ticks in 100ms, got {ticks}");
 
         let stats = thread.stats();
         assert_eq!(stats.ticks, ticks as u64);
