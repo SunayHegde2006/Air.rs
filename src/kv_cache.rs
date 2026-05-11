@@ -53,7 +53,7 @@ impl Q8Tensor {
     /// Quantise a slice of f32 values into Q8_0 blocks.
     pub fn quantize(data: &[f32], shape: Vec<usize>) -> Self {
         let numel = data.len();
-        let n_blocks = (numel + Q8_0_BLOCK_SIZE - 1) / Q8_0_BLOCK_SIZE;
+        let n_blocks = numel.div_ceil(Q8_0_BLOCK_SIZE);
         let mut blocks = Vec::with_capacity(n_blocks);
 
         for chunk in data.chunks(Q8_0_BLOCK_SIZE) {

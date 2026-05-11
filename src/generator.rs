@@ -544,7 +544,7 @@ impl InferenceGenerator {
     ) -> Result<u32> {
         let (input_tokens, start_pos) = if step == 0 && !prefill_done {
             // First step, no chunked prefill — process entire prompt
-            (&all_tokens[..], 0)
+            (all_tokens, 0)
         } else if step == 0 && prefill_done {
             // Chunked prefill already processed all but the last chunk.
             // The last chunk still needs processing to produce logits.

@@ -173,12 +173,12 @@ impl TierManager {
         let mut pinned_count = self.count_tier(KvTier::Pinned);
 
         for entry in self.entries.iter_mut() {
-            if entry.position >= start && entry.position < end {
-                if pinned_count < self.budget.pinned_max {
-                    entry.tier = KvTier::Pinned;
-                    entry.is_pinned = true;
-                    pinned_count += 1;
-                }
+            if entry.position >= start && entry.position < end
+                && pinned_count < self.budget.pinned_max
+            {
+                entry.tier = KvTier::Pinned;
+                entry.is_pinned = true;
+                pinned_count += 1;
             }
         }
     }
