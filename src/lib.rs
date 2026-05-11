@@ -54,6 +54,9 @@ pub mod pipeline_parallel;    // Pipeline parallelism — 1F1B schedule, SPSC ch
 pub mod aqlm;                 // AQLM 2-bit quantisation — additive codebook matmul (v0.7.0)
 pub mod fp8;                  // FP8 E4M3/E5M2 — weight/activation quantisation (v0.7.0)
 pub mod qlora;                // QLoRA — AQLM base + low-rank FP32 adapter (v0.7.0)
+pub mod yarn;                 // YaRN RoPE extension — 128K context on consumer GPU (v0.8.0)
+pub mod chunked_attn;         // Blockwise chunked attention — O(N×B) memory, GQA, causal (v0.8.0)
+pub mod whisper;              // Whisper ASR — mel spectrogram + encoder/decoder pipeline (v0.8.0)
 pub mod metrics;
 pub mod pipeline;
 pub mod neuron_predicate;
