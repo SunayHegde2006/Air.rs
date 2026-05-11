@@ -270,7 +270,7 @@ impl Exl2Layer {
         let n = self.q_weight.dim(1)?;
         let k_packed = self.q_weight.dim(0)?;
         let bits = (k_packed as f32 * 32.0) / (n as f32 * k_packed as f32);
-        Ok(bits.min(8.0).max(2.0))
+        Ok(bits.clamp(2.0, 8.0))
     }
 
     /// Dequantize to dense f32 (GPTQ-compatible path for 4-bit groups).
@@ -306,7 +306,7 @@ impl Exl2Layer {
         for row in 0..k {
             let qrow = row / 8;
             let shift = (row % 8) * 4;
-            let group = if group_size > 0 { (row / group_size).min(scales_raw.len() - 1) } else { 0 };
+            let group = row.checked_div(group_size).unwrap_or(0).min(scales_raw.len().saturating_sub(1));
             let scale = scales_raw[group] * scale_max;
             for col in 0..n {
                 let q = ((qw[qrow * n + col] >> shift) & mask) as f32;

@@ -388,7 +388,7 @@ pub fn normalize_image(image: &Tensor, use_siglip: bool) -> Result<Tensor> {
         // ImageNet stats (CLIP)
         (
             vec![0.48145466f32, 0.4578275, 0.40821073],
-            vec![0.26862954f32, 0.26130258, 0.27577711],
+            vec![0.26862954f32, 0.261_302_6, 0.275_777_1],
         )
     };
 

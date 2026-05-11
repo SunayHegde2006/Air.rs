@@ -408,5 +408,5 @@ pub fn forward_pass(
 
     // 4. Return logits for the last token only
     let last_logits = logits.i((.., seq_len - 1, ..))?;
-    Ok(last_logits.squeeze(0)?)
+    last_logits.squeeze(0)
 }

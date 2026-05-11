@@ -129,7 +129,7 @@ impl GbnfGrammar {
 
             // Continuation: line starts with `|` (additional alternative)
             if trimmed.starts_with('|') && current_rule_name.is_some() {
-                let alt = Self::parse_alt(&trimmed[1..].trim_start())
+                let alt = Self::parse_alt(trimmed[1..].trim_start())
                     .map_err(|e| format!("Line {}: {e}", line_no + 1))?;
                 current_alts.push(alt);
                 continue;

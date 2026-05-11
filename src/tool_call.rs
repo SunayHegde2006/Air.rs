@@ -249,7 +249,7 @@ pub fn parse_tool_calls(text: &str) -> ParseResult {
         "<tool_call>",
         "</tool_call>",
         &mut calls,
-        |inner| parse_json_tool_call(inner),
+        parse_json_tool_call,
     );
 
     // ── Format 2: <|tool_call|>…<|end_tool_call|> (Llama 3.x / 4) ───────────
@@ -258,7 +258,7 @@ pub fn parse_tool_calls(text: &str) -> ParseResult {
         "<|tool_call|>",
         "<|end_tool_call|>",
         &mut calls,
-        |inner| parse_json_tool_call(inner),
+        parse_json_tool_call,
     );
 
     // ── Format 3: [TOOL_CALLS] [{…}, …] (Mistral, MiniMax) ──────────────────

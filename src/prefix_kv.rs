@@ -185,8 +185,8 @@ impl PrefixKvCache {
                 .map_err(|e| anyhow::anyhow!("prefix store: load layer {layer}: {e}"))?;
 
             // Clone tensors so this entry owns independent storage
-            let k_owned = k.map(|t| t.clone());
-            let v_owned = v.map(|t| t.clone());
+            let k_owned = k;
+            let v_owned = v;
             layers.push((k_owned, v_owned));
         }
 

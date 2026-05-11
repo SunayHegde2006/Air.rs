@@ -497,6 +497,7 @@ impl GdsStorageHal {
     /// Probes the system for GDS support. If GDS is available,
     /// initializes the cuFile driver. Otherwise, allocates a pinned
     /// host buffer for the fallback staging path.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let capability = GdsCapability::probe();
         // Initialize cuFile driver if available via cuFileDriverOpen.

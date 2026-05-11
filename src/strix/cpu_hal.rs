@@ -102,6 +102,7 @@ impl GpuHal for CpuHal {
             })
     }
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn copy_to_vram(
         &self,
         dst: GpuPtr,
@@ -129,6 +130,7 @@ impl GpuHal for CpuHal {
         Ok(())
     }
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn copy_from_vram(
         &self,
         dst: *mut u8,

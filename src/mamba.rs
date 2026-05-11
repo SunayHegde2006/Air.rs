@@ -61,7 +61,7 @@ impl MambaConfig {
             d_inner,
             d_state: 16,
             d_conv: 4,
-            dt_rank: (d_model + 15) / 16,
+            dt_rank: d_model.div_ceil(16),
             mamba2: false,
         }
     }
@@ -75,7 +75,7 @@ impl MambaConfig {
             d_inner,
             d_state: 16,
             d_conv: 4,
-            dt_rank: (d_model + 15) / 16,
+            dt_rank: d_model.div_ceil(16),
             mamba2: false,
         }
     }
@@ -89,7 +89,7 @@ impl MambaConfig {
             d_inner,
             d_state: 16,
             d_conv: 4,
-            dt_rank: (d_model + 15) / 16,
+            dt_rank: d_model.div_ceil(16),
             mamba2: false,
         }
     }
