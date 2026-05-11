@@ -1,0 +1,22 @@
+apiVersion: v2
+name: air-rs
+description: Air.rs — Production LLM inference engine in Rust
+
+type: application
+version: 0.5.0
+appVersion: "0.5.0"
+
+keywords:
+  - llm
+  - inference
+  - rust
+  - gpu
+  - ai
+
+maintainers:
+  - name: Air.rs Team
+    url: https://github.com/SunayHegde2006/Air.rs
+
+home: https://github.com/SunayHegde2006/Air.rs
+sources:
+  - https://github.com/SunayHegde2006/Air.rs

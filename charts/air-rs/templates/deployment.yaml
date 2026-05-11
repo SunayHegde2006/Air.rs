@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "air-rs.fullname" . }}
+  labels:
+    {{- include "air-rs.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "air-rs.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0        # zero-downtime rolling deploy
+  template:
+    metadata:
+      labels:
+        {{- include "air-rs.selectorLabels" . | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.service.metricsPort }}"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: air-rs
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.service.metricsPort }}
+              protocol: TCP
+          env:
+            - name: AIR_RS_MODEL_PATH
+              value: {{ .Values.model.path | quote }}
+            - name: AIR_RS_PORT
+              value: {{ .Values.service.port | quote }}
+            - name: AIR_RS_MAX_TOKENS
+              value: {{ .Values.model.maxTokens | quote }}
+            - name: AIR_RS_VRAM_BUDGET_PERCENT
+              value: {{ .Values.model.vramBudgetPercent | quote }}
+            - name: RUST_LOG
+              value: {{ .Values.logLevel | quote }}
+          resources:
+            requests:
+              memory: {{ .Values.resources.requests.memory }}
+              cpu: {{ .Values.resources.requests.cpu }}
+              {{- if .Values.gpu.enabled }}
+              nvidia.com/gpu: {{ .Values.gpu.count | quote }}
+              {{- end }}
+            limits:
+              memory: {{ .Values.resources.limits.memory }}
+              cpu: {{ .Values.resources.limits.cpu }}
+              {{- if .Values.gpu.enabled }}
+              nvidia.com/gpu: {{ .Values.gpu.count | quote }}
+              {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: model-storage
+              mountPath: /models
+              readOnly: true
+      volumes:
+        - name: model-storage
+          {{- if .Values.model.persistentVolume.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "air-rs.fullname" . }}-models
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- if .Values.gpu.enabled }}
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      {{- end }}

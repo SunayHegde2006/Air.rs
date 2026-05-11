@@ -1,0 +1,69 @@
+# Air.rs Helm Chart — Default Values
+# Override via: helm install air-rs ./charts/air-rs -f custom-values.yaml
+
+# ── Replica Count ─────────────────────────────────────────────────────────
+replicaCount: 1
+
+# ── Image ─────────────────────────────────────────────────────────────────
+image:
+  repository: ghcr.io/sunayhegde2006/air-rs
+  pullPolicy: IfNotPresent
+  # Overrides the image tag. Defaults to Chart.appVersion.
+  tag: ""
+
+# ── Service ───────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 9090
+
+# ── Resources ─────────────────────────────────────────────────────────────
+resources:
+  requests:
+    memory: "8Gi"
+    cpu: "2"
+  limits:
+    memory: "24Gi"
+    cpu: "8"
+
+# ── GPU ───────────────────────────────────────────────────────────────────
+gpu:
+  enabled: true
+  # Number of GPU units to request from the device plugin
+  count: 1
+
+# ── Model ─────────────────────────────────────────────────────────────────
+model:
+  # Path inside the container where models are mounted
+  path: /models
+  maxTokens: 4096
+  # VRAM budget percentage (0–100); Air.rs will cap KV cache at this %
+  vramBudgetPercent: 80
+  persistentVolume:
+    enabled: false
+    storageClass: "standard"
+    size: "50Gi"
+
+# ── Logging ───────────────────────────────────────────────────────────────
+logLevel: "info"
+
+# ── Graceful Shutdown ─────────────────────────────────────────────────────
+# Allow in-flight requests to complete before pod terminates
+terminationGracePeriodSeconds: 30
+
+# ── Autoscaling ───────────────────────────────────────────────────────────
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 85
+
+# ── Pod Disruption Budget ─────────────────────────────────────────────────
+podDisruptionBudget:
+  # Minimum available pods during voluntary disruptions (node drains, upgrades)
+  minAvailable: 1
+
+# ── Name Overrides ────────────────────────────────────────────────────────
+nameOverride: ""
+fullnameOverride: ""

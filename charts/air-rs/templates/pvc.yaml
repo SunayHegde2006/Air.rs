@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "air-rs.fullname" . }}-models
+  labels:
+    {{- include "air-rs.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadOnlyMany
+  storageClassName: {{ .Values.model.persistentVolume.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.model.persistentVolume.size }}

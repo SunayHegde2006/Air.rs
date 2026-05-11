@@ -41,6 +41,12 @@ pub mod tri_attention;     // M.I.S.T. v4 — TriAttention token importance scor
 pub mod iso_quant;         // M.I.S.T. v4 — IsoQuant-Fast SO(4) quaternion key projection (v0.4.0)
 pub mod turbo_quant;       // M.I.S.T. v4 — TurboQuant Lloyd-Max optimal 4-bit codec (v0.4.0)
 pub mod lora;              // LoRA / PEFT hot-swap — S-LoRA-style adapter LRU cache (v0.4.0)
+pub mod eagle2;            // EAGLE-2 dynamic draft tree speculative decoding (v0.5.0)
+pub mod paged_attention;   // PagedAttention v2 — block table + CoW KV management (v0.5.0)
+pub mod flash_decode;      // FlashDecoding++ — split-k parallel softmax reduction (v0.5.0)
+pub mod eval;              // Evaluation harness — HellaSwag/ARC/MMLU/PPL + regression gate (v0.5.0)
+pub mod openai_api;        // OpenAI-compatible REST API types + auth + rate limiting (v0.5.0)
+pub mod continuous_batch;  // Continuous Batching v2 — Orca scheduler + PD-Disagg KV transfer (v0.5.0)
 pub mod metrics;
 pub mod pipeline;
 pub mod neuron_predicate;
