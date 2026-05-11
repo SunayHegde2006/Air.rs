@@ -87,7 +87,7 @@ impl HqqConfig {
 ///
 /// Supports nbits = 1, 2, 3, 4, 5, 6, 7, 8.
 pub fn unpack_weights(packed: &[u8], nbits: u8, n_weights: usize) -> Vec<u8> {
-    assert!(nbits >= 1 && nbits <= 8, "nbits must be in 1..=8");
+    assert!((1..=8).contains(&nbits), "nbits must be in 1..=8");
     let mut out = Vec::with_capacity(n_weights);
 
     match nbits {
@@ -97,14 +97,14 @@ pub fn unpack_weights(packed: &[u8], nbits: u8, n_weights: usize) -> Vec<u8> {
         }
         4 => {
             // 2 weights per byte (low nibble first)
-            for &byte in packed.iter().take((n_weights + 1) / 2) {
+            for &byte in packed.iter().take(n_weights.div_ceil(2)) {
                 out.push(byte & 0x0F);
                 if out.len() < n_weights { out.push((byte >> 4) & 0x0F); }
             }
         }
         2 => {
             // 4 weights per byte
-            for &byte in packed.iter().take((n_weights + 3) / 4) {
+            for &byte in packed.iter().take(n_weights.div_ceil(4)) {
                 for shift in [0u8, 2, 4, 6] {
                     if out.len() < n_weights {
                         out.push((byte >> shift) & 0x03);
@@ -114,7 +114,7 @@ pub fn unpack_weights(packed: &[u8], nbits: u8, n_weights: usize) -> Vec<u8> {
         }
         1 => {
             // 8 weights per byte
-            for &byte in packed.iter().take((n_weights + 7) / 8) {
+            for &byte in packed.iter().take(n_weights.div_ceil(8)) {
                 for bit in 0..8u8 {
                     if out.len() < n_weights {
                         out.push((byte >> bit) & 0x01);
@@ -221,8 +221,8 @@ impl HqqLayer {
         let [out_feat, in_feat] = self.cfg.shape;
         let group_size = self.cfg.group_size;
         let n_groups = match self.cfg.axis {
-            HqqAxis::Axis0 => out_feat * ((in_feat + group_size - 1) / group_size),
-            HqqAxis::Axis1 => in_feat * ((out_feat + group_size - 1) / group_size),
+            HqqAxis::Axis0 => out_feat * in_feat.div_ceil(group_size),
+            HqqAxis::Axis1 => in_feat * out_feat.div_ceil(group_size),
         };
 
         // ── Step 1: unpack raw uint8 quantized values ─────────────────────
@@ -246,7 +246,7 @@ impl HqqLayer {
         match self.cfg.axis {
             HqqAxis::Axis0 => {
                 // axis=0: groups along in_feat dimension for each output row
-                let groups_per_row = (in_feat + group_size - 1) / group_size;
+                let groups_per_row = in_feat.div_ceil(group_size);
                 for out_idx in 0..out_feat {
                     for in_idx in 0..in_feat {
                         let g = out_idx * groups_per_row + in_idx / group_size;
@@ -259,7 +259,7 @@ impl HqqLayer {
             }
             HqqAxis::Axis1 => {
                 // axis=1: groups along out_feat dimension for each input column
-                let groups_per_col = (out_feat + group_size - 1) / group_size;
+                let groups_per_col = out_feat.div_ceil(group_size);
                 for out_idx in 0..out_feat {
                     for in_idx in 0..in_feat {
                         let g = in_idx * groups_per_col + out_idx / group_size;

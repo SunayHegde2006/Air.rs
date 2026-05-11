@@ -16,7 +16,7 @@
 //! `python/air_rs/__init__.py` re-exports all public symbols so users see
 //! only `air_rs.Engine`, `air_rs.GenerateConfig`, etc.
 
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 use std::sync::Mutex;
@@ -28,7 +28,7 @@ use crate::model::ModelConfig;
 use crate::sampler::SamplerConfig;
 use crate::tokenizer::Tokenizer;
 use crate::weight_streamer::WeightStreamer;
-use crate::generator::InferenceGenerator;
+use crate::generator::{GenerationEvent, InferenceGenerator};
 
 // ---------------------------------------------------------------------------
 // Helper: anyhow::Error → PyErr
@@ -470,7 +470,62 @@ impl PyEngine {
         Ok(vec![text])
     }
 
-    // ── Grammar control ───────────────────────────────────────────────────
+    // ── Async streaming ───────────────────────────────────────────────────
+
+    /// Start generation on a background thread and return a `TokenChannel`.
+    ///
+    /// Each call to `channel.recv_sync()` blocks the OS thread (not the event
+    /// loop) until the next token is ready.  Use `astream()` from `air_rs`
+    /// to consume this as a native `async for` loop.
+    ///
+    /// Parameters
+    /// ----------
+    /// prompt : str
+    ///     The input text prompt.
+    /// config : GenerateConfig | None
+    ///     Optional per-call sampling config.
+    ///
+    /// Returns
+    /// -------
+    /// TokenChannel
+    ///     A live channel that yields one decoded token per `recv_sync()` call.
+    #[pyo3(signature = (prompt, config = None))]
+    pub fn _stream_channel(
+        &self,
+        py: Python<'_>,
+        prompt: String,
+        config: Option<Py<PyGenerateConfig>>,
+    ) -> PyResult<PyTokenChannel> {
+        // Extract config while holding the GIL
+        let (max_tokens, grammar_spec) = if let Some(ref cfg_py) = config {
+            let cfg = cfg_py.borrow(py);
+            let gs = cfg.grammar.as_ref().map(|g| g.borrow(py).grammar_src.clone());
+            (cfg.max_tokens, gs)
+        } else {
+            (512_usize, None)
+        };
+
+        // Run generation synchronously in a GIL-free thread.
+        // generate_stream_inner fills the channel as each token is produced.
+        let rx = py.allow_threads(|| -> PyResult<_> {
+            let mut state = self.inner.lock()
+                .map_err(|_| PyRuntimeError::new_err("Engine mutex poisoned"))?;
+
+            if let Some(spec) = grammar_spec {
+                let token_texts = state.token_texts.clone();
+                let constraint = PyGbnfConstraint { grammar_src: spec }.build(token_texts)?;
+                state.generator.set_grammar(constraint);
+            } else {
+                state.generator.clear_grammar();
+            }
+
+            let EngineState { generator, tokenizer, streamer, .. } = &mut *state;
+            let rx = generator.generate_stream(tokenizer, &prompt, max_tokens, streamer);
+            Ok(rx)
+        })?;
+
+        Ok(PyTokenChannel { inner: Mutex::new(rx) })
+    }
 
     /// Attach a GBNF grammar constraint that applies to ALL subsequent calls.
     ///
@@ -536,6 +591,72 @@ impl PyEngine {
 }
 
 // ---------------------------------------------------------------------------
+// PyTokenChannel — per-request streaming token channel
+// ---------------------------------------------------------------------------
+
+/// An async-friendly token stream returned by `Engine._stream_channel()`.
+///
+/// Use `recv_sync()` from a thread-pool executor to iterate tokens without
+/// blocking the Python event loop.
+///
+/// Examples
+/// --------
+/// This type is not constructed directly; obtain it via `Engine._stream_channel()`
+/// and consume it through the `air_rs.astream()` async generator helper:
+///
+/// >>> async for token in air_rs.astream(engine, "prompt"):
+/// ...     print(token, end="", flush=True)
+#[pyclass]
+pub struct PyTokenChannel {
+    /// Thread-safe access to the tokio mpsc receiver.
+    inner: Mutex<tokio::sync::mpsc::Receiver<GenerationEvent>>,
+}
+
+#[pymethods]
+impl PyTokenChannel {
+    /// Block the calling OS thread until the next token is available.
+    ///
+    /// Releases the Python GIL while waiting, so the event loop stays live.
+    ///
+    /// Returns
+    /// -------
+    /// str | None
+    ///     The next decoded token string, or `None` when generation is done.
+    ///
+    /// Raises
+    /// ------
+    /// RuntimeError
+    ///     If the generator encountered an internal error.
+    pub fn recv_sync(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        py.allow_threads(|| {
+            let mut rx = self.inner.lock()
+                .map_err(|_| PyRuntimeError::new_err("TokenChannel mutex poisoned"))?;
+            match rx.blocking_recv() {
+                Some(GenerationEvent::Token(text)) => Ok(Some(text)),
+                Some(GenerationEvent::Done(_)) | None => Ok(None),
+                Some(GenerationEvent::Error(e))  => Err(PyRuntimeError::new_err(e)),
+            }
+        })
+    }
+
+    /// Raise `StopAsyncIteration` when `recv_sync` returns `None`.
+    /// Used by the `astream()` async generator helper.
+    pub fn recv_or_stop(&self, py: Python<'_>) -> PyResult<String> {
+        match self.recv_sync(py)? {
+            Some(tok) => Ok(tok),
+            None => Err(PyStopAsyncIteration::new_err("stream exhausted")),
+        }
+    }
+
+    fn __repr__(&self) -> &'static str {
+        "TokenChannel(<active>)"
+    }
+}
+
+// SAFETY: tokio Receiver<T> is Send; Mutex ensures exclusive access.
+unsafe impl Send for PyTokenChannel {}
+
+// ---------------------------------------------------------------------------
 // Module registration
 // ---------------------------------------------------------------------------
 
@@ -551,6 +672,7 @@ pub fn _air_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGenerateConfig>()?;
     m.add_class::<PyGbnfConstraint>()?;
     m.add_class::<PyMetrics>()?;
+    m.add_class::<PyTokenChannel>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

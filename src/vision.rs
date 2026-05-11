@@ -287,7 +287,7 @@ pub fn vit_layer_forward(x: &Tensor, w: &VitLayerWeights, n_heads: usize) -> Res
     let normed2 = layer_norm_vit(&x, &mw, mb.as_ref(), 1e-6)?;
     let fc1 = gelu_approx(&w.mlp_fc1.forward(&normed2)?)?;
     let fc2 = w.mlp_fc2.forward(&fc1)?;
-    (x + fc2)
+    x + fc2
 }
 
 // ---------------------------------------------------------------------------
@@ -388,7 +388,7 @@ pub fn normalize_image(image: &Tensor, use_siglip: bool) -> Result<Tensor> {
         // ImageNet stats (CLIP)
         (
             vec![0.48145466f32, 0.4578275, 0.40821073],
-            vec![0.26862954f32, 0.26130258, 0.27577711],
+            vec![0.26862954f32, 0.261_302_6, 0.275_777_1],
         )
     };
 
@@ -399,7 +399,7 @@ pub fn normalize_image(image: &Tensor, use_siglip: bool) -> Result<Tensor> {
         .to_dtype(dtype)?
         .reshape((1usize, 3, 1, 1))?;
 
-    (image.broadcast_sub(&mean_t)?.broadcast_div(&std_t))
+    image.broadcast_sub(&mean_t)?.broadcast_div(&std_t)
 }
 
 // ---------------------------------------------------------------------------

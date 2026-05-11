@@ -1,6 +1,7 @@
 """Tests for air_rs Python bindings."""
 
 from __future__ import annotations
+
 import pytest
 
 
@@ -29,8 +30,12 @@ class TestUtils:
 
     def test_no_generation_prompt(self) -> None:
         from air_rs.utils import format_chat
-        r = format_chat([{"role": "user", "content": "Hi"}], template="chatml", add_generation_prompt=False)
-        assert not r.rstrip().endswith('<|im_start|>assistant')
+        r = format_chat(
+            [{"role": "user", "content": "Hi"}],
+            template="chatml",
+            add_generation_prompt=False,
+        )
+        assert not r.rstrip().endswith("<|im_start|>assistant")
 
     def test_unknown_template_raises(self) -> None:
         from air_rs.utils import format_chat
@@ -159,3 +164,132 @@ class TestEngineIntegration:
         m = engine.metrics()
         assert m.tokens_per_second > 0
         assert m.generated_tokens >= 1
+
+
+# ---------------------------------------------------------------------------
+# astream — pure-Python unit tests (no model required)
+# ---------------------------------------------------------------------------
+
+class TestAstreamUnit:
+    """Tests for the astream() async generator helper — no GGUF required."""
+
+    def test_astream_is_async_generator_function(self) -> None:
+        import inspect
+
+        import air_rs
+        assert inspect.isasyncgenfunction(air_rs.astream)
+
+    def test_astream_in_all(self) -> None:
+        import air_rs
+        assert "astream" in air_rs.__all__
+
+    def test_token_channel_in_all(self) -> None:
+        import air_rs
+        assert "TokenChannel" in air_rs.__all__
+
+    def test_shutdown_stream_executor_callable(self) -> None:
+        import air_rs
+        assert callable(air_rs.shutdown_stream_executor)
+
+    def test_shutdown_stream_executor_idempotent(self) -> None:
+        import air_rs
+        # First call tears down; second should be a no-op
+        air_rs.shutdown_stream_executor(wait=False)
+        air_rs.shutdown_stream_executor(wait=False)  # must not raise
+
+    def test_get_executor_creates_thread_pool(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        from air_rs import _get_executor
+        pool = _get_executor()
+        assert isinstance(pool, ThreadPoolExecutor)
+        # Second call returns same instance
+        assert _get_executor() is pool
+
+    def test_astream_no_ext_raises_import_error(self, monkeypatch) -> None:
+        """When extension not loaded, astream() raises ImportError."""
+        import asyncio
+
+        import air_rs
+
+        monkeypatch.setattr(air_rs, "_EXTENSION_LOADED", False)
+
+        async def run():
+            # astream() is an async generator — calling it returns the gen object,
+            # first __anext__ triggers the body and should raise ImportError.
+            gen = air_rs.astream(object(), "hello")  # type: ignore
+            with pytest.raises(ImportError, match="Rust extension"):
+                await gen.__anext__()
+
+        asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# astream — integration tests (model-gated)
+# ---------------------------------------------------------------------------
+
+class TestAstreamIntegration:
+    """Integration tests for astream() — require a real GGUF model."""
+
+    @pytest.fixture(autouse=True)
+    def skip_without_model(self, tmp_path) -> None:
+        import os
+        model = os.environ.get("AIR_RS_TEST_MODEL")
+        if not model or not os.path.exists(model):
+            pytest.skip("Set AIR_RS_TEST_MODEL=path/to/model.gguf to run async integration tests")
+        self.model_path = model
+
+    def test_astream_yields_strings(self) -> None:
+        import asyncio
+
+        import air_rs
+
+        async def run():
+            engine = air_rs.Engine.from_gguf(self.model_path)
+            tokens = []
+            cfg = air_rs.GenerateConfig(max_tokens=16)
+            async for token in air_rs.astream(engine, "Once upon a time", cfg):
+                assert isinstance(token, str)
+                tokens.append(token)
+            assert len(tokens) >= 1
+
+        asyncio.run(run())
+
+    def test_astream_concatenates_to_nonempty(self) -> None:
+        import asyncio
+
+        import air_rs
+
+        async def run():
+            engine = air_rs.Engine.from_gguf(self.model_path)
+            cfg = air_rs.GenerateConfig(max_tokens=8)
+            result = ""
+            async for token in air_rs.astream(engine, "The sky is", cfg):
+                result += token
+            assert len(result) > 0
+
+        asyncio.run(run())
+
+    def test_astream_event_loop_stays_alive(self) -> None:
+        """Other coroutines must run while astream is active."""
+        import asyncio
+
+        import air_rs
+
+        ran_other = []
+
+        async def other_coro():
+            ran_other.append(1)
+
+        async def run():
+            engine = air_rs.Engine.from_gguf(self.model_path)
+            cfg = air_rs.GenerateConfig(max_tokens=8)
+            # Schedule the other coroutine; it should run between token yields
+            task = asyncio.create_task(other_coro())
+            async for _ in air_rs.astream(engine, "Hello", cfg):
+                await asyncio.sleep(0)  # yield to allow other_coro to run
+            await task
+
+        asyncio.run(run())
+        assert ran_other, "event loop did not run other tasks during astream"
+

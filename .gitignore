@@ -4,6 +4,15 @@
 /graphify-out/
 /graphifyy_env/
 /plan/
+/.sentrux/
+/.agent/
+/.agents/
+/.pytest_cache/
+*.abi3.so
+*.so
+uv.lock
+/.fallow/
+
 # IDE
 .idea/
 .vscode/

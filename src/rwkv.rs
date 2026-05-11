@@ -310,7 +310,7 @@ pub fn rwkv_channel_mix_step(
 
     // Gating: sigmoid(r) * v
     let r_gate = (r.neg()?.exp()? + 1.0_f64)?.recip()?;
-    (r_gate * v)
+    r_gate * v
 }
 
 // ---------------------------------------------------------------------------
@@ -367,7 +367,7 @@ pub fn rwkv_block_step(
     // Channel-mix
     let x_ln2 = layer_norm_rwkv(&x_after_tm, &w2, &b2, 1e-5)?;
     let cm_out = rwkv_channel_mix_step(&x_ln2, &lw.channel_mix, state, cfg)?;
-    (x_after_tm + cm_out)
+    x_after_tm + cm_out
 }
 
 // ---------------------------------------------------------------------------

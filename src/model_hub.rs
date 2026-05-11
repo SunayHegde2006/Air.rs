@@ -304,7 +304,7 @@ pub fn guess_filename(repo_id: &str, quant_hint: Option<&str>) -> String {
     // Extract model name from repo ID
     let model_name = repo_id
         .split('/')
-        .last()
+        .next_back()
         .unwrap_or("model")
         .to_lowercase()
         .replace("-gguf", "");

@@ -110,6 +110,10 @@ cargo run --release -- --model path/to/model.gguf --prompt "Hello!"
 | **Monitoring** | Real-time TUI dashboard + Prometheus-compatible metrics |
 | **Templates** | Chat template engine (ChatML, Llama3, Mistral, Gemma, Phi-3) |
 | **Python** | Production-ready PyO3 bindings — `pip install air-rs` |
+| **Async Streaming** | `astream(engine, prompt)` async generator — GIL-free token streaming via `tokio::sync::mpsc` |
+| **Model Multiplexer** | Load N models simultaneously; per-tick interleaved decode; VRAM budget enforced at 80% cap |
+| **Prefix KV Cache** | Content-addressed KV block pool (16-token chunks, hash-keyed); `PrefixKvCache` + `CompressionScheme` |
+| **CUDA Pipeline** | `LayerScheduler` — DMA stream overlaps weight prefetch with compute per layer (`CudaStreamPool`) |
 | **Benchmarks** | Criterion throughput suite + 4-engine comparison harness (`scripts/`) |
 
 ---
@@ -171,6 +175,50 @@ print(engine.generate(prompt))
 engine.reset()
 ```
 
+### Async streaming (`astream`)
+
+Yield tokens one-by-one without blocking the event loop — zero GIL holds during
+generation, safe to use inside FastAPI / Starlette / aiohttp handlers:
+
+```python
+import asyncio
+import air_rs
+
+engine = air_rs.Engine.from_gguf("llama-3.2-3b-q4_k_m.gguf")
+
+async def main() -> None:
+    async for token in air_rs.astream(engine, "Once upon a time"):
+        print(token, end="", flush=True)
+    print()
+
+asyncio.run(main())
+```
+
+With sampling config:
+
+```python
+cfg = air_rs.GenerateConfig(temperature=0.8, max_tokens=256)
+async for token in air_rs.astream(engine, "Tell me a story", cfg):
+    print(token, end="", flush=True)
+```
+
+FastAPI SSE endpoint example:
+
+```python
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+
+app = FastAPI()
+
+@app.post("/stream")
+async def stream(prompt: str) -> StreamingResponse:
+    async def generator():
+        async for token in air_rs.astream(engine, prompt):
+            yield f"data: {token}\n\n"
+    return StreamingResponse(generator(), media_type="text/event-stream")
+```
+
+
 ### API reference
 
 | Symbol | Description |
@@ -193,6 +241,8 @@ engine.reset()
 | `Metrics.total_time_ms` | Full generation wall time |
 | `format_chat(messages, template, add_generation_prompt)` | ChatML / Llama3 / Mistral / Gemma / Phi-3 |
 | `count_tokens_approx(text)` | Fast token-count estimate (÷4 chars) |
+| `astream(engine, prompt, config=None)` | **Async generator** — yields one token per `await`; GIL-free |
+| `shutdown_stream_executor(wait=True)` | Cleanly tears down the background thread pool |
 
 ### Supported models (Python + CLI)
 
@@ -299,7 +349,7 @@ src/
 
 ## Project Status
 
-> **Beta** — All subsystems implemented and tested (**976+ tests**, 0 warnings). Compiles on Windows, Linux, and macOS. All protocol specifications (STRIX, S.L.I.P., M.I.S.T. v3, DriveInquisitor v3) at 100% coverage. E2E validation passes against real Llama 3.2 3B Q8 GGUF models. Multi-model support (Llama/Mistral/Phi-3/Qwen2/Gemma), GBNF grammar-constrained generation, and production Python bindings (`pip install air-rs`) are all complete.
+> **Beta** — All subsystems implemented and tested (**1 000+ tests**, 0 warnings). Compiles on Windows, Linux, and macOS. All protocol specifications (STRIX, S.L.I.P., M.I.S.T. v3, DriveInquisitor v3) at 100% coverage. v0.3.0 multi-model serving complete: `ModelMultiplexer` (interleaved decode, VRAM 80% cap), `PrefixKvCache` (content-addressed KV blocks, `CompressionScheme`), `CudaStreamPool` + `LayerScheduler` (DMA/compute overlap), and native `astream()` Python streaming all land. E2E validation passes against real Llama 3.2 3B Q8 GGUF models.
 
 ### Current Status
 
@@ -337,6 +387,11 @@ src/
 | **Python package (`pip install air-rs`)** | ✅ **v0.1.0 on PyPI** |
 | CI/CD — multi-platform wheels | ✅ manylinux / macOS / Windows |
 | OIDC Trusted Publisher (no secret) | ✅ |
+| **Model Multiplexer** (v0.3.0) | ✅ `src/model_mux.rs` — interleaved decode, VRAM-budget enforcement |
+| **VRAM 80% hard cap** (v0.3.0) | ✅ `src/vram_guard.rs` — rejects loads exceeding budget with clear error |
+| **Per-model prefix KV cache** (v0.3.0) | ✅ `src/prefix_kv.rs` — content-addressed blocks, FIFO eviction, `CompressionScheme` |
+| **CUDA multi-stream pipelining** (v0.3.0) | ✅ `src/cuda_pipeline.rs` — `CudaStreamPool` + `LayerScheduler` DMA/compute overlap |
+| **Native async Python streaming** (v0.3.0) | ✅ `astream(engine, prompt)` via `tokio::sync::mpsc` + `_stream_channel` |
 
 ### STRIX Subsystem
 
@@ -390,15 +445,15 @@ STRIX (**S**treamed **T**ensor **R**esidence & **I**ntelligent e**X**change) man
 - [x] Quantized KV-cache — 1-bit key compression + Q8 value quantization (BF16→Q8, 2× compression) fully implemented in M.I.S.T. v3 (`kv_compress.rs`)
 - [x] ROCm backend — `src/strix/rocm_hal.rs` fully implements `GpuHal` via AMD HIP Runtime API FFI, feature-gated as `--features rocm`
 
-#### 🔜 Next (v0.3.0) — Multi-Model Concurrent Serving
+#### ✅ Completed (v0.3.0) — Multi-Model Concurrent Serving
 
 > **Theme:** True interleaved multi-model serving on consumer GPUs. Every loaded model emits tokens at the same wall-clock tick. Designed and validated against RTX 3060 12 GB VRAM.
 
-- [ ] **Model Multiplexer** — load N models simultaneously; per-tick interleaved decode loop emits one token per model per step; dynamic count bound by available VRAM (no hard limit — fits as many as VRAM allows)
-- [ ] **VRAM 80% hard cap** — reject model load with a clear error if combined weight footprint would exceed 80% of detected VRAM (9.6 GB on 3060): `Error: insufficient VRAM for simultaneous execution — free {X} MB or use a smaller model`
-- [ ] **Per-model prefix KV cache** — content-addressed block pool (16-token chunks, hash-keyed); ref-counted `KvBlockRef` shared across sessions with identical system prompts; blocks tagged with `CompressionScheme` enum for forward-compatible migration to M.I.S.T. v4
-- [ ] **CUDA multi-stream pipelining** — model A decode on stream 0 overlaps model B weight prefetch on stream 1; extends the existing S.L.I.P. pipeline to N concurrently resident models; no CUDA MPS required
-- [ ] **Native async Python streaming** — `async for token in engine.astream(model_id, prompt)` backed by a `tokio::sync::mpsc` channel; no `run_in_executor` wrapper needed; works across all loaded models concurrently
+- [x] **Model Multiplexer** (`src/model_mux.rs`) — load N models simultaneously; per-tick interleaved decode loop emits one token per model per step; dynamic count bound by available VRAM (no hard limit — fits as many as VRAM allows)
+- [x] **VRAM 80% hard cap** (`src/vram_guard.rs`) — reject model load with a clear error if combined weight footprint would exceed 80% of detected VRAM (9.6 GB on 3060): `Error: insufficient VRAM for simultaneous execution — free {X} MB or use a smaller model`
+- [x] **Per-model prefix KV cache** (`src/prefix_kv.rs`) — content-addressed block pool (16-token chunks, hash-keyed); ref-counted entries shared across sessions with identical system prompts; blocks tagged with `CompressionScheme` enum for forward-compatible migration to M.I.S.T. v4; FIFO eviction at configurable capacity
+- [x] **CUDA multi-stream pipelining** (`src/cuda_pipeline.rs`) — `LayerScheduler` + `CudaStreamPool`; compute stream overlaps weight prefetch DMA stream per layer; extends the existing S.L.I.P. pipeline; no CUDA MPS required; graceful noop fallback on non-CUDA builds
+- [x] **Native async Python streaming** — `air_rs.astream(engine, prompt)` async generator backed by Rust `tokio::sync::mpsc`; `Engine._stream_channel()` opens channel natively; GIL-free, event-loop-safe; works across all loaded models concurrently
 
 #### 🔭 Future (v0.4.0) — M.I.S.T. v4 KV Pipeline
 
