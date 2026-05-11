@@ -47,7 +47,10 @@ pub mod flash_decode;      // FlashDecoding++ — split-k parallel softmax reduc
 pub mod eval;              // Evaluation harness — HellaSwag/ARC/MMLU/PPL + regression gate (v0.5.0)
 pub mod openai_api;        // OpenAI-compatible REST API types + auth + rate limiting (v0.5.0)
 pub mod continuous_batch;  // Continuous Batching v2 — Orca scheduler + PD-Disagg KV transfer (v0.5.0)
-pub mod tensor_parallel;   // Megatron-LM tensor parallelism — column/row parallel linear (v0.6.0)
+pub mod tensor_parallel;      // Megatron-LM tensor parallelism — column/row parallel linear (v0.6.0)
+pub mod prefix_cache;         // RadixAttention prefix KV cache — LRU Patricia trie (v0.6.0)
+pub mod pd_disagg;            // PD disaggregation — Mooncake-style TCP/SHM KV transfer (v0.6.0)
+pub mod pipeline_parallel;    // Pipeline parallelism — 1F1B schedule, SPSC channels (v0.6.0)
 pub mod metrics;
 pub mod pipeline;
 pub mod neuron_predicate;
