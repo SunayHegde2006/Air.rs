@@ -33,6 +33,18 @@ from typing import TYPE_CHECKING
 # Pure-Python submodule — always importable
 from air_rs import utils  # noqa: F401
 
+# ---------------------------------------------------------------------------
+# Type-checking vs runtime import strategy
+#
+# When TYPE_CHECKING is True (mypy / Pyright / Pyrefly):
+#   → import directly from _air_rs via the .pyi stub — full interface visible
+#
+# At runtime (else branch):
+#   → try the compiled extension; fall back to _NotBuilt stubs if it's absent
+#
+# This structure ensures static type checkers NEVER see the _NotBuilt stubs,
+# which would otherwise shadow the proper types and produce spurious errors.
+# ---------------------------------------------------------------------------
 if TYPE_CHECKING:
     from air_rs._air_rs import (
         Engine,
@@ -42,54 +54,57 @@ if TYPE_CHECKING:
         TokenChannel,
     )
 
-# Native extension — lazy import so `utils` works even without the .so
-try:
-    from air_rs._air_rs import (  # isort: skip
-        Engine as Engine,
-        GbnfConstraint as GbnfConstraint,
-        GenerateConfig as GenerateConfig,
-        Metrics as Metrics,
-        TokenChannel as TokenChannel,
-        __version__ as __version__,
-    )
-    _EXTENSION_LOADED = True
-except ImportError:
-    _EXTENSION_LOADED = False
-    __version__ = "0.0.0+unbuilt"
+    __version__: str
+    _EXTENSION_LOADED: bool
 
-    class _NotBuilt:
-        """Placeholder raised when the Rust extension has not been compiled."""
+else:
+    try:
+        from air_rs._air_rs import (  # isort: skip
+            Engine as Engine,
+            GbnfConstraint as GbnfConstraint,
+            GenerateConfig as GenerateConfig,
+            Metrics as Metrics,
+            TokenChannel as TokenChannel,
+            __version__ as __version__,
+        )
+        _EXTENSION_LOADED = True
+    except ImportError:
+        _EXTENSION_LOADED = False
+        __version__ = "0.0.0+unbuilt"
 
-        _name: str
+        class _NotBuilt:
+            """Placeholder raised when the Rust extension has not been compiled."""
 
-        def __init_subclass__(cls, name: str = "", **kw: object) -> None:
-            cls._name = name
+            _name: str
 
-        def __call__(self, *a: object, **kw: object) -> None:
-            raise ImportError(
-                f"air_rs.{self._name} requires the compiled Rust extension.\n"
-                "Run: maturin develop --features python\n"
-                "Or:  pip install air-rs"
-            )
+            def __init_subclass__(cls, name: str = "", **kw: object) -> None:
+                cls._name = name
 
-        @classmethod
-        def __class_getitem__(cls, item: object) -> object:
-            return cls
+            def __call__(self, *a: object, **kw: object) -> None:
+                raise ImportError(
+                    f"air_rs.{self._name} requires the compiled Rust extension.\n"
+                    "Run: maturin develop --features python\n"
+                    "Or:  pip install air-rs"
+                )
 
-    class Engine(_NotBuilt, name="Engine"):  # type: ignore[no-redef]
-        pass
+            @classmethod
+            def __class_getitem__(cls, item: object) -> object:
+                return cls
 
-    class GenerateConfig(_NotBuilt, name="GenerateConfig"):  # type: ignore[no-redef]
-        pass
+        class Engine(_NotBuilt, name="Engine"):
+            pass
 
-    class GbnfConstraint(_NotBuilt, name="GbnfConstraint"):  # type: ignore[no-redef]
-        pass
+        class GenerateConfig(_NotBuilt, name="GenerateConfig"):
+            pass
 
-    class Metrics(_NotBuilt, name="Metrics"):  # type: ignore[no-redef]
-        pass
+        class GbnfConstraint(_NotBuilt, name="GbnfConstraint"):
+            pass
 
-    class TokenChannel(_NotBuilt, name="TokenChannel"):  # type: ignore[no-redef]
-        pass
+        class Metrics(_NotBuilt, name="Metrics"):
+            pass
+
+        class TokenChannel(_NotBuilt, name="TokenChannel"):
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +184,7 @@ async def astream(
     # returns once generation is complete (tokens buffered in the channel).
     channel: TokenChannel = await loop.run_in_executor(
         pool,
-        lambda: engine._stream_channel(prompt, config),  # type: ignore[attr-defined]
+        lambda: engine._stream_channel(prompt, config),
     )
 
     # Drain channel: each recv_sync() blocks the pool thread (not the loop)
@@ -177,7 +192,7 @@ async def astream(
     while True:
         token: str | None = await loop.run_in_executor(
             pool,
-            channel.recv_sync,  # type: ignore[attr-defined]
+            channel.recv_sync,
         )
         if token is None:
             return
