@@ -5,7 +5,8 @@ all public classes. The actual implementation is in src/python.rs.
 """
 
 from __future__ import annotations
-from typing import AsyncGenerator, Optional
+
+from collections.abc import AsyncGenerator
 
 __version__: str
 
@@ -168,7 +169,7 @@ async def astream(
     engine: Engine,
     prompt: str,
     config: GenerateConfig | None = None,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Async generator yielding one decoded token per iteration.
 
     Wraps ``Engine._stream_channel()`` + a thread-pool executor so the

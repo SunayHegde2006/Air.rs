@@ -11,6 +11,7 @@
 *.abi3.so
 *.so
 uv.lock
+/.fallow/
 
 # IDE
 .idea/

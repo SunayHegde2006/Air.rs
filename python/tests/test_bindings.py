@@ -1,6 +1,7 @@
 """Tests for air_rs Python bindings."""
 
 from __future__ import annotations
+
 import pytest
 
 
@@ -29,8 +30,12 @@ class TestUtils:
 
     def test_no_generation_prompt(self) -> None:
         from air_rs.utils import format_chat
-        r = format_chat([{"role": "user", "content": "Hi"}], template="chatml", add_generation_prompt=False)
-        assert not r.rstrip().endswith('<|im_start|>assistant')
+        r = format_chat(
+            [{"role": "user", "content": "Hi"}],
+            template="chatml",
+            add_generation_prompt=False,
+        )
+        assert not r.rstrip().endswith("<|im_start|>assistant")
 
     def test_unknown_template_raises(self) -> None:
         from air_rs.utils import format_chat
@@ -170,6 +175,7 @@ class TestAstreamUnit:
 
     def test_astream_is_async_generator_function(self) -> None:
         import inspect
+
         import air_rs
         assert inspect.isasyncgenfunction(air_rs.astream)
 
@@ -192,8 +198,9 @@ class TestAstreamUnit:
         air_rs.shutdown_stream_executor(wait=False)  # must not raise
 
     def test_get_executor_creates_thread_pool(self) -> None:
-        from air_rs import _get_executor
         from concurrent.futures import ThreadPoolExecutor
+
+        from air_rs import _get_executor
         pool = _get_executor()
         assert isinstance(pool, ThreadPoolExecutor)
         # Second call returns same instance
@@ -202,6 +209,7 @@ class TestAstreamUnit:
     def test_astream_no_ext_raises_import_error(self, monkeypatch) -> None:
         """When extension not loaded, astream() raises ImportError."""
         import asyncio
+
         import air_rs
 
         monkeypatch.setattr(air_rs, "_EXTENSION_LOADED", False)
@@ -233,6 +241,7 @@ class TestAstreamIntegration:
 
     def test_astream_yields_strings(self) -> None:
         import asyncio
+
         import air_rs
 
         async def run():
@@ -248,6 +257,7 @@ class TestAstreamIntegration:
 
     def test_astream_concatenates_to_nonempty(self) -> None:
         import asyncio
+
         import air_rs
 
         async def run():
@@ -263,6 +273,7 @@ class TestAstreamIntegration:
     def test_astream_event_loop_stays_alive(self) -> None:
         """Other coroutines must run while astream is active."""
         import asyncio
+
         import air_rs
 
         ran_other = []

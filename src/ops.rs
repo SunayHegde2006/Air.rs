@@ -1037,7 +1037,7 @@ pub fn parallel_attn_ffn(
 ) -> Result<Tensor> {
     // Two adds: (residual + attn_out) + ffn_out
     // Both attn_out and ffn_out must be the same shape as residual.
-    (residual.broadcast_add(attn_out)?.broadcast_add(ffn_out))
+    residual.broadcast_add(attn_out)?.broadcast_add(ffn_out)
 }
 
 /// Falcon-style single shared LayerNorm for both attn + FFN paths.
