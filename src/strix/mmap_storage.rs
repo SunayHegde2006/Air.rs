@@ -148,7 +148,6 @@ impl MmapStorageHal {
     /// Issue a prefetch hint for a byte range within a mapped file.
     pub fn prefetch_range(&self, _file_handle: FileHandle, _offset: u64, _size: usize) {
         if !self.enable_prefetch_hints {
-            return;
         }
         // Production: libc::madvise(ptr, len, MADV_WILLNEED) / PrefetchVirtualMemory
     }
@@ -156,7 +155,6 @@ impl MmapStorageHal {
     /// Release pages back to the OS (eviction hint).
     pub fn release_range(&self, _file_handle: FileHandle, _offset: u64, _size: usize) {
         if !self.enable_prefetch_hints {
-            return;
         }
         // Production: libc::madvise(ptr, len, MADV_DONTNEED) / DiscardVirtualMemory
     }
@@ -274,7 +272,7 @@ impl MmapStorageHal {
     fn read_with_direct_io(path: &Path) -> Result<Vec<u8>, HalError> {
         #[cfg(target_os = "linux")]
         {
-            return Self::read_direct_linux(path);
+            Self::read_direct_linux(path)
         }
 
         #[cfg(target_os = "windows")]
@@ -357,8 +355,8 @@ impl MmapStorageHal {
         // Copy to a Vec (truncated to actual file size).
         let mut data = Vec::with_capacity(file_size);
         unsafe {
-            data.set_len(file_size);
             std::ptr::copy_nonoverlapping(buf_ptr, data.as_mut_ptr(), file_size);
+            data.set_len(file_size);
             std::alloc::dealloc(buf_ptr, layout);
         }
 

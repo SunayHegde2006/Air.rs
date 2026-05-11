@@ -97,6 +97,7 @@ impl BlockIq3s {
         // Decode each weight (simplified — real decode reads 3-bit indices from qs/qh)
         // This is the structurally correct decode loop; actual codebook lookup
         // requires porting the full IQ3S grid from ggml-quants.c
+        #[allow(clippy::needless_range_loop)]
         for i in 0..256 {
             let sub_block = i / 32;
             let sub_scale = sub_scales[sub_block];
@@ -105,7 +106,8 @@ impl BlockIq3s {
             let byte_idx = i * 3 / 8;
             let bit_offset = (i * 3) % 8;
             let qs_idx = if byte_idx < self.qs.len() {
-                let raw = if bit_offset <= 5 {
+                
+                if bit_offset <= 5 {
                     (self.qs[byte_idx] >> bit_offset) & 0x07
                 } else {
                     let low = (self.qs[byte_idx] >> bit_offset) as u32;
@@ -113,8 +115,7 @@ impl BlockIq3s {
                         ((self.qs[byte_idx + 1] as u32) << (8 - bit_offset)) & 0x07
                     } else { 0 };
                     (low | high) as u8 & 0x07
-                };
-                raw
+                }
             } else { 0 };
 
             // Sign bit from signs array
@@ -173,7 +174,7 @@ impl BlockIq1s {
             let scale = self.delta * sub_scale[group];
             for bit in 0..8 {
                 // Extract 2-bit value: 00=0, 01=+1, 10=-1, 11=+1 (approximately)
-                let v = ((byte >> (bit * 1)) & 0x3) as i8;
+                let v = ((byte >> bit) & 0x3) as i8;
                 let fv = match v & 0x3 {
                     0 => -1.0f32,
                     1 =>  0.0f32,

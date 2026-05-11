@@ -181,7 +181,7 @@ impl StreamDisplay {
             if self.in_code_block {
                 print!("\n{}{}", ansi::BG_GRAY, ansi::WHITE);
             } else {
-                print!("{}\n", ansi::RESET);
+                println!("{}", ansi::RESET);
                 self.col = 0;
             }
             io::stdout().flush().ok();

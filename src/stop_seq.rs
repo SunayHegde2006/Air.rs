@@ -98,7 +98,7 @@ impl StopChecker {
         max_tokens: usize,
     ) -> Self {
         // Sort longest-first so we match the most specific stop first
-        stop_strings.sort_by(|a, b| b.len().cmp(&a.len()));
+        stop_strings.sort_by_key(|s: &String| std::cmp::Reverse(s.len()));
         // Buffer needs to hold at least the longest stop string
         let max_stop_len = stop_strings.iter().map(|s| s.len()).max().unwrap_or(1);
         // × 2 for safety with multi-byte UTF-8

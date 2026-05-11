@@ -137,11 +137,7 @@ impl SchedulerThread {
     pub fn stats(&self) -> SchedulerStats {
         let ticks = self.state.tick_count.load(Ordering::Relaxed);
         let cumulative_us = self.state.cumulative_tick_us.load(Ordering::Relaxed);
-        let avg_tick_us = if ticks > 0 {
-            cumulative_us / ticks
-        } else {
-            0
-        };
+        let avg_tick_us = cumulative_us.checked_div(ticks).unwrap_or(0);
         SchedulerStats {
             ticks,
             started_at: self.started_at,

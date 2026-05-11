@@ -52,7 +52,6 @@ impl Manifest {
         }
 
         let mut chunks = Vec::new();
-        let mut id = 0;
 
         // Ensure "embeddings" comes first, then "blk.N" in order, then "output".
         let mut ordered_keys = Vec::new();
@@ -68,7 +67,7 @@ impl Manifest {
         if groups.contains_key("output") { ordered_keys.push("output".to_string()); }
         if groups.contains_key("other") { ordered_keys.push("other".to_string()); }
 
-        for prefix in ordered_keys {
+        for (id, prefix) in ordered_keys.into_iter().enumerate() {
             let tensors = groups.get(&prefix).unwrap().clone();
             
             let raw_start_offset = tensors.iter().map(|t| t.absolute_offset).min().unwrap_or(0);
@@ -76,7 +75,7 @@ impl Manifest {
             
             // Calculate DMA aligned offsets
             let dma_start_offset = (raw_start_offset / data_alignment) * data_alignment;
-            let dma_end_offset = ((raw_end_offset + data_alignment - 1) / data_alignment) * data_alignment;
+            let dma_end_offset = raw_end_offset.div_ceil(data_alignment) * data_alignment;
             let dma_transfer_size = dma_end_offset - dma_start_offset;
             
             chunks.push(LayerChunk {
@@ -89,7 +88,6 @@ impl Manifest {
                 dma_end_offset,
                 dma_transfer_size,
             });
-            id += 1;
         }
         
         Ok(Self { chunks })

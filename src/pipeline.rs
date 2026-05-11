@@ -628,7 +628,7 @@ impl CircularSlotManager {
         lines.push(format!("Depth: {} (max: {})", self.depth, self.max_depth));
         lines.push(format!("Pointers: read={} compute={} ahead={}", self.read_ptr, self.compute_ptr, self.read_ahead()));
         lines.push(format!("Total layers: {} | Underruns: {} | Consecutive: {}", self.total_layers_processed, self.underrun_count, self.consecutive_underruns));
-        lines.push(format!("{}", self.metrics.summary()));
+        lines.push(self.metrics.summary().to_string());
         lines.push(self.visual());
 
         if !self.metrics.underrun_log.is_empty() {

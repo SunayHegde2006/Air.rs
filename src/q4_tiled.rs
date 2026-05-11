@@ -194,7 +194,7 @@ pub fn dequantize_block(block: &Q4TiledBlock, kind: Q4TileKind) -> [f32; Q4_0_BL
 /// `data` must be a valid byte slice containing an integer number of
 /// 18-byte Q4_0 blocks. `kind` selects the tile geometry.
 pub fn dequantize_q4_tiled(data: &[u8], kind: Q4TileKind) -> Vec<f32> {
-    assert!(data.len() % Q4_0_BLOCK_SIZE == 0,
+    assert!(data.len().is_multiple_of(Q4_0_BLOCK_SIZE),
         "Q4 tiled data length {} is not a multiple of block size {}", data.len(), Q4_0_BLOCK_SIZE);
     let n_blocks = data.len() / Q4_0_BLOCK_SIZE;
     let mut out = Vec::with_capacity(n_blocks * Q4_0_BLOCK_WEIGHTS);
@@ -231,7 +231,7 @@ pub fn f16_bits_to_f32(bits: u16) -> f32 {
         }
         // Subnormal: normalise
         let leading = mantissa.leading_zeros() - 22; // relative to 10-bit mantissa
-        ((127 - 14 - leading) as u32, (mantissa << (leading + 1)) & 0x7F_FFFF)
+        ((127 - 14 - leading), (mantissa << (leading + 1)) & 0x7F_FFFF)
     } else if exp_raw == 0x1F {
         // Infinity or NaN
         let f32_exp  = 0xFF_u32 << 23;

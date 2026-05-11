@@ -229,7 +229,7 @@ impl MetalKernel {
 
     /// Compute grid size for a 1D dispatch of `n` elements.
     pub fn grid_for_elements(&self, n: u32) -> GridSize {
-        let groups = (n + self.threadgroup_size.width - 1) / self.threadgroup_size.width;
+        let groups = n.div_ceil(self.threadgroup_size.width);
         GridSize::new_1d(groups * self.threadgroup_size.width)
     }
 }

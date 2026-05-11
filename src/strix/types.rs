@@ -165,7 +165,7 @@ pub fn tensor_bytes(shape: &[usize], dtype: DType) -> usize {
         return 0;
     }
     let block_elems = dtype.block_elements();
-    let n_blocks = (n_elements + block_elems - 1) / block_elems;
+    let n_blocks = n_elements.div_ceil(block_elems);
     n_blocks * dtype.block_size_bytes()
 }
 
