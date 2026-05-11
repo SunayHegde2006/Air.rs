@@ -26,18 +26,28 @@ Async streaming (issue #6)
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
-from typing import AsyncGenerator, Optional
+from typing import TYPE_CHECKING
 
 # Pure-Python submodule — always importable
 from air_rs import utils  # noqa: F401
 
+if TYPE_CHECKING:
+    from air_rs._air_rs import (
+        Engine,
+        GbnfConstraint,
+        GenerateConfig,
+        Metrics,
+        TokenChannel,
+    )
+
 # Native extension — lazy import so `utils` works even without the .so
 try:
-    from air_rs._air_rs import (  # noqa: F401
+    from air_rs._air_rs import (  # isort: skip
         Engine as Engine,
-        GenerateConfig as GenerateConfig,
         GbnfConstraint as GbnfConstraint,
+        GenerateConfig as GenerateConfig,
         Metrics as Metrics,
         TokenChannel as TokenChannel,
         __version__ as __version__,
@@ -55,7 +65,7 @@ except ImportError:
         def __init_subclass__(cls, name: str = "", **kw: object) -> None:
             cls._name = name
 
-        def __call__(self, *a: object, **kw: object) -> None:  # type: ignore[override]
+        def __call__(self, *a: object, **kw: object) -> None:
             raise ImportError(
                 f"air_rs.{self._name} requires the compiled Rust extension.\n"
                 "Run: maturin develop --features python\n"
@@ -87,9 +97,9 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 # Module-level thread pool for recv_sync calls.
-# Using a bounded pool (max_workers=4) avoids spawning one thread per
+# Bounded pool (max 4 workers) avoids spawning one thread per
 # concurrent astream call while still allowing multiple parallel streams.
-_STREAM_EXECUTOR: Optional[ThreadPoolExecutor] = None
+_STREAM_EXECUTOR: ThreadPoolExecutor | None = None
 
 
 def _get_executor() -> ThreadPoolExecutor:
@@ -103,12 +113,12 @@ def _get_executor() -> ThreadPoolExecutor:
 
 
 async def astream(
-    engine: "Engine",
+    engine: Engine,
     prompt: str,
-    config: "Optional[GenerateConfig]" = None,
+    config: GenerateConfig | None = None,
     *,
-    executor: "Optional[ThreadPoolExecutor]" = None,
-) -> "AsyncGenerator[str, None]":
+    executor: ThreadPoolExecutor | None = None,
+) -> AsyncGenerator[str, None]:
     """Async generator that yields decoded tokens one at a time.
 
     The Rust generation loop runs synchronously on a thread-pool thread.
@@ -162,7 +172,7 @@ async def astream(
     # Drain channel: each recv_sync() blocks the pool thread (not the loop)
     # until the next token arrives or the stream is exhausted.
     while True:
-        token: Optional[str] = await loop.run_in_executor(
+        token: str | None = await loop.run_in_executor(
             pool,
             channel.recv_sync,
         )

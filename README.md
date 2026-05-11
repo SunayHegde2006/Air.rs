@@ -110,6 +110,7 @@ cargo run --release -- --model path/to/model.gguf --prompt "Hello!"
 | **Monitoring** | Real-time TUI dashboard + Prometheus-compatible metrics |
 | **Templates** | Chat template engine (ChatML, Llama3, Mistral, Gemma, Phi-3) |
 | **Python** | Production-ready PyO3 bindings — `pip install air-rs` |
+| **Async Streaming** | `astream()` async generator — GIL-free token streaming via `tokio::sync::mpsc` |
 | **Benchmarks** | Criterion throughput suite + 4-engine comparison harness (`scripts/`) |
 
 ---
@@ -171,6 +172,50 @@ print(engine.generate(prompt))
 engine.reset()
 ```
 
+### Async streaming (`astream`)
+
+Yield tokens one-by-one without blocking the event loop — zero GIL holds during
+generation, safe to use inside FastAPI / Starlette / aiohttp handlers:
+
+```python
+import asyncio
+import air_rs
+
+engine = air_rs.Engine.from_gguf("llama-3.2-3b-q4_k_m.gguf")
+
+async def main() -> None:
+    async for token in air_rs.astream(engine, "Once upon a time"):
+        print(token, end="", flush=True)
+    print()
+
+asyncio.run(main())
+```
+
+With sampling config:
+
+```python
+cfg = air_rs.GenerateConfig(temperature=0.8, max_tokens=256)
+async for token in air_rs.astream(engine, "Tell me a story", cfg):
+    print(token, end="", flush=True)
+```
+
+FastAPI SSE endpoint example:
+
+```python
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+
+app = FastAPI()
+
+@app.post("/stream")
+async def stream(prompt: str) -> StreamingResponse:
+    async def generator():
+        async for token in air_rs.astream(engine, prompt):
+            yield f"data: {token}\n\n"
+    return StreamingResponse(generator(), media_type="text/event-stream")
+```
+
+
 ### API reference
 
 | Symbol | Description |
@@ -193,6 +238,8 @@ engine.reset()
 | `Metrics.total_time_ms` | Full generation wall time |
 | `format_chat(messages, template, add_generation_prompt)` | ChatML / Llama3 / Mistral / Gemma / Phi-3 |
 | `count_tokens_approx(text)` | Fast token-count estimate (÷4 chars) |
+| `astream(engine, prompt, config=None)` | **Async generator** — yields one token per `await`; GIL-free |
+| `shutdown_stream_executor(wait=True)` | Cleanly tears down the background thread pool |
 
 ### Supported models (Python + CLI)
 
