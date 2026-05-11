@@ -14,13 +14,13 @@ Quick start
 >>> engine = air_rs.Engine.from_gguf("model.gguf")
 >>> print(engine.generate("Explain attention in one sentence."))
 
-Async streaming (issue #6)
---------------------------
->>> import asyncio
->>> async def main():
-...     async for token in air_rs.astream(engine, "Once upon a time"):
-...         print(token, end="", flush=True)
->>> asyncio.run(main())
+Async streaming
+---------------
+    import asyncio
+    async def main():
+        async for token in air_rs.astream(engine, "Once upon a time"):
+            print(token, end="", flush=True)
+    asyncio.run(main())
 """
 
 from __future__ import annotations
@@ -144,13 +144,16 @@ async def astream(
 
     Examples
     --------
-    >>> async for token in air_rs.astream(engine, "Tell me a story"):
-    ...     print(token, end="", flush=True)
+    Stream to stdout::
 
-    With custom config:
-    >>> cfg = air_rs.GenerateConfig(temperature=0.0, max_tokens=128)
-    >>> async for token in air_rs.astream(engine, "2 + 2 =", cfg):
-    ...     print(token, end="", flush=True)
+        async for token in air_rs.astream(engine, "Tell me a story"):
+            print(token, end="", flush=True)
+
+    With custom config::
+
+        cfg = air_rs.GenerateConfig(temperature=0.0, max_tokens=128)
+        async for token in air_rs.astream(engine, "2 + 2 =", cfg):
+            print(token, end="", flush=True)
     """
     if not _EXTENSION_LOADED:
         raise ImportError(
@@ -166,7 +169,7 @@ async def astream(
     # returns once generation is complete (tokens buffered in the channel).
     channel: TokenChannel = await loop.run_in_executor(
         pool,
-        lambda: engine._stream_channel(prompt, config),
+        lambda: engine._stream_channel(prompt, config),  # type: ignore[attr-defined]
     )
 
     # Drain channel: each recv_sync() blocks the pool thread (not the loop)
@@ -174,7 +177,7 @@ async def astream(
     while True:
         token: str | None = await loop.run_in_executor(
             pool,
-            channel.recv_sync,
+            channel.recv_sync,  # type: ignore[attr-defined]
         )
         if token is None:
             return
