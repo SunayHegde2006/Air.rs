@@ -37,6 +37,10 @@ pub mod vram_guard;        // VRAM 80% hard cap guard (issue #2)
 pub mod prefix_kv;         // Per-model prefix KV cache + CompressionScheme (issue #3)
 pub mod model_mux;         // ModelMux interleaved multi-model tick loop (issue #4)
 pub mod cuda_pipeline;     // CUDA multi-stream pipelining (issue #5)
+pub mod tri_attention;     // M.I.S.T. v4 — TriAttention token importance scorer (v0.4.0)
+pub mod iso_quant;         // M.I.S.T. v4 — IsoQuant-Fast SO(4) quaternion key projection (v0.4.0)
+pub mod turbo_quant;       // M.I.S.T. v4 — TurboQuant Lloyd-Max optimal 4-bit codec (v0.4.0)
+pub mod lora;              // LoRA / PEFT hot-swap — S-LoRA-style adapter LRU cache (v0.4.0)
 pub mod metrics;
 pub mod pipeline;
 pub mod neuron_predicate;

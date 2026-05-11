@@ -91,3 +91,8 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "throughput"
 harness = false
+
+[[bin]]
+name = "air-rs"
+path = "src/bin/air_rs.rs"
+required-features = []
