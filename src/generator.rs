@@ -531,6 +531,7 @@ impl InferenceGenerator {
     ///
     /// `prefill_done`: if true, the prompt was already prefilled via `prefill_chunks()`
     /// and step 0 should only process the last chunk (or single token if fully prefilled).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn generate_step(
         &mut self,
         step: usize,

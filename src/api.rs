@@ -525,7 +525,7 @@ async fn health(State(state): State<Arc<ApiState>>) -> Json<HealthResponse> {
 
 /// Rough token estimation (~4 chars per token, like GPT-family).
 fn estimate_tokens(text: &str) -> usize {
-    (text.len() + 3) / 4
+    text.len().div_ceil(4)
 }
 
 /// Simulate model reply. In production this dispatches to InferenceGenerator.

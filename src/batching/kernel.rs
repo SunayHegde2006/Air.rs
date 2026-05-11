@@ -109,7 +109,7 @@ pub struct TickStats {
 /// - `cfg`      — loop configuration (eos token, idle sleep, tick limit)
 /// - `shutdown` — atomic flag; loop exits cleanly when set to `true`
 /// - `on_tick`  — optional callback invoked after each committed tick;
-///                receives `&TickStats`. Use for metrics/logging.
+///   receives `&TickStats`. Use for metrics/logging.
 ///
 /// # Returns
 /// Total number of `(SequenceId, token)` pairs committed across all ticks.
