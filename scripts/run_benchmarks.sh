@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_benchmarks.sh — Air.rs vs llama.cpp / vLLM / exllama benchmark harness
+# run_benchmarks.sh — Air.rs vs llama.cpp / vLLM / Ollama / exllama / LMDeploy
 #
-# Runs all four engines on the same prompts+model, collects tok/s + TTFT,
+# Runs engines on the same prompts+model, collects tok/s + TTFT,
 # writes a JSON summary and a Markdown report.
 #
 # Usage:
 #   chmod +x scripts/run_benchmarks.sh
 #   ./scripts/run_benchmarks.sh --model ~/models/llama-3.2-3b-q8.gguf
 #   ./scripts/run_benchmarks.sh --model ~/models/llama-3.2-3b-q8.gguf --skip-vllm
+#   ./scripts/run_benchmarks.sh --model ~/models/... --json-only
+#   ./scripts/run_benchmarks.sh --version
+#
+# Air.rs build flags for best performance (v0.8.0):
+#   cargo build --release --features cuda,flash-attn
+#   (YaRN, chunked-attn, Whisper, OCS algos are always compiled-in)
 # =============================================================================
+
+BENCH_VERSION="1.2.0  # v0.8.0 feature set"
 
 set -euo pipefail
 
@@ -19,6 +27,9 @@ MAX_TOKENS=128
 RUNS=5          # per-engine warm+measure runs (first is warm-up)
 SKIP_VLLM=false
 SKIP_EXLLAMA=false
+SKIP_OLLAMA=false
+SKIP_LMDEPLOY=true    # LMDeploy needs FP16 model + separate server
+JSON_ONLY=false
 OUT_DIR="results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
@@ -31,12 +42,19 @@ hdr()   { echo ""; echo "${W}  ── $* ──${X}"; echo ""; }
 
 for arg in "$@"; do
     case "$arg" in
+        --version|-V)
+            echo "run_benchmarks.sh v${BENCH_VERSION}";
+            exit 0 ;;
         --model=*) MODEL="${arg#--model=}" ;;
         --model)   ;;
         --max-tokens=*) MAX_TOKENS="${arg#--max-tokens=}" ;;
         --skip-vllm)    SKIP_VLLM=true ;;
         --skip-exllama) SKIP_EXLLAMA=true ;;
+        --skip-ollama)  SKIP_OLLAMA=true ;;
+        --include-lmdeploy) SKIP_LMDEPLOY=false ;;
+        --json-only)    JSON_ONLY=true ;;
         --runs=*)  RUNS="${arg#--runs=}" ;;
+        --out=*)   OUT_DIR="${arg#--out=}" ;;
         *) [ "${prev_arg:-}" = "--model" ] && MODEL="$arg" ;;
     esac
     prev_arg="$arg"
@@ -50,9 +68,10 @@ mkdir -p "$OUT_DIR"
 MODEL_NAME=$(basename "$MODEL")
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "CPU")
 
+if ! $JSON_ONLY; then
 echo ""
 echo "${W}  ╔══════════════════════════════════════════════════╗${X}"
-echo "${W}  ║       Air.rs Benchmark Harness                   ║${X}"
+echo "${W}  ║       Air.rs Benchmark Harness v${BENCH_VERSION%%#*}  ║${X}"
 echo "${W}  ╚══════════════════════════════════════════════════╝${X}"
 echo ""
 info "Model:      $MODEL_NAME"
@@ -60,6 +79,7 @@ info "GPU:        $GPU_NAME"
 info "Max tokens: $MAX_TOKENS"
 info "Runs each:  $RUNS (first is warm-up)"
 info "Output:     $OUT_DIR/bench_$TIMESTAMP.json"
+fi
 
 # ── Helper: run one engine, return avg tok/s and TTFT ms ──────────────────────
 
@@ -190,7 +210,7 @@ else
 fi
 
 # exllama
-hdr "Engine 4/4 — exllama"
+hdr "Engine 4/5 — exllamav2"
 if $SKIP_EXLLAMA; then
     warn "Skipped (--skip-exllama)"
     TPS_MAP["exllama"]="skipped"
@@ -202,23 +222,55 @@ else
     TPS_MAP["exllama"]="N/A"
 fi
 
+# Ollama
+hdr "Engine 5/5 — Ollama"
+if $SKIP_OLLAMA; then
+    warn "Skipped (--skip-ollama)"
+    TPS_MAP["ollama"]="skipped"
+elif command -v ollama &>/dev/null; then
+    total=0; n=0
+    for prompt in "${PROMPTS[@]}"; do
+        t0=$(date +%s%3N)
+        ollama run "$(basename "$MODEL" .gguf)" "$prompt" --nowordwrap 2>/dev/null >/dev/null || true
+        t1=$(date +%s%3N)
+        elapsed=$(( t1 - t0 ))
+        [ "$elapsed" -eq 0 ] && elapsed=1
+        tps=$(echo "scale=2; $MAX_TOKENS * 1000 / $elapsed" | bc 2>/dev/null || echo "0")
+        total=$(echo "scale=2; $total + $tps" | bc)
+        n=$((n+1))
+        step "  prompt=$((n)) → ${tps} tok/s"
+    done
+    TPS_MAP["ollama"]=$(echo "scale=2; $total / $n" | bc)
+    step "Ollama avg: ${TPS_MAP[ollama]} tok/s"
+else
+    warn "Ollama not installed. See https://ollama.com"
+    TPS_MAP["ollama"]="N/A"
+fi
+
 # ── Write JSON ────────────────────────────────────────────────────────────────
 OUT_FILE="$OUT_DIR/bench_${TIMESTAMP}.json"
 cat > "$OUT_FILE" << EOF
 {
+  "bench_version": "${BENCH_VERSION%%#*}",
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "model": "$MODEL_NAME",
   "gpu": "$GPU_NAME",
   "max_tokens": $MAX_TOKENS,
   "runs_per_engine": $RUNS,
   "results": {
-    "air_rs":   { "avg_toks_per_sec": "${TPS_MAP[air_rs]}"   },
+    "air_rs":   { "avg_toks_per_sec": "${TPS_MAP[air_rs]}"    },
     "llama_cpp":{ "avg_toks_per_sec": "${TPS_MAP[llama_cpp]}" },
-    "vllm":     { "avg_toks_per_sec": "${TPS_MAP[vllm]}"     },
-    "exllama":  { "avg_toks_per_sec": "${TPS_MAP[exllama]}"  }
+    "vllm":     { "avg_toks_per_sec": "${TPS_MAP[vllm]}"      },
+    "ollama":   { "avg_toks_per_sec": "${TPS_MAP[ollama]}"    },
+    "exllama":  { "avg_toks_per_sec": "${TPS_MAP[exllama]}"   }
   }
 }
 EOF
+
+if $JSON_ONLY; then
+    cat "$OUT_FILE"
+    exit 0
+fi
 
 # ── Final summary ─────────────────────────────────────────────────────────────
 echo ""
@@ -226,13 +278,15 @@ echo "${W}  ╔═════════════════════�
 echo "${W}  ║  RESULTS  (avg tok/s, higher = better)           ║${X}"
 echo "${W}  ╚══════════════════════════════════════════════════╝${X}"
 echo ""
-printf "  ${W}%-14s${X}  %s\n" "Engine" "Avg tok/s"
-printf "  %-14s  %s\n"         "──────────────" "─────────"
-printf "  ${G}%-14s${X}  %s\n" "Air.rs"   "${TPS_MAP[air_rs]}"
-printf "  ${Y}%-14s${X}  %s\n" "llama.cpp" "${TPS_MAP[llama_cpp]}"
-printf "  ${C}%-14s${X}  %s\n" "vLLM"      "${TPS_MAP[vllm]}"
-printf "  ${R}%-14s${X}  %s\n" "exllama"   "${TPS_MAP[exllama]}"
+printf "  ${W}%-16s${X}  %s\n" "Engine" "Avg tok/s"
+printf "  %-16s  %s\n"         "────────────────" "─────────"
+printf "  ${G}%-16s${X}  %s\n" "Air.rs v0.8"  "${TPS_MAP[air_rs]}"
+printf "  ${Y}%-16s${X}  %s\n" "llama.cpp"    "${TPS_MAP[llama_cpp]}"
+printf "  ${C}%-16s${X}  %s\n" "vLLM"         "${TPS_MAP[vllm]}"
+printf "  ${C}%-16s${X}  %s\n" "Ollama"       "${TPS_MAP[ollama]}"
+printf "  ${R}%-16s${X}  %s\n" "exllamav2"    "${TPS_MAP[exllama]}"
 echo ""
 step "Full results → $OUT_FILE"
 echo ""
 info "Next: python3 scripts/validate_correctness.py --model $MODEL"
+info "Embed results in README: update the Performance table with these numbers"
