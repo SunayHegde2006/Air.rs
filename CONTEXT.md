@@ -55,3 +55,19 @@
 **GBNF Constraint** — A grammar object (`GbnfConstraint`) that restricts the token logit distribution to a context-free language at each sampling step. Used for structured output.
 
 **Model Hub** — The model download and registry subsystem (`model_hub.rs`): download, SHA-256 verify, alias lookup, local cache at `~/.cache/air-rs/models/`.
+
+---
+
+## v0.9.0 Enterprise + Hybrid-Attention Terms
+
+**ThinkingTokenizer** — Trait in `src/think_tag.rs` abstracting thinking-mode token detection across model families. Two implementations: `TagBasedThinking` (watches byte-pattern sequences `<think>`/`</think>`, used by Qwen3.6/DeepSeek/QwQ) and `SpecialTokenThinking` (watches special token IDs from GGUF tokenizer vocab, used by Gemma 4). Selected at model-load time by `ModelVariant::uses_special_token_thinking()`. See ADR Decision Q5.
+
+**AttentionBackend** — Enum in `src/attention_backend.rs` representing per-layer attention kernel choice. Variants: `Softmax` (standard GQA/MHA, all existing models), `GatedDeltaNet` (Qwen3.6 linear recurrence layers v0.10.0), `SlidingWindow { window }` (Gemma4 local layers), `GlobalFull` (Gemma4 global layers with p-RoPE). `is_recurrent()` distinguishes KV-cache from state-matrix layers.
+
+**HybridAttentionRouter** — Struct in `src/attention_backend.rs` that maps each transformer layer index to its `AttentionBackend`. `uniform(n, backend)` for homogeneous models; `from_layout(vec)` for hybrid models. Canonical layout constructors: `qwen3_6_27b()` (48 DeltaNet + 16 Softmax over 64 layers), `gemma4_e4b(n, w, stride)`. Built by `blocks.rs::build_streaming_blocks()` at model-load time. See ADR Decision Q1/Q2.
+
+**MtpDraftHead** — Struct in `src/speculative.rs` representing a model's native multi-token prediction auxiliary head (Qwen3.6 NEXTN method). Auto-detected at load time by scanning GGUF tensor names for `mtp_head`, `output.*_mtp`, or metadata key `{arch}.mtp.num_steps`. Coexists with EAGLE-2 via `DraftStrategy` enum — zero user configuration required. Full forward pass in v0.10.0. Research: Gloeckle et al., ICML 2024. See ADR Decision Q4.
+
+**DualRoPE** — Struct in `src/dual_rope.rs` (v0.10.0) holding two separate RoPE base-frequency caches: `θ_local` for local sliding-window attention layers and `θ_global` for global full-attention layers. Required by Gemma 4's p-RoPE (proportional RoPE) specification. Read from GGUF metadata keys `gemma4.attention.local_rope_theta` and `gemma4.attention.global_rope_theta`. Current `ops.rs` RoPE accepts a single `theta` — v0.10.0 extends this via `DualRoPE`.
+
+**Gemma4MoeRouter** — MoE router for Gemma 4 26B A4B in `src/moe.rs` (v0.10.0). Uses sigmoid (not softmax) over router logits and top-1/2 expert selection per layer. Distinct from `ConceptMoeConfig` (uses softmax + confidence threshold). 26B total params, 4B active. Expert count derived from GGUF metadata. Extends `moe_forward` with `gemma4_moe_forward`.
