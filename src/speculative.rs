@@ -395,3 +395,188 @@ mod tests {
         assert!((speedup - 4.0).abs() < 0.001);
     }
 }
+
+// ============================================================================
+// v0.9.0 Scaffold — MTP Draft Head (Multi-Token Prediction)
+// ============================================================================
+//
+// Qwen3.6 ships with a native MTP auxiliary head that enables zero-config
+// speculative decoding: no separate draft model required.
+//
+// GGUF tensor name patterns that indicate MTP head presence:
+//   - `model.layers.{N}.mtp_head.*`
+//   - `output.*_mtp`
+//   - metadata key `qwen3_5.mtp.num_steps`
+//
+// Research basis:
+//   Gloeckle et al., "Better & Faster LLMs via Multi-token Prediction",
+//   ICML 2024 (https://arxiv.org/abs/2404.19737)
+//   Qwen3.6 Technical Report (Alibaba, 2025)
+//
+// Status:
+//   v0.9.0: struct defined, GGUF detection implemented, forward pass stubbed.
+//   v0.10.0: forward pass complete in `src/mtp_head.rs`; integrated with
+//             `InferenceGenerator` decode loop.
+
+/// Drive strategy: use EAGLE-2 (external draft model) or MTP (built-in head).
+#[derive(Debug, Clone)]
+pub enum DraftStrategy {
+    /// EAGLE-2 dynamic draft tree — requires a separate draft model.
+    Eagle2(SpeculativeConfig),
+    /// Multi-Token Prediction head — built into the main model's GGUF.
+    /// Zero configuration: auto-detected at model load time.
+    Mtp(MtpDraftHead),
+}
+
+impl DraftStrategy {
+    /// Number of tokens drafted per iteration.
+    pub fn draft_count(&self) -> usize {
+        match self {
+            Self::Eagle2(cfg) => cfg.draft_tokens,
+            Self::Mtp(head)   => head.n_draft_tokens,
+        }
+    }
+
+    /// Human-readable label for logging/metrics.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Eagle2(_) => "eagle2",
+            Self::Mtp(_)    => "mtp",
+        }
+    }
+}
+
+/// Native multi-token prediction draft head.
+///
+/// Qwen3.6 NEXTN method: the auxiliary head predicts the next N tokens
+/// from the final hidden state. These are verified by the main model's
+/// rejection sampling loop (same as EAGLE-2, so `rejection_sample` is reused).
+///
+/// # GGUF Detection
+/// Call `MtpDraftHead::detect(tensor_names)` at model load time.
+/// If `Some(head)` is returned, use `DraftStrategy::Mtp(head)` instead of
+/// `DraftStrategy::Eagle2(...)`.
+#[derive(Debug, Clone)]
+pub struct MtpDraftHead {
+    /// Number of tokens to draft per iteration (from GGUF or default 2).
+    pub n_draft_tokens: usize,
+    /// `true` if the head was auto-detected from GGUF tensor names.
+    pub detected_from_gguf: bool,
+    /// Metadata key that triggered detection (for debugging).
+    pub detection_source: Option<String>,
+    // head_weights: MtpHeadWeights — added in v0.10.0 when mtp_head.rs lands
+}
+
+impl MtpDraftHead {
+    /// Inspect GGUF tensor names for MTP head presence.
+    ///
+    /// Returns `Some(MtpDraftHead)` if MTP tensors are detected,
+    /// `None` if this model has no built-in draft head.
+    ///
+    /// # Detection heuristics
+    /// 1. Any tensor name containing `mtp_head` → positive
+    /// 2. Any tensor matching `output.*_mtp` → positive
+    /// 3. Any tensor starting with `model.layers.` and containing `.mtp.` → positive
+    ///
+    /// `n_draft_tokens` is parsed from the GGUF metadata key
+    /// `{arch}.mtp.num_steps` if present; defaults to 2.
+    pub fn detect(tensor_names: &[&str]) -> Option<Self> {
+        let mtp_tensor = tensor_names.iter().find(|&&name| {
+            name.contains("mtp_head")
+                || (name.starts_with("output.") && name.contains("_mtp"))
+                || (name.starts_with("model.layers.") && name.contains(".mtp."))
+        });
+
+        mtp_tensor.map(|&name| Self {
+            n_draft_tokens: 2, // default; overridden by metadata in v0.10.0
+            detected_from_gguf: true,
+            detection_source: Some(name.to_owned()),
+        })
+    }
+
+    /// Detect from GGUF metadata (checks `{arch}.mtp.num_steps` key).
+    ///
+    /// Call this in addition to `detect()` — the metadata check is
+    /// authoritative for the draft count even if tensor detection found it.
+    pub fn detect_from_metadata(metadata: &std::collections::HashMap<String, String>) -> Option<Self> {
+        // Check for the num_steps key under any known arch prefix
+        let known_prefixes = ["qwen3_5", "qwen3_6"];
+        for prefix in known_prefixes {
+            let key = format!("{prefix}.mtp.num_steps");
+            if let Some(val) = metadata.get(&key) {
+                let n: usize = val.parse().unwrap_or(2);
+                return Some(Self {
+                    n_draft_tokens: n.clamp(1, 8),
+                    detected_from_gguf: true,
+                    detection_source: Some(key),
+                });
+            }
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod mtp_tests {
+    use super::*;
+
+    #[test]
+    fn test_mtp_detection_positive_mtp_head() {
+        let names = ["blk.0.attn_q", "model.mtp_head.weight", "output.weight"];
+        let result = MtpDraftHead::detect(&names);
+        assert!(result.is_some(), "should detect mtp_head tensor");
+        let head = result.unwrap();
+        assert!(head.detected_from_gguf);
+        assert_eq!(head.n_draft_tokens, 2);
+    }
+
+    #[test]
+    fn test_mtp_detection_positive_output_mtp() {
+        let names = ["blk.0.ffn_up", "output.weight_mtp_0", "output.weight"];
+        let result = MtpDraftHead::detect(&names);
+        assert!(result.is_some(), "should detect output.*_mtp tensor");
+    }
+
+    #[test]
+    fn test_mtp_detection_negative_normal_model() {
+        let names = ["blk.0.attn_q", "blk.0.ffn_up", "output.weight", "token_embd.weight"];
+        let result = MtpDraftHead::detect(&names);
+        assert!(result.is_none(), "normal model should not detect MTP head");
+    }
+
+    #[test]
+    fn test_mtp_detection_from_metadata_qwen3_5() {
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("qwen3_5.mtp.num_steps".to_owned(), "3".to_owned());
+        let result = MtpDraftHead::detect_from_metadata(&meta);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().n_draft_tokens, 3);
+    }
+
+    #[test]
+    fn test_mtp_detection_metadata_empty() {
+        let meta = std::collections::HashMap::new();
+        assert!(MtpDraftHead::detect_from_metadata(&meta).is_none());
+    }
+
+    #[test]
+    fn test_draft_strategy_name() {
+        let eagle = DraftStrategy::Eagle2(SpeculativeConfig::default());
+        let mtp   = DraftStrategy::Mtp(MtpDraftHead {
+            n_draft_tokens: 2, detected_from_gguf: true, detection_source: None,
+        });
+        assert_eq!(eagle.name(), "eagle2");
+        assert_eq!(mtp.name(), "mtp");
+    }
+
+    #[test]
+    fn test_draft_count_from_mtp() {
+        let head = MtpDraftHead {
+            n_draft_tokens: 4,
+            detected_from_gguf: true,
+            detection_source: None,
+        };
+        let strategy = DraftStrategy::Mtp(head);
+        assert_eq!(strategy.draft_count(), 4);
+    }
+}

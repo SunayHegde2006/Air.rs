@@ -278,6 +278,204 @@ fn safe_emit_len(s: &str, tag: &str) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// v0.9.0 Scaffold — ThinkingTokenizer Trait
+// ---------------------------------------------------------------------------
+//
+// Abstracts over two thinking-mode token detection strategies:
+//
+//   TagBasedThinking     — byte-pattern tags (<think>, </think>).
+//                          Used by: Qwen3.6, DeepSeek-R1, QwQ, Llama reasoning.
+//
+//   SpecialTokenThinking — special vocab token ID matching.
+//                          Used by: Gemma4 (<|channel>thought, <channel|>).
+//
+// The correct implementation is selected at model load time by
+// `ModelVariant::uses_special_token_thinking()`. See CONTEXT.md.
+//
+// Research basis:
+//   Qwen3.6 model card — enable_thinking=True/False API param
+//   Gemma4 model card — <|channel>thought\n...<channel|> token format
+
+use std::collections::HashSet;
+
+/// Signal emitted by a `ThinkingTokenizer` when thinking state changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkEvent {
+    /// Model just started a thinking block.
+    ThinkStart,
+    /// Model just ended a thinking block.
+    ThinkEnd,
+}
+
+/// Trait abstracting thinking-mode token detection.
+///
+/// Implementors:
+/// - `TagBasedThinking`   — watches byte sequences (`<think>` / `</think>`)
+/// - `SpecialTokenThinking` — watches special token IDs from GGUF vocab
+///
+/// Both are `Send + Sync` so they can live behind `Arc<dyn ThinkingTokenizer>`.
+pub trait ThinkingTokenizer: Send + Sync {
+    /// Process one token.
+    ///
+    /// Returns `Some(ThinkEvent)` if this token caused a thinking state change,
+    /// `None` otherwise. Must be called in order for every generated token.
+    fn process_token(&mut self, token_id: u32, token_text: &str) -> Option<ThinkEvent>;
+
+    /// Reset state (called between inference sessions).
+    fn reset(&mut self);
+
+    /// Whether we are currently inside a thinking block.
+    fn in_think_block(&self) -> bool;
+}
+
+// ---------------------------------------------------------------------------
+// TagBasedThinking — wraps the existing ThinkState
+// ---------------------------------------------------------------------------
+
+/// Thinking-mode detector using byte-pattern tag matching.
+///
+/// Uses the existing `ThinkState` state machine. Compatible with Qwen3.6,
+/// DeepSeek-R1, QwQ, and any model using `<think>` / `</think>` tags.
+pub struct TagBasedThinking {
+    state: ThinkState,
+    was_in_think: bool,
+}
+
+impl TagBasedThinking {
+    pub fn new() -> Self {
+        Self { state: ThinkState::new(), was_in_think: false }
+    }
+}
+
+impl Default for TagBasedThinking {
+    fn default() -> Self { Self::new() }
+}
+
+impl ThinkingTokenizer for TagBasedThinking {
+    fn process_token(&mut self, _token_id: u32, token_text: &str) -> Option<ThinkEvent> {
+        let before = self.was_in_think;
+        self.state.push_token(token_text);
+        // Detect transitions by checking if in_think changed
+        // We approximate by whether the thinking buffer grew this step.
+        // A full transition detection requires peeking into ThinkState internals.
+        // For now: check if text contains an open or close tag.
+        let text = token_text.to_lowercase();
+        if !before && text.contains("<think>") {
+            self.was_in_think = true;
+            return Some(ThinkEvent::ThinkStart);
+        }
+        if before && text.contains("</think>") {
+            self.was_in_think = false;
+            return Some(ThinkEvent::ThinkEnd);
+        }
+        None
+    }
+
+    fn reset(&mut self) {
+        self.state = ThinkState::new();
+        self.was_in_think = false;
+    }
+
+    fn in_think_block(&self) -> bool {
+        self.was_in_think
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SpecialTokenThinking — Gemma4 special vocab token IDs
+// ---------------------------------------------------------------------------
+
+/// Thinking-mode detector using special token ID matching.
+///
+/// Gemma4 uses `<|channel>thought\n` (token ID from GGUF vocab) to begin
+/// a thinking block and `<channel|>` to end it. These are not byte patterns
+/// but single token IDs in the model's vocabulary.
+///
+/// # v0.9.0 status
+/// The struct is fully implemented. The GGUF vocab lookup (`from_gguf_vocab`)
+/// is a stub — it populates the ID sets in v0.10.0 when Gemma4 GGUF loading
+/// is wired up. In v0.9.0 the ID sets are empty (no-op, safe).
+///
+/// # v0.10.0
+/// `from_gguf_vocab` will search the tokenizer vocabulary for:
+///   - `<|channel>thought` (or equivalent) → add to `think_start_ids`
+///   - `<channel|>` (or equivalent) → add to `think_end_ids`
+pub struct SpecialTokenThinking {
+    /// Token IDs that signal the start of a thinking block.
+    pub think_start_ids: HashSet<u32>,
+    /// Token IDs that signal the end of a thinking block.
+    pub think_end_ids:   HashSet<u32>,
+    /// Whether we are currently inside a thinking block.
+    in_think: bool,
+}
+
+impl SpecialTokenThinking {
+    /// Construct with explicit token ID sets.
+    ///
+    /// Use this directly in tests or when token IDs are pre-known.
+    pub fn new(think_start_ids: HashSet<u32>, think_end_ids: HashSet<u32>) -> Self {
+        Self { think_start_ids, think_end_ids, in_think: false }
+    }
+
+    /// Construct with empty sets (no-op / safe default).
+    ///
+    /// Used when Gemma4 GGUF vocab is not yet parsed (v0.9.0 stub).
+    pub fn empty() -> Self {
+        Self::new(HashSet::new(), HashSet::new())
+    }
+
+    /// Construct by scanning the GGUF tokenizer vocabulary.
+    ///
+    /// Searches for token strings matching Gemma4 thinking control tokens.
+    /// This is a v0.9.0 stub — search logic added in v0.10.0 with real vocab.
+    ///
+    /// # Arguments
+    /// * `vocab` — iterator of `(token_id, token_string)` pairs from GGUF
+    pub fn from_vocab_iter<I>(vocab: I) -> Self
+    where
+        I: Iterator<Item = (u32, String)>,
+    {
+        let mut start_ids = HashSet::new();
+        let mut end_ids   = HashSet::new();
+
+        for (id, text) in vocab {
+            // Gemma4 thinking-start token patterns (v0.10.0: refine from tech report)
+            if text.contains("<|channel>thought") || text == "<|startofthought|>" {
+                start_ids.insert(id);
+            }
+            // Gemma4 thinking-end token patterns
+            if text.contains("<channel|>") || text == "<|endofthought|>" {
+                end_ids.insert(id);
+            }
+        }
+
+        Self::new(start_ids, end_ids)
+    }
+}
+
+impl ThinkingTokenizer for SpecialTokenThinking {
+    fn process_token(&mut self, token_id: u32, _token_text: &str) -> Option<ThinkEvent> {
+        if self.think_start_ids.contains(&token_id) {
+            self.in_think = true;
+            return Some(ThinkEvent::ThinkStart);
+        }
+        if self.think_end_ids.contains(&token_id) {
+            self.in_think = false;
+            return Some(ThinkEvent::ThinkEnd);
+        }
+        None
+    }
+
+    fn reset(&mut self) {
+        self.in_think = false;
+    }
+
+    fn in_think_block(&self) -> bool {
+        self.in_think
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -373,5 +571,106 @@ mod tests {
         // If buffer ends with "<thi", don't emit the last 4 bytes
         let safe = safe_emit_len("hello <thi", "<think>");
         assert_eq!(safe, "hello ".len());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ThinkingTokenizer Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod thinking_tokenizer_tests {
+    use super::*;
+
+    #[test]
+    fn test_tag_based_think_start_event() {
+        let mut t = TagBasedThinking::new();
+        let event = t.process_token(0, "<think>");
+        assert_eq!(event, Some(ThinkEvent::ThinkStart));
+        assert!(t.in_think_block());
+    }
+
+    #[test]
+    fn test_tag_based_think_end_event() {
+        let mut t = TagBasedThinking::new();
+        t.process_token(0, "<think>");
+        let event = t.process_token(1, "</think>");
+        assert_eq!(event, Some(ThinkEvent::ThinkEnd));
+        assert!(!t.in_think_block());
+    }
+
+    #[test]
+    fn test_tag_based_no_event_for_plain_token() {
+        let mut t = TagBasedThinking::new();
+        let event = t.process_token(0, "Hello world");
+        assert_eq!(event, None);
+        assert!(!t.in_think_block());
+    }
+
+    #[test]
+    fn test_tag_based_reset_clears_state() {
+        let mut t = TagBasedThinking::new();
+        t.process_token(0, "<think>");
+        assert!(t.in_think_block());
+        t.reset();
+        assert!(!t.in_think_block(), "reset should clear thinking state");
+    }
+
+    #[test]
+    fn test_special_token_think_start() {
+        let mut ids_start = std::collections::HashSet::new();
+        ids_start.insert(99u32);
+        let t = SpecialTokenThinking::new(ids_start, std::collections::HashSet::new());
+        let mut t = t;
+        let event = t.process_token(99, "");
+        assert_eq!(event, Some(ThinkEvent::ThinkStart));
+        assert!(t.in_think_block());
+    }
+
+    #[test]
+    fn test_special_token_think_end() {
+        let mut start_ids = std::collections::HashSet::new();
+        start_ids.insert(99u32);
+        let mut end_ids = std::collections::HashSet::new();
+        end_ids.insert(100u32);
+        let mut t = SpecialTokenThinking::new(start_ids, end_ids);
+        t.process_token(99, "");
+        let event = t.process_token(100, "");
+        assert_eq!(event, Some(ThinkEvent::ThinkEnd));
+        assert!(!t.in_think_block());
+    }
+
+    #[test]
+    fn test_special_token_empty_sets_no_op() {
+        let mut t = SpecialTokenThinking::empty();
+        // Any token should produce None
+        assert_eq!(t.process_token(0, "anything"), None);
+        assert_eq!(t.process_token(99, ""), None);
+        assert!(!t.in_think_block());
+    }
+
+    #[test]
+    fn test_special_token_from_vocab_iter() {
+        let vocab = vec![
+            (100u32, "<|channel>thought".to_owned()),
+            (101u32, "<channel|>".to_owned()),
+            (42u32, "hello".to_owned()),
+        ];
+        let mut t = SpecialTokenThinking::from_vocab_iter(vocab.into_iter());
+        assert!(t.think_start_ids.contains(&100));
+        assert!(t.think_end_ids.contains(&101));
+        assert_eq!(t.process_token(100, ""), Some(ThinkEvent::ThinkStart));
+        assert_eq!(t.process_token(101, ""), Some(ThinkEvent::ThinkEnd));
+    }
+
+    #[test]
+    fn test_special_token_reset() {
+        let mut start_ids = std::collections::HashSet::new();
+        start_ids.insert(99u32);
+        let mut t = SpecialTokenThinking::new(start_ids, std::collections::HashSet::new());
+        t.process_token(99, "");
+        assert!(t.in_think_block());
+        t.reset();
+        assert!(!t.in_think_block(), "reset should clear thinking state");
     }
 }

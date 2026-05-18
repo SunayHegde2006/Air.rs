@@ -13,7 +13,9 @@
 //! | `phi3`, `phi`    | Phi3     | RMSNorm     | SwiGLU | Partial RoPE, sliding window (even layers) |
 //! | `phi4`           | Phi4     | RMSNorm     | SwiGLU | —       |
 //! | `qwen2`, `qwen`  | Qwen2    | RMSNorm     | SwiGLU | QKV biases |
+//! | `qwen3_5`, `qwen3_6` | Qwen3_6 | RMSNorm | SwiGLU + DeltaNet | Gated DeltaNet hybrid, MTP head (v0.10.0) |
 //! | `gemma`, `gemma2`, `gemma3` | Gemma | GemmaRMSNorm | GeGLU | — |
+//! | `gemma4`         | Gemma4   | GemmaRMSNorm | GeGLU | Hybrid sliding-window + global attention, p-RoPE, MoE (v0.10.0) |
 //! | `falcon`         | Falcon   | LayerNorm   | ReLU/GELU | — |
 //! | anything else    | Unknown  | RMSNorm     | SwiGLU | — |
 //!
@@ -45,8 +47,21 @@ pub enum ModelVariant {
     Phi4,
     /// Alibaba Qwen2 / Qwen2.5 / QwQ — RMSNorm + SwiGLU + QKV biases
     Qwen2,
+    /// Alibaba Qwen3.6 — Gated DeltaNet hybrid attention + GQA, MTP head.
+    ///
+    /// GGUF arch strings: `qwen3_5`, `qwen3.5`, `qwen3_6`, `qwen3.6`.
+    /// Layout: 16 × (3 DeltaNet + 1 GQA) = 64 layers for 27B.
+    /// Full forward pass implemented in v0.10.0 (`src/qwen3_6.rs`).
+    Qwen3_6,
     /// Google Gemma 1/2/3 / CodeGemma — Gemma-RMSNorm + GeGLU
     Gemma,
+    /// Google Gemma 4 — hybrid sliding-window + global attention, p-RoPE, MoE.
+    ///
+    /// GGUF arch string: `gemma4`.
+    /// Variants: E4B (dense), 26B-A4B (MoE, 4B active).
+    /// Thinking tokens: `<|channel>thought\n` special token IDs.
+    /// Full forward pass implemented in v0.10.0 (`src/gemma4.rs`).
+    Gemma4,
     /// TII Falcon — LayerNorm + standard MLP
     Falcon,
     /// Unrecognized architecture — falls back to Llama defaults
@@ -62,7 +77,12 @@ impl ModelVariant {
             "phi3" | "phi" => Self::Phi3,
             "phi4" => Self::Phi4,
             "qwen2" | "qwen" => Self::Qwen2,
+            // Qwen3.6: HuggingFace tags as qwen3_5 (same arch family);
+            // Unsloth GGUF may use qwen3_6. Accept all reasonable variants.
+            "qwen3_5" | "qwen3.5" | "qwen3_6" | "qwen3.6" => Self::Qwen3_6,
             "gemma" | "gemma2" | "gemma3" => Self::Gemma,
+            // Gemma4 is a distinct architecture family with hybrid attention.
+            "gemma4" => Self::Gemma4,
             "falcon" | "rw" => Self::Falcon,
             _ => Self::Unknown,
         }
@@ -85,10 +105,31 @@ impl ModelVariant {
             Self::Phi3    => "Phi-3",
             Self::Phi4    => "Phi-4",
             Self::Qwen2   => "Qwen2",
+            Self::Qwen3_6 => "Qwen3.6",
             Self::Gemma   => "Gemma",
+            Self::Gemma4  => "Gemma4",
             Self::Falcon  => "Falcon",
             Self::Unknown => "Unknown",
         }
+    }
+
+    /// Returns `true` if this variant uses hybrid attention (DeltaNet or
+    /// sliding-window/global). Used by `HybridAttentionRouter` to decide
+    /// whether to build a non-uniform attention layout.
+    pub fn is_hybrid_attention(self) -> bool {
+        matches!(self, Self::Qwen3_6 | Self::Gemma4)
+    }
+
+    /// Returns `true` if this model family requires MTP speculative head
+    /// detection at load time.
+    pub fn may_have_mtp_head(self) -> bool {
+        matches!(self, Self::Qwen3_6)
+    }
+
+    /// Returns `true` if thinking-mode tokens use special token IDs
+    /// (as opposed to byte-pattern tags like `<think>`).
+    pub fn uses_special_token_thinking(self) -> bool {
+        matches!(self, Self::Gemma4)
     }
 }
 
@@ -110,9 +151,9 @@ pub enum NormType {
 impl NormType {
     pub fn for_variant(variant: ModelVariant) -> Self {
         match variant {
-            ModelVariant::Gemma   => Self::GemmaRmsNorm,
-            ModelVariant::Falcon  => Self::LayerNorm,
-            _                     => Self::RmsNorm,
+            ModelVariant::Gemma | ModelVariant::Gemma4 => Self::GemmaRmsNorm,
+            ModelVariant::Falcon                       => Self::LayerNorm,
+            _                                          => Self::RmsNorm,
         }
     }
 }
