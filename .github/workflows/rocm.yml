@@ -56,7 +56,7 @@ jobs:
           # Invoke-WebRequest -Uri $installerUrl -OutFile "hip_sdk.exe"
           # Start-Process -FilePath "hip_sdk.exe" -ArgumentList "/S" -Wait
           # For CI without real AMD hardware, we validate build flags only
-          Write-Host "HIP SDK install skipped — hardware not present on GH runner."
+          Write-Host "HIP SDK install skipped - hardware not present on GH runner."
           Write-Host "Build will use --features rocm flag with stub HIP headers."
 
       - name: Check HIP environment
@@ -68,7 +68,7 @@ jobs:
             Write-Host "HIP SDK found at $hipPath"
             Get-ChildItem $hipPath
           } else {
-            Write-Host "HIP SDK not found — building without hardware validation."
+            Write-Host "HIP SDK not found - building without hardware validation."
             Write-Host "Set HIP_PATH to enable GPU kernels."
           }
 
@@ -168,7 +168,7 @@ jobs:
           if (Test-Path $binary) {
             & $binary bench --model "$env:AIR_RS_TEST_MODEL" --n-tokens 128 --runs 3
           } else {
-            Write-Host "Skipping benchmark — AIR_RS_TEST_MODEL not set or binary missing"
+            Write-Host "Skipping benchmark - AIR_RS_TEST_MODEL not set or binary missing"
           }
 
   # ── Job 3: Cross-compilation check (Linux → Windows) ────────────────────
