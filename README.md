@@ -143,7 +143,7 @@ Sources: ¹[llama.cpp](https://github.com/ggerganov/llama.cpp/discussions/4167) 
 ### Python (recommended)
 
 ```bash
-pip install air-rs          # PyPI — abi3 wheel, Python ≥ 3.11
+pip install air-rs          # v1.0.0 — abi3 wheel, Python ≥ 3.11, Windows/Linux/macOS
 ```
 
 ```python
@@ -223,7 +223,7 @@ cargo run --release -- generate --model path/to/model.gguf --prompt "Hello!"
 ### Install
 
 ```bash
-pip install air-rs                          # from PyPI (abi3, Python ≥ 3.11)
+pip install air-rs                          # v1.0.0 — PyPI (abi3, Python ≥ 3.11)
 
 # or build from source
 pip install maturin
