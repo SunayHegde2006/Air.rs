@@ -17,6 +17,10 @@ use std::sync::mpsc::{self, Sender, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::io::Write;
+use hmac::{Hmac, Mac};
+use sha2::{Sha256, Digest};
+
+type HmacSha256 = Hmac<Sha256>;
 
 // ---------------------------------------------------------------------------
 // Audit Event Types
@@ -120,19 +124,32 @@ impl AuditEntry {
 
 /// Maintains the running HMAC state for entry chaining.
 ///
-/// Uses a simplified HMAC-SHA256 computation (production: use `ring` or `hmac` crate).
-/// For v0.9.0 this is a keyed hash chain using XOR-folding of SHA-256,
-/// sufficient for tamper detection in a single-node deployment.
+/// Uses HMAC-SHA256 (FIPS 198-1 compliant) keyed on the genesis seed.
+/// The key is derived from the chain's genesis state (all-zero for deterministic
+/// tests; production callers should inject a random 32-byte key at startup).
+///
+/// This replaces the djb2 placeholder from v0.9.0.
 pub struct HmacChain {
     /// Last computed HMAC (starts as all-zeros for genesis entry).
     prev: [u8; 32],
     /// Sequence counter.
     seq: u64,
+    /// HMAC key (32 bytes; shared for the lifetime of this chain).
+    key: [u8; 32],
 }
 
 impl HmacChain {
+    /// Create a new chain with an **all-zero key**.
+    ///
+    /// Suitable for unit tests. Production callers should use `with_key()`
+    /// and supply a secret from the key management system.
     pub fn new() -> Self {
-        Self { prev: [0u8; 32], seq: 0 }
+        Self::with_key([0u8; 32])
+    }
+
+    /// Create a new chain with an explicit HMAC key.
+    pub fn with_key(key: [u8; 32]) -> Self {
+        Self { prev: [0u8; 32], seq: 0, key }
     }
 
     /// Compute the HMAC for `data` and advance the chain.
@@ -151,29 +168,18 @@ impl HmacChain {
         &self.prev
     }
 
-    /// Simplified HMAC computation: sha256(prev || data).
+    /// HMAC-SHA256(key, prev || data)  — FIPS 198-1 compliant.
     ///
-    /// NOTE: Production should use `ring::hmac::sign` or `hmac::Hmac<Sha256>`.
+    /// Message = `prev` (32 bytes) concatenated with `data`.
     fn compute_hmac(&self, data: &[u8], prev: &[u8; 32]) -> [u8; 32] {
-        // Simple djb2-derived 256-bit hash for v0.9.0 (correctness placeholder)
-        // Replaced with ring::hmac in v1.0.0 when ring crate is added.
-        let mut state = [0u8; 32];
-        let mut hash: u64 = 5381;
-        // Mix prev
-        for (i, &b) in prev.iter().enumerate() {
-            hash = hash.wrapping_mul(33).wrapping_add(b as u64);
-            state[i % 32] ^= hash as u8;
-        }
-        // Mix data
-        for (i, &b) in data.iter().enumerate() {
-            hash = hash.wrapping_mul(33).wrapping_add(b as u64);
-            state[i % 32] ^= hash.rotate_left(13) as u8;
-        }
-        // Diffuse
-        for i in 1..32 {
-            state[i] = state[i].wrapping_add(state[i-1]).rotate_left(3);
-        }
-        state
+        let mut mac = HmacSha256::new_from_slice(&self.key)
+            .expect("HMAC-SHA256 accepts any key length");
+        mac.update(prev);
+        mac.update(data);
+        let result = mac.finalize().into_bytes();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&result);
+        out
     }
 }
 
@@ -331,20 +337,13 @@ impl AuditLog {
 
     /// Compute SHA-256 hash of a prompt string for privacy-preserving logging.
     ///
-    /// In v0.9.0 this uses a simplified hash; v1.0.0 uses `ring::digest::SHA256`.
+    /// Uses SHA-256 from the `sha2` crate (FIPS 180-4 compliant).
+    /// Replaces the FNV-spread stub from v0.9.0.
     pub fn hash_prompt(prompt: &str) -> [u8; 32] {
-        let mut h = [0u8; 32];
-        let mut state: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
-        for b in prompt.bytes() {
-            state ^= b as u64;
-            state = state.wrapping_mul(0x0000_01b3_0000_0001);
-        }
-        // Spread into 32 bytes
-        for i in 0..8usize {
-            let v = state.rotate_left((i * 7) as u32);
-            h[i*4..(i+1)*4].copy_from_slice(&(v as u32).to_le_bytes());
-        }
-        h
+        let digest = Sha256::digest(prompt.as_bytes());
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        out
     }
 }
 
@@ -457,5 +456,33 @@ mod tests {
         assert_eq!(AuditEventType::AuthFailure.as_str(), "auth_failure");
         assert_eq!(AuditEventType::SafetyBlock.as_str(), "safety_block");
         assert_eq!(AuditEventType::PiiRedaction.as_str(), "pii_redaction");
+    }
+
+    #[test]
+    fn test_hmac_output_is_32_bytes_nonzero() {
+        let mut chain = HmacChain::new();
+        let (_, hmac) = chain.next(b"hello world");
+        // Real HMAC-SHA256 must not produce all-zero output for non-trivial input
+        assert_ne!(hmac, [0u8; 32], "HMAC-SHA256 must not produce all-zeros");
+        assert_eq!(hmac.len(), 32);
+    }
+
+    #[test]
+    fn test_hmac_key_sensitivity() {
+        let mut chain_a = HmacChain::with_key([0x11u8; 32]);
+        let mut chain_b = HmacChain::with_key([0x22u8; 32]);
+        let (_, hmac_a) = chain_a.next(b"same data");
+        let (_, hmac_b) = chain_b.next(b"same data");
+        // Different keys must yield different HMACs
+        assert_ne!(hmac_a, hmac_b, "different keys must produce different HMACs");
+    }
+
+    #[test]
+    fn test_sha256_prompt_hash_known_length() {
+        let h = AuditLog::hash_prompt("test");
+        assert_eq!(h.len(), 32, "SHA-256 output must be 32 bytes");
+        // SHA-256("test") = 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+        assert_eq!(h[0], 0x9f, "SHA-256 first byte mismatch");
+        assert_eq!(h[1], 0x86, "SHA-256 second byte mismatch");
     }
 }
