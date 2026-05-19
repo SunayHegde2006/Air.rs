@@ -256,6 +256,17 @@ impl Tokenizer {
     pub fn vocab_size(&self) -> usize {
         self.id_to_token.len()
     }
+
+    /// Iterate over `(token_id, token_string)` pairs.
+    ///
+    /// Used by `GgufLoader` to build `SpecialTokenThinking::from_vocab_iter`
+    /// for Gemma 4 special-token thinking detection.
+    pub fn vocab_tokens(&self) -> impl Iterator<Item = (u32, &str)> {
+        self.id_to_token
+            .iter()
+            .enumerate()
+            .map(|(id, tok)| (id as u32, tok.as_str()))
+    }
 }
 
 // ---------------------------------------------------------------------------

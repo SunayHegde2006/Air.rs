@@ -7,6 +7,8 @@
 use candle_core::{DType, Device, Result, Tensor, D};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use crate::attention_backend::AttentionBackend;
+use crate::dual_rope::DualRopeCache;
 
 // ---------------------------------------------------------------------------
 // RMSNorm — Root Mean Square Layer Normalization
@@ -226,6 +228,56 @@ pub fn rope_cached(
     let k_rotated = apply_rotary_emb(k, &cos, &sin)?;
 
     Ok((q_rotated, k_rotated))
+}
+
+/// Uncached rope — retained for backward compatibility and tests.
+/// Apply dual p-RoPE (Gemma 4) using the correct frequency table for this layer.
+///
+/// Dispatches:
+/// - `SlidingWindow` → `DualRopeCache::local`  (θ = 10 000)
+/// - everything else → `DualRopeCache::global` (θ = 1 000 000)
+///
+/// Drop-in replacement for `rope_cached` for Gemma 4 layers wired through
+/// `blocks.rs::build_hybrid_blocks`.
+///
+/// # Arguments
+/// * `q`, `k`   — `[batch, seq, heads, head_dim]`
+/// * `start_pos` — position offset for the first query token
+/// * `head_dim`  — head dimension (must be even)
+/// * `backend`   — `AttentionBackend` for this layer (from `HybridAttentionRouter`)
+/// * `cache`     — `DualRopeCache` pre-built from GGUF metadata
+pub fn rope_dual_cached(
+    q:         &Tensor,
+    k:         &Tensor,
+    start_pos: usize,
+    head_dim:  usize,
+    backend:   AttentionBackend,
+    cache:     &DualRopeCache,
+) -> Result<(Tensor, Tensor)> {
+    let device  = q.device();
+    let dtype   = q.dtype();
+    let seq_len = q.dim(1)?;
+
+    // Select the correct inv_freq table
+    let freq_table = cache.table_for(backend);
+    let half = head_dim / 2;
+
+    // Build inv_freq as a Candle tensor (f32 for compatibility with existing RoPE path)
+    let inv_freq_f32: Vec<f32> = freq_table.inv_freq.iter().map(|&f| f as f32).collect();
+    let inv_freq_t = Tensor::new(inv_freq_f32, device)?;
+
+    // Position indices [start_pos .. start_pos+seq_len]
+    let positions: Vec<f32> = (start_pos..start_pos + seq_len).map(|p| p as f32).collect();
+    let positions_t = Tensor::new(positions, device)?.unsqueeze(1)?;
+
+    // angles [seq_len × half_dim]
+    let angles = positions_t.matmul(&inv_freq_t.unsqueeze(0)?)?;
+    let cos = angles.cos()?.to_dtype(dtype)?;
+    let sin = angles.sin()?.to_dtype(dtype)?;
+
+    let q_rot = apply_rotary_emb(q, &cos, &sin)?;
+    let k_rot = apply_rotary_emb(k, &cos, &sin)?;
+    Ok((q_rot, k_rot))
 }
 
 /// Uncached rope — retained for backward compatibility and tests.
