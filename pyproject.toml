@@ -4,14 +4,14 @@ build-backend = "maturin"
 
 [project]
 name = "air-rs"
-version = "0.10.0"
+version = "1.0.0"
 description = "High-performance, memory-fluid LLM inference engine — Rust speed, Python convenience."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Sunay Hegde" }]
 keywords = ["llm", "inference", "gguf", "machine-learning", "rust"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
