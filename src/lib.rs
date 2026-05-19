@@ -62,6 +62,9 @@ pub mod content_safety;   // Enterprise: NSFW/toxicity content safety gate (v0.9
 pub mod oidc;             // Enterprise: OAuth2/OIDC JWT verifier (v0.9.0)
 pub mod audit_log;        // Enterprise: HMAC-chained SOC 2 audit log (v0.9.0)
 pub mod attention_backend; // AttentionBackend trait + HybridAttentionRouter scaffold (v0.9.0)
+pub mod gated_deltanet;   // Gated DeltaNet chunk-parallel recurrence kernel, AVX-512 (v0.10.0)
+pub mod dual_rope;        // Dual p-RoPE freq cache for Gemma 4 local/global layers (v0.10.0)
+pub mod gemma4;           // Gemma 4 hybrid-attention block + sigmoid MoE router (v0.10.0)
 pub mod metrics;
 pub mod pipeline;
 pub mod neuron_predicate;
