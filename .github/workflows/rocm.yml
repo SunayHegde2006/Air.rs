@@ -47,7 +47,7 @@ jobs:
             ${{ runner.os }}-rocm-cargo-
 
       - name: Install AMD HIP SDK (ROCm 6.1)
-        shell: powershell
+        shell: pwsh
         run: |
           $sdkVersion = "${{ inputs.hip_sdk_version || '6.1.0' }}"
           $installerUrl = "https://repo.radeon.com/rocm/msi/$sdkVersion/AMD-Software-PRO-Edition-$sdkVersion-Win10-Win11-For-HIP.exe"
@@ -60,9 +60,8 @@ jobs:
           Write-Host "Build will use --features rocm flag with stub HIP headers."
 
       - name: Check HIP environment
-        shell: powershell
+        shell: pwsh
         run: |
-          # Check if HIP SDK is available (optional on GitHub-hosted runners)
           $hipPath = "C:\Program Files\AMD\ROCm"
           if (Test-Path $hipPath) {
             Write-Host "HIP SDK found at $hipPath"
@@ -72,25 +71,24 @@ jobs:
             Write-Host "Set HIP_PATH to enable GPU kernels."
           }
 
-      - name: Build (no GPU features — compile validation)
-        shell: powershell
+      - name: Build (no GPU features - compile validation)
+        shell: pwsh
         run: |
-          # Validate Rust code compiles cleanly on Windows MSVC without GPU features
           $env:RUSTFLAGS = "-A warnings"
-          cargo build --lib 2>&1 | Select-String -Pattern "^error" | ForEach-Object { Write-Host $_ }
+          cargo build --lib
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Write-Host "Windows MSVC build: OK"
 
       - name: Build CLI binary
-        shell: powershell
+        shell: pwsh
         run: |
           $env:RUSTFLAGS = "-A warnings"
-          cargo build --bin air-rs 2>&1 | Select-String -Pattern "^error"
+          cargo build --bin air-rs
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Write-Host "CLI binary build: OK"
 
       - name: Smoke test CLI
-        shell: powershell
+        shell: pwsh
         run: |
           $binary = "target\debug\air-rs.exe"
           if (Test-Path $binary) {
@@ -102,17 +100,17 @@ jobs:
           }
 
       - name: Run unit tests (no GPU)
-        shell: powershell
+        shell: pwsh
         run: |
           $env:RUSTFLAGS = "-A warnings"
-          cargo test --lib 2>&1 | Select-String -Pattern "FAILED|^error"
+          cargo test --lib
           Write-Host "Unit tests: completed"
 
       - name: Clippy (Windows MSVC)
-        shell: powershell
+        shell: pwsh
         run: |
           $env:RUSTFLAGS = "-A warnings"
-          cargo clippy --lib -- -D warnings 2>&1 | Select-String -Pattern "^error"
+          cargo clippy --lib -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Write-Host "Clippy: OK"
 
@@ -143,26 +141,22 @@ jobs:
           & "$hipPath\bin\hipinfo.exe" 2>&1 | Select-String "device"
 
       - name: Build with ROCm feature
-        shell: powershell
+        shell: pwsh
         run: |
-          $env:HIP_PATH = $env:HIP_PATH
           $env:RUSTFLAGS = "-A warnings"
-          # rocm feature enables HIP kernel dispatch paths
-          cargo build --lib --features rocm 2>&1 | Select-String "^error"
+          cargo build --lib --features rocm
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Write-Host "ROCm build: OK"
 
       - name: Run GPU integration tests
-        shell: powershell
+        shell: pwsh
         run: |
-          $env:HIP_PATH = $env:HIP_PATH
           $env:RUSTFLAGS = "-A warnings"
-          # Run tests that require real AMD GPU
-          cargo test --lib --features rocm -- --nocapture 2>&1
+          cargo test --lib --features rocm -- --nocapture
           Write-Host "GPU tests: completed"
 
       - name: Benchmark (ROCm)
-        shell: powershell
+        shell: pwsh
         run: |
           $binary = "target\debug\air-rs.exe"
           if (Test-Path $binary) {
