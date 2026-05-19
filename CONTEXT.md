@@ -71,3 +71,19 @@
 **DualRoPE** — Struct in `src/dual_rope.rs` (v0.10.0) holding two separate RoPE base-frequency caches: `θ_local` for local sliding-window attention layers and `θ_global` for global full-attention layers. Required by Gemma 4's p-RoPE (proportional RoPE) specification. Read from GGUF metadata keys `gemma4.attention.local_rope_theta` and `gemma4.attention.global_rope_theta`. Current `ops.rs` RoPE accepts a single `theta` — v0.10.0 extends this via `DualRoPE`.
 
 **Gemma4MoeRouter** — MoE router for Gemma 4 26B A4B in `src/moe.rs` (v0.10.0). Uses sigmoid (not softmax) over router logits and top-1/2 expert selection per layer. Distinct from `ConceptMoeConfig` (uses softmax + confidence threshold). 26B total params, 4B active. Expert count derived from GGUF metadata. Extends `moe_forward` with `gemma4_moe_forward`.
+
+---
+
+## v0.10.0 Advanced Architecture Terms
+
+**GatedDeltaNetLayer** — Struct in `src/gated_deltanet.rs`. Implements the Gated Delta Network per-layer forward pass (Yang et al., NeurIPS 2024). Two paths: `forward_token` (single-token decode, sequential recurrence) and `forward_chunk` (prefill, chunk-parallel scan). State update: `S_t = S_{t-1}·(1−α·δ·k^T) + v·k^T` where `δ=sigmoid(β)`. Inner loop vectorised via `update_state_row_vectorised` with AVX-512 dispatch on Zen 4. Compatible with `HybridAttentionRouter::qwen3_6_27b()`.
+
+**DeltaState** — State matrix `S_t ∈ ℝ^{d_v × d_k}` maintained by `GatedDeltaNetLayer` (one per head). Stored FP32 row-major; BF16 compressed at S.L.I.P. checkpoint. `is_recurrent()=true` → no KV-cache slice, mapped to `LayerCache::DeltaState` in the session cache.
+
+**DualRopeCache** — Struct in `src/dual_rope.rs`. Holds two `RopeFreqTable` instances: `local` (θ=10 000, for `SlidingWindow` layers) and `global` (θ=1 000 000, for `GlobalFull` layers). Populated from GGUF metadata keys `gemma4.attention.local_rope_theta` and `gemma4.attention.global_rope_theta`. `table_for(backend)` dispatches correct table; `apply_rope_batch` applies to a full QK batch.
+
+**GemmaRmsNorm** — Gemma-specific normalisation in `src/gemma4.rs`. Effective weight = `stored_weight + 1.0`. Stored tensor is a *residual* around 1, initialised to zero. Avoids re-centring (no mean subtraction). Shared by Gemma 1/2/3/4 variants.
+
+**SigmoidMoeRouter** — MoE router in `src/gemma4.rs` for Gemma 4 26B-A4B. Applies independent `sigmoid` to each of E router logits, then selects top-K by raw score (no softmax normalisation). Distinct from Mixtral-style softmax router. Top-K=2 of E=32 experts → 4B active params.
+
+**DenseGeGlu / ExpertPool** — GeGLU feed-forward network: `(xW_gate ⊙ GELU(xW_up)) W_down`. `DenseGeGlu` is used in Gemma 4 E4B; `ExpertPool` holds E independent `DenseGeGlu` experts and aggregates weighted outputs for the MoE path.

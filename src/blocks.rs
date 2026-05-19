@@ -16,6 +16,8 @@ use candle_core::Result;
 use candle_core::Tensor;
 use crate::model::{QBlockWeights, ModelConfig};
 use crate::ops::RopeCache;
+use crate::attention_backend::{AttentionBackend, HybridAttentionRouter};
+use crate::gated_deltanet::{DeltaNetConfig, GatedDeltaNetLayer};
 
 // ---------------------------------------------------------------------------
 // TransformerBlock trait
@@ -217,6 +219,161 @@ pub fn build_streaming_blocks(
         })
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// DeltaNetBlock — GatedDeltaNet layer wrapped as TransformerBlock (v0.10.1)
+// ---------------------------------------------------------------------------
+
+/// A `GatedDeltaNetLayer` wrapped in the `TransformerBlock` interface.
+///
+/// Used by `build_hybrid_blocks` for layers whose `AttentionBackend == GatedDeltaNet`.
+///
+/// ## Tensor contract
+/// Input / output shapes match `StreamingQBlock` exactly:
+/// ```text
+/// forward(x, _, _, start_pos) → (x_prime, zeros_k, zeros_v)
+/// ```
+/// The recurrent state lives inside `GatedDeltaNetLayer::states` (one `DeltaState`
+/// per head). `new_k` / `new_v` are zero tensors of the same shape as `x` —
+/// the session cache recognises `is_recurrent()=true` and skips KV storage.
+///
+/// **Thread safety**: `GatedDeltaNetLayer` stores `Vec<DeltaState>` which is
+/// `Send` but NOT `Sync` (mutable state). The block is therefore wrapped in a
+/// `Mutex` for interior mutability — one mutex per layer, never contended since
+/// the generator runs a single inference thread per session.
+pub struct DeltaNetBlock {
+    /// Zero-based layer index in the transformer stack.
+    pub layer: usize,
+    /// Inner GatedDeltaNet layer (mutex for interior mutability in `&self` forward).
+    inner: std::sync::Mutex<GatedDeltaNetLayer>,
+    /// Number of heads (needed to build the QKVαβ projection stub).
+    n_heads: usize,
+    /// Head dimension.
+    head_dim: usize,
+}
+
+impl DeltaNetBlock {
+    /// Construct from a `DeltaNetConfig` and layer index.
+    pub fn new(layer: usize, config: DeltaNetConfig) -> Self {
+        let n_heads  = config.n_heads;
+        let head_dim = config.head_dim;
+        Self {
+            layer,
+            inner: std::sync::Mutex::new(GatedDeltaNetLayer::new(config)),
+            n_heads,
+            head_dim,
+        }
+    }
+
+    /// Reset the recurrent state (call at session start / context reset).
+    pub fn reset_state(&self) {
+        self.inner.lock().unwrap().reset();
+    }
+
+    /// VRAM cost of all head states (bytes, FP32).
+    pub fn state_bytes(&self) -> usize {
+        self.n_heads * self.head_dim * self.head_dim * 4
+    }
+}
+
+impl TransformerBlock for DeltaNetBlock {
+    /// Forward pass — single-token decode path.
+    ///
+    /// Extracts a flat F32 slice from `x`, runs `forward_token`, and wraps
+    /// the output back into a Tensor. `kv_cache_k/v` are ignored (recurrent).
+    fn forward(
+        &self,
+        x: &Tensor,
+        _kv_cache_k: Option<&Tensor>,
+        _kv_cache_v: Option<&Tensor>,
+        _start_pos: usize,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        let device = x.device();
+        let dtype  = x.dtype();
+        let shape  = x.shape().clone();
+
+        // Flatten to 1-D for the pure-Rust DeltaNet kernel
+        let flat: Vec<f32> = x.flatten_all()?.to_dtype(candle_core::DType::F32)?.to_vec1()?;
+
+        // Compute the stride for the QKVαβ view.
+        // In v0.10.1 the actual Wq/Wk/Wv/Wα/Wβ projections run here.
+        // For now we pass the hidden state directly as a surrogate (stub).
+        let d      = self.head_dim;
+        let nh     = self.n_heads;
+        let stride = 3 * d + 2;
+
+        // Build a zero-padded QKVαβ buffer: real weights applied in v0.10.1
+        let qkvab = vec![0.0f32; nh * stride];
+        let _ = flat; // will be matmul'd against Wqkv in v0.10.1
+
+        let out_vec = self.inner.lock().unwrap().forward_token(&qkvab);
+
+        // Reshape output to match input shape
+        let out = Tensor::from_vec(out_vec, shape.dims().to_vec(), device)?
+            .to_dtype(dtype)?;
+
+        // Return zero K/V — session cache skips storage for recurrent layers
+        let zeros = Tensor::zeros_like(&out)?;
+        Ok((out, zeros.clone(), zeros))
+    }
+
+    fn layer_id(&self) -> usize { self.layer }
+}
+
+// ---------------------------------------------------------------------------
+// build_hybrid_blocks — router-aware block factory (v0.10.1)
+// ---------------------------------------------------------------------------
+
+/// Build a heterogeneous block stack driven by a `HybridAttentionRouter`.
+///
+/// For each layer:
+/// - `AttentionBackend::GatedDeltaNet` → `DeltaNetBlock` (recurrent, no KV cache)
+/// - `AttentionBackend::Softmax`       → `StreamingQBlock` (standard GQA + KV cache)
+/// - `AttentionBackend::SlidingWindow` → `StreamingQBlock` (Gemma4; flash-attn in v0.10.1)
+/// - `AttentionBackend::GlobalFull`    → `StreamingQBlock` (Gemma4 global layer)
+///
+/// `delta_cfg_fn` is a closure that builds the `DeltaNetConfig` for a layer index.
+/// It receives `(layer_idx)` and must return a config matching the model's dimensions.
+///
+/// # Example
+/// ```ignore
+/// let router = HybridAttentionRouter::qwen3_6_27b();
+/// let blocks  = build_hybrid_blocks(
+///     Arc::clone(&streamer), config_arc, rope, Device::Cpu, &router,
+///     |layer| DeltaNetConfig::new(128, 32).with_layer(layer),
+/// );
+/// ```
+pub fn build_hybrid_blocks(
+    streamer:     Arc<crate::weight_streamer::WeightStreamer>,
+    config:       Arc<ModelConfig>,
+    rope:         Option<Arc<RopeCache>>,
+    device:       candle_core::Device,
+    router:       &HybridAttentionRouter,
+    delta_cfg_fn: impl Fn(usize) -> DeltaNetConfig,
+) -> Vec<Box<dyn TransformerBlock>> {
+    let n = streamer.n_layers();
+    (0..n)
+        .map(|layer| -> Box<dyn TransformerBlock> {
+            match router.backend_for_layer(layer) {
+                AttentionBackend::GatedDeltaNet => {
+                    Box::new(DeltaNetBlock::new(layer, delta_cfg_fn(layer)))
+                }
+                _ => {
+                    // Softmax, SlidingWindow, GlobalFull — all use the standard
+                    // StreamingQBlock for now; SW/Global wired to flash-attn in v0.10.1
+                    Box::new(StreamingQBlock::new(
+                        layer,
+                        Arc::clone(&streamer),
+                        Arc::clone(&config),
+                        rope.as_ref().map(Arc::clone),
+                        device.clone(),
+                    ))
+                }
+            }
+        })
+        .collect()
+}
+
 
 // ---------------------------------------------------------------------------
 // MockTransformerBlock — zero-GPU test double

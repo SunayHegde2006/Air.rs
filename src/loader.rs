@@ -7,7 +7,11 @@
 //! 3. Tokenizer vocabulary and merge rules
 
 use crate::model::{MetadataValue, ModelConfig};
+use crate::model_variant::ModelVariant;
 use crate::tokenizer::Tokenizer;
+use crate::speculative::MtpDraftHead;
+use crate::dual_rope::DualRopeCache;
+use crate::think_tag::SpecialTokenThinking;
 use anyhow::{Context, Result};
 use candle_core::quantized::gguf_file;
 use std::collections::HashMap;
@@ -28,10 +32,24 @@ pub struct TensorRecord {
 
 /// The Loader bridges the GGUF file metadata and exposes exact physical locations.
 pub struct GgufLoader {
-    pub tensors: HashMap<String, TensorRecord>,
+    pub tensors:      HashMap<String, TensorRecord>,
     pub model_config: ModelConfig,
-    pub tokenizer: Tokenizer,
-    pub metadata: HashMap<String, MetadataValue>,
+    pub tokenizer:    Tokenizer,
+    pub metadata:     HashMap<String, MetadataValue>,
+
+    // ── v0.10.1 wiring ───────────────────────────────────────────────────
+    /// MTP draft head auto-detected from tensor names (Qwen3.6 NEXTN).
+    /// `None` for all other model families.
+    pub mtp_head: Option<MtpDraftHead>,
+
+    /// Dual p-RoPE cache (Gemma 4 local θ=10k / global θ=1M).
+    /// `None` for non-Gemma-4 models (single-theta RoPE via `ops::rope_cached`).
+    pub dual_rope_cache: Option<DualRopeCache>,
+
+    /// Special-token thinking tokenizer (Gemma 4).
+    /// `None` for tag-based models (Qwen3.6, DeepSeek-R1, QwQ).
+    pub thinking_tokenizer: Option<SpecialTokenThinking>,
+
     _file: File,
 }
 
@@ -75,6 +93,57 @@ impl GgufLoader {
         // ─── Extract Tokenizer ───────────────────────────────────────
         let tokenizer = Self::extract_tokenizer(&content, &metadata);
 
+        // ─── Detect MTP draft head (Qwen3.6 NEXTN) ──────────────────
+        let tensor_names: Vec<&str> = tensors.keys().map(|s| s.as_str()).collect();
+        let mtp_head = MtpDraftHead::detect(&tensor_names);
+        if mtp_head.is_some() {
+            println!("[loader] MTP draft head detected — native multi-token prediction enabled.");
+        }
+
+        // ─── Build DualRopeCache for Gemma 4 ────────────────────────
+        let arch_str = metadata.get("general.architecture")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let variant  = ModelVariant::from_arch_str(arch_str);
+        let head_dim = (model_config.hidden_dim / model_config.n_heads).max(1);
+
+        let dual_rope_cache = if variant.is_hybrid_attention() {
+            // Gemma 4 — build from metadata keys
+            let meta_str: HashMap<String, String> = metadata.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned()))
+                    .or_else(|| v.as_f64().map(|f| (k.clone(), f.to_string()))))
+                .collect();
+            let cache = DualRopeCache::from_metadata(&meta_str, head_dim);
+            println!(
+                "[loader] DualRopeCache: local θ={:.0}, global θ={:.0}, head_dim={}",
+                cache.local.theta, cache.global.theta, head_dim
+            );
+            Some(cache)
+        } else {
+            None
+        };
+
+        // ─── Build SpecialTokenThinking for Gemma 4 ─────────────────
+        let thinking_tokenizer = if variant.uses_special_token_thinking() {
+            // Extract vocab as (token_id, token_string) pairs from the GGUF
+            let vocab_iter = tokenizer.vocab_tokens()
+                .map(|(id, tok)| (id, tok.to_owned()));
+            let st = SpecialTokenThinking::from_vocab_iter(vocab_iter);
+            let n_start = st.think_start_ids.len();
+            let n_end   = st.think_end_ids.len();
+            if n_start > 0 || n_end > 0 {
+                println!(
+                    "[loader] SpecialTokenThinking: {} start ID(s), {} end ID(s) detected.",
+                    n_start, n_end
+                );
+                Some(st)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         println!(
             "Loaded model: {} layers, {} heads ({} KV), dim={}, vocab={}",
             model_config.n_layers,
@@ -90,6 +159,9 @@ impl GgufLoader {
             model_config,
             tokenizer,
             metadata,
+            mtp_head,
+            dual_rope_cache,
+            thinking_tokenizer,
             _file: file,
         })
     }
