@@ -6,6 +6,7 @@
 //   air-rs bench    --model <path> --n-tokens <n>  [OPTIONS]
 //   air-rs info     --model <path>
 
+#[allow(unused_imports)]
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Instant;
