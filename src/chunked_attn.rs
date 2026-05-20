@@ -340,11 +340,11 @@ mod tests {
 
     fn make_qkv(seq_q: usize, seq_kv: usize, head_dim: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let q: Vec<f32> = (0..seq_q * head_dim)
-            .map(|i| ((i as f64 * 0.314).sin() as f32))
+            .map(|i| (i as f64 * 0.314).sin() as f32)
             .collect();
         let k = q.clone();
         let v: Vec<f32> = (0..seq_kv * head_dim)
-            .map(|i| ((i as f64 * 0.271).cos() as f32 * 0.5))
+            .map(|i| (i as f64 * 0.271).cos() as f32 * 0.5)
             .collect();
         (q, k, v)
     }

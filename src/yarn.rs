@@ -354,7 +354,7 @@ mod tests {
     fn test_apply_rope_preserves_norm() {
         // RoPE is a rotation → it must preserve L2 norm exactly.
         let freq = YarnFrequencies::compute(&default_cfg());
-        let mut x: Vec<f32> = (0..128).map(|i| ((i as f64 * 0.314).sin() as f32)).collect();
+        let mut x: Vec<f32> = (0..128).map(|i| (i as f64 * 0.314).sin() as f32).collect();
         let norm_before: f32 = x.iter().map(|v| v * v).sum::<f32>().sqrt();
         freq.apply_rope(&mut x, 42);
         let norm_after: f32 = x.iter().map(|v| v * v).sum::<f32>().sqrt();
