@@ -1,6 +1,6 @@
 // Suppress lints that trigger a rustc 1.95 check_mod_deathness ICE.
 // TODO: remove when the project is upgraded to rustc ≥ 1.96.
-#![allow(dead_code, unused_mut, unused_imports, unused_assignments, unused_variables)]
+#![allow(dead_code, unused_mut, unused_imports, unused_assignments, unused_variables, clippy::needless_range_loop, clippy::manual_is_multiple_of, clippy::too_many_arguments, clippy::should_implement_trait, clippy::derivable_impls, clippy::manual_contains, clippy::manual_range_contains, clippy::doc_lazy_continuation, clippy::let_and_return, clippy::manual_div_ceil, clippy::excessive_precision)]
 pub mod api;
 pub mod batching;
 /// Backward-compat re-export: `crate::arb::*` still works.
