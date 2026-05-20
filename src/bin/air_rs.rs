@@ -182,6 +182,7 @@ fn run_generate(
 
     #[cfg(not(feature = "python"))]
     {
+        let _ = (prompt, temperature, top_p);
         eprintln!("Engine ready in {:.2}s", start.elapsed().as_secs_f64());
         eprintln!("Generating up to {max_tokens} tokens…\n");
         if stream {
