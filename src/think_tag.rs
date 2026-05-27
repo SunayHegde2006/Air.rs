@@ -391,15 +391,9 @@ impl ThinkingTokenizer for TagBasedThinking {
 /// a thinking block and `<channel|>` to end it. These are not byte patterns
 /// but single token IDs in the model's vocabulary.
 ///
-/// # v0.9.0 status
-/// The struct is fully implemented. The GGUF vocab lookup (`from_gguf_vocab`)
-/// is a stub — it populates the ID sets in v0.10.0 when Gemma4 GGUF loading
-/// is wired up. In v0.9.0 the ID sets are empty (no-op, safe).
-///
-/// # v0.10.0
-/// `from_gguf_vocab` will search the tokenizer vocabulary for:
-///   - `<|channel>thought` (or equivalent) → add to `think_start_ids`
-///   - `<channel|>` (or equivalent) → add to `think_end_ids`
+/// # Implementation
+/// The struct is fully implemented. The GGUF vocab lookup (`from_vocab_iter`)
+/// populates the ID sets based on Gemma4 token strings.
 pub struct SpecialTokenThinking {
     /// Token IDs that signal the start of a thinking block.
     pub think_start_ids: HashSet<u32>,
@@ -418,8 +412,6 @@ impl SpecialTokenThinking {
     }
 
     /// Construct with empty sets (no-op / safe default).
-    ///
-    /// Used when Gemma4 GGUF vocab is not yet parsed (v0.9.0 stub).
     pub fn empty() -> Self {
         Self::new(HashSet::new(), HashSet::new())
     }
@@ -427,7 +419,6 @@ impl SpecialTokenThinking {
     /// Construct by scanning the GGUF tokenizer vocabulary.
     ///
     /// Searches for token strings matching Gemma4 thinking control tokens.
-    /// This is a v0.9.0 stub — search logic added in v0.10.0 with real vocab.
     ///
     /// # Arguments
     /// * `vocab` — iterator of `(token_id, token_string)` pairs from GGUF

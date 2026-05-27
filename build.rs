@@ -45,6 +45,20 @@ fn main() {
                 println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
             }
         }
+
+        // Vulkan Linking (STRIX Protocol §12.1)
+        // If libvulkan.so is missing (common on minimal CI), fallback to libvulkan.so.1
+        #[cfg(feature = "vulkan")]
+        {
+            let has_dev_link = std::path::Path::new("/usr/lib/x86_64-linux-gnu/libvulkan.so").exists() ||
+                              std::path::Path::new("/usr/lib64/libvulkan.so").exists();
+            if has_dev_link {
+                println!("cargo:rustc-link-lib=vulkan");
+            } else {
+                // Link against the versioned library directly
+                println!("cargo:rustc-link-arg=-l:libvulkan.so.1");
+            }
+        }
     }
 
     // Tell Cargo to re-run if these change

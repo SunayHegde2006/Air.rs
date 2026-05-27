@@ -23,7 +23,8 @@ use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::ReceiverStream;
-use crate::dispatcher::{Dispatcher, SingleModelDispatcher};
+use futures_util::StreamExt;
+use crate::dispatcher::Dispatcher;
 
 // ---------------------------------------------------------------------------
 // Request / Response types (OpenAI-compatible)
@@ -50,6 +51,8 @@ pub struct ChatCompletionRequest {
     pub frequency_penalty: Option<f32>,
     #[serde(default)]
     pub user: Option<String>,
+    /// Optional GBNF grammar for structured output.
+    pub gbnf: Option<String>,
 }
 
 fn default_temperature() -> Option<f32> {
@@ -303,15 +306,6 @@ pub struct ApiState {
 }
 
 impl ApiState {
-    /// Create state backed by the default `SingleModelDispatcher` stub.
-    ///
-    /// Drop-in replacement for the old `ApiState::new`; behaviorally identical
-    /// until issues #7/#8 land and `SingleModelDispatcher` gets a real engine.
-    pub fn new(model_name: String) -> Self {
-        let dispatcher = Arc::new(SingleModelDispatcher::new(model_name.clone())) as Arc<dyn Dispatcher>;
-        Self::with_dispatcher(model_name, dispatcher)
-    }
-
     /// Create state with an explicit dispatcher (used for testing and ModelMux).
     pub fn with_dispatcher(model_name: String, dispatcher: Arc<dyn Dispatcher>) -> Self {
         let now = SystemTime::now()
@@ -335,22 +329,18 @@ impl ApiState {
         }
     }
 
-    fn next_id(&self) -> String {
+    pub fn next_id(&self) -> String {
         let n = self.request_count.fetch_add(1, Ordering::Relaxed);
         format!("chatcmpl-air-{:08x}", n)
     }
 
-    fn now_unix(&self) -> u64 {
+    pub fn now_unix(&self) -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
 
 /// POST /v1/chat/completions — non-streaming response.
 async fn chat_completions(
@@ -371,13 +361,39 @@ async fn chat_completions(
     } else {
         let id = state.next_id();
         let created = state.now_unix();
-        let max_tokens = req.max_tokens.unwrap_or(128);
+        
+        let config = crate::dispatcher::GenerateConfig {
+            model: req.model.clone(),
+            prompt: req.messages.last().map(|m| m.content.clone()).unwrap_or_default(),
+            max_tokens: req.max_tokens.unwrap_or(128),
+            temperature: req.temperature.unwrap_or(0.7),
+            top_p: req.top_p.unwrap_or(0.9),
+            stop: match req.stop {
+                Some(StopCondition::Single(s)) => vec![s],
+                Some(StopCondition::Multiple(v)) => v,
+                None => vec![],
+            },
+            draft_model: None, 
+            gbnf: req.gbnf.clone(),
+        };
 
-        // Simulate inference — in production this calls InferenceGenerator
-        let prompt_tokens = req.messages.iter().map(|m| estimate_tokens(&m.content)).sum::<usize>();
-        let reply = generate_reply(&req, max_tokens);
-        let completion_tokens = estimate_tokens(&reply);
+        let mut stream = state.dispatcher.generate(config);
+        let mut content = String::new();
+        let mut completion_tokens = 0;
 
+        while let Some(res) = stream.next().await {
+            match res {
+                Ok(crate::dispatcher::TokenChunk::Token { text, .. }) => {
+                    content.push_str(&text);
+                    completion_tokens += 1;
+                }
+                Ok(crate::dispatcher::TokenChunk::Stop { .. }) => break,
+                Err(e) => return ApiError::server_error(e.to_string()).into_response(),
+            }
+        }
+
+        let prompt_tokens = estimate_tokens(&req.messages.last().map(|m| m.content.as_str()).unwrap_or(""));
+        
         let resp = ChatCompletionResponse {
             id,
             object: "chat.completion".to_string(),
@@ -387,7 +403,7 @@ async fn chat_completions(
                 index: 0,
                 message: Message {
                     role: "assistant".to_string(),
-                    content: reply,
+                    content,
                 },
                 finish_reason: "stop".to_string(),
             }],
@@ -396,7 +412,7 @@ async fn chat_completions(
                 completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
             },
-            system_fingerprint: "air-rs-v0.1".to_string(),
+            system_fingerprint: "air-rs-prod".to_string(),
         };
 
         Json(resp).into_response()
@@ -413,13 +429,24 @@ async fn stream_completion(
     let id = state.next_id();
     let created = state.now_unix();
     let model = req.model.clone();
-    let max_tokens = req.max_tokens.unwrap_or(128);
+    
+    let config = crate::dispatcher::GenerateConfig {
+        model: req.model.clone(),
+        prompt: req.messages.last().map(|m| m.content.clone()).unwrap_or_default(),
+        max_tokens: req.max_tokens.unwrap_or(128),
+        temperature: req.temperature.unwrap_or(0.7),
+        top_p: req.top_p.unwrap_or(0.9),
+        stop: match req.stop {
+            Some(StopCondition::Single(s)) => vec![s],
+            Some(StopCondition::Multiple(v)) => v,
+            None => vec![],
+        },
+        draft_model: None,
+        gbnf: req.gbnf.clone(),
+    };
 
     tokio::spawn(async move {
-        let reply = generate_reply(&req, max_tokens);
-        let words: Vec<&str> = reply.split_whitespace().collect();
-
-        // First chunk: role
+        // Send initial role chunk
         let role_chunk = ChatCompletionChunk {
             id: id.clone(),
             object: "chat.completion.chunk".to_string(),
@@ -433,62 +460,68 @@ async fn stream_completion(
                 },
                 finish_reason: None,
             }],
-            system_fingerprint: "air-rs-v0.1".to_string(),
+            system_fingerprint: "air-rs-prod".to_string(),
         };
+        let _ = tx.send(Ok(Event::default().data(serde_json::to_string(&role_chunk).unwrap_or_default()))).await;
 
-        let _ = tx.send(Ok(Event::default()
-            .data(serde_json::to_string(&role_chunk).unwrap_or_default())))
-        .await;
-
-        // Content chunks — word by word
-        for (i, word) in words.iter().enumerate() {
-            let prefix = if i == 0 { "" } else { " " };
-            let chunk = ChatCompletionChunk {
-                id: id.clone(),
-                object: "chat.completion.chunk".to_string(),
-                created,
-                model: model.clone(),
-                choices: vec![ChunkChoice {
-                    index: 0,
-                    delta: Delta {
-                        role: None,
-                        content: Some(format!("{}{}", prefix, word)),
-                    },
-                    finish_reason: None,
-                }],
-                system_fingerprint: "air-rs-v0.1".to_string(),
+        let mut stream = state.dispatcher.generate(config);
+        while let Some(res) = stream.next().await {
+            let chunk = match res {
+                Ok(crate::dispatcher::TokenChunk::Token { text, .. }) => {
+                    ChatCompletionChunk {
+                        id: id.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
+                        model: model.clone(),
+                        choices: vec![ChunkChoice {
+                            index: 0,
+                            delta: Delta {
+                                role: None,
+                                content: Some(text),
+                            },
+                            finish_reason: None,
+                        }],
+                        system_fingerprint: "air-rs-prod".to_string(),
+                    }
+                }
+                Ok(crate::dispatcher::TokenChunk::Stop { finish_reason }) => {
+                    ChatCompletionChunk {
+                        id: id.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
+                        model: model.clone(),
+                        choices: vec![ChunkChoice {
+                            index: 0,
+                            delta: Delta { role: None, content: None },
+                            finish_reason: Some(finish_reason.as_str().to_string()),
+                        }],
+                        system_fingerprint: "air-rs-prod".to_string(),
+                    }
+                }
+                Err(e) => {
+                    // Send error as text and stop
+                    let err_chunk = ChatCompletionChunk {
+                        id: id.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
+                        model: model.clone(),
+                        choices: vec![ChunkChoice {
+                            index: 0,
+                            delta: Delta { role: None, content: Some(format!("\nError: {}", e)) },
+                            finish_reason: Some("error".to_string()),
+                        }],
+                        system_fingerprint: "air-rs-prod".to_string(),
+                    };
+                    let _ = tx.send(Ok(Event::default().data(serde_json::to_string(&err_chunk).unwrap_or_default()))).await;
+                    break;
+                }
             };
 
-            let _ = tx.send(Ok(Event::default()
-                .data(serde_json::to_string(&chunk).unwrap_or_default())))
-            .await;
-
-            // Simulate per-token latency
-            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            if tx.send(Ok(Event::default().data(serde_json::to_string(&chunk).unwrap_or_default()))).await.is_err() {
+                break;
+            }
         }
 
-        // Final chunk: finish_reason=stop
-        let done_chunk = ChatCompletionChunk {
-            id: id.clone(),
-            object: "chat.completion.chunk".to_string(),
-            created,
-            model: model.clone(),
-            choices: vec![ChunkChoice {
-                index: 0,
-                delta: Delta {
-                    role: None,
-                    content: None,
-                },
-                finish_reason: Some("stop".to_string()),
-            }],
-            system_fingerprint: "air-rs-v0.1".to_string(),
-        };
-
-        let _ = tx.send(Ok(Event::default()
-            .data(serde_json::to_string(&done_chunk).unwrap_or_default())))
-        .await;
-
-        // [DONE] sentinel
         let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
     });
 
@@ -528,72 +561,20 @@ fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 
-/// Simulate model reply. In production this dispatches to InferenceGenerator.
-fn generate_reply(req: &ChatCompletionRequest, max_tokens: usize) -> String {
-    // Extract the last user message
-    let last_user = req
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .map(|m| m.content.as_str())
-        .unwrap_or("Hi");
-
-    // Simple echo stub — real implementation plugs into the engine
-    let base = format!(
-        "Air.rs inference engine received your message: \"{}\". \
-         Running with temperature={:.1}, max_tokens={}. \
-         In production, this response is generated by the loaded GGUF model \
-         via the NVMe-streamed weight pipeline with zero-copy attention.",
-        last_user,
-        req.temperature.unwrap_or(0.7),
-        max_tokens,
-    );
-
-    // Trim to approximate max_tokens
-    let words: Vec<&str> = base.split_whitespace().collect();
-    let limit = max_tokens.min(words.len());
-    words[..limit].join(" ")
-}
-
 // ---------------------------------------------------------------------------
 // Router factory
 // ---------------------------------------------------------------------------
 
-/// Create the Axum router with shared state.
-///
-/// Usage:
-/// ```no_run
-/// #[tokio::main]
-/// async fn main() {
-///     let app = air_rs::api::create_router();
-///     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
-///     axum::serve(listener, app).await.unwrap();
-/// }
-/// ```
-pub fn create_router() -> Router {
-    create_router_with_model("air-rs-default".to_string())
-}
-
-/// Create the router with a specific model name (uses `SingleModelDispatcher` stub).
-pub fn create_router_with_model(model_name: String) -> Router {
-    let state = Arc::new(ApiState::new(model_name));
-    Router::new()
-        .route("/v1/chat/completions", post(chat_completions))
-        .route("/v1/models", get(list_models))
-        .route("/health", get(health))
-        .with_state(state)
-}
-
 /// Create the router with an explicit dispatcher (ADR-0003).
 ///
 /// Use this when wiring a real `InferenceGenerator` or `ModelMux`:
-/// ```no_run
+/// ```ignore
 /// use std::sync::Arc;
-/// use air_rs::dispatcher::SingleModelDispatcher;
+/// use air_rs::scheduler::RequestOrchestrator;
 /// use air_rs::api::create_router_with_dispatcher;
 ///
-/// let dispatcher = Arc::new(SingleModelDispatcher::new("llama-3-8b"));
+/// // Full initialization omitted for brevity
+/// let dispatcher = Arc::new(RequestOrchestrator::new(config));
 /// let app = create_router_with_dispatcher("llama-3-8b".into(), dispatcher);
 /// ```
 pub fn create_router_with_dispatcher(
@@ -625,7 +606,10 @@ mod tests {
 
     #[test]
     fn test_api_state_next_id() {
-        let state = ApiState::new("test-model".to_string());
+        use crate::dispatcher::MockDispatcher;
+        use std::sync::Arc;
+        let dispatcher = Arc::new(MockDispatcher::new("test-model", vec!["hi"]));
+        let state = ApiState::with_dispatcher("test-model".to_string(), dispatcher);
         let id1 = state.next_id();
         let id2 = state.next_id();
         assert!(id1.starts_with("chatcmpl-air-"));
@@ -634,63 +618,19 @@ mod tests {
 
     #[test]
     fn test_api_state_model_name() {
-        let state = ApiState::new("llama-7b".to_string());
+        use crate::dispatcher::MockDispatcher;
+        use std::sync::Arc;
+        let dispatcher = Arc::new(MockDispatcher::new("llama-7b", vec![]));
+        let state = ApiState::with_dispatcher("llama-7b".to_string(), dispatcher);
         assert_eq!(state.model_name, "llama-7b");
     }
 
     #[test]
-    fn test_generate_reply_respects_max_tokens() {
-        let req = ChatCompletionRequest {
-            model: "test".to_string(),
-            messages: vec![Message {
-                role: "user".to_string(),
-                content: "Tell me a long story".to_string(),
-            }],
-            temperature: Some(0.7),
-            top_p: None,
-            max_tokens: Some(5),
-            stream: None,
-            stop: None,
-            presence_penalty: None,
-            frequency_penalty: None,
-            user: None,
-        };
-
-        let reply = generate_reply(&req, 5);
-        let word_count = reply.split_whitespace().count();
-        assert!(word_count <= 5, "Reply should be ≤5 words, got {}", word_count);
-    }
-
-    #[test]
-    fn test_generate_reply_uses_last_user_message() {
-        let req = ChatCompletionRequest {
-            model: "test".to_string(),
-            messages: vec![
-                Message { role: "system".to_string(), content: "You are helpful.".to_string() },
-                Message { role: "user".to_string(), content: "What is Rust?".to_string() },
-            ],
-            temperature: Some(0.5),
-            top_p: None,
-            max_tokens: Some(50),
-            stream: None,
-            stop: None,
-            presence_penalty: None,
-            frequency_penalty: None,
-            user: None,
-        };
-
-        let reply = generate_reply(&req, 50);
-        assert!(reply.contains("What is Rust?"));
-    }
-
-    #[test]
     fn test_create_router_builds() {
-        let _router = create_router();
-    }
-
-    #[test]
-    fn test_create_router_with_model() {
-        let _router = create_router_with_model("my-model".to_string());
+        use crate::dispatcher::{Dispatcher, MockDispatcher};
+        use std::sync::Arc;
+        let dispatcher = Arc::new(MockDispatcher::new("air-rs", vec![])) as Arc<dyn Dispatcher>;
+        let _router = create_router_with_dispatcher("air-rs".to_string(), dispatcher);
     }
 
     #[test]
@@ -833,6 +773,7 @@ mod tests {
             presence_penalty: None,
             frequency_penalty: None,
             user: None,
+            gbnf: None,
         };
         assert!(validate_request(&req).is_err());
     }
@@ -850,6 +791,7 @@ mod tests {
             presence_penalty: None,
             frequency_penalty: None,
             user: None,
+            gbnf: None,
         };
         assert!(validate_request(&req).is_err());
     }
@@ -867,6 +809,7 @@ mod tests {
             presence_penalty: None,
             frequency_penalty: None,
             user: None,
+            gbnf: None,
         };
         assert!(validate_request(&req).is_ok());
     }
@@ -884,6 +827,7 @@ mod tests {
             presence_penalty: None,
             frequency_penalty: None,
             user: None,
+            gbnf: None,
         };
         assert!(validate_request(&req).is_err());
     }
@@ -901,6 +845,7 @@ mod tests {
             presence_penalty: None,
             frequency_penalty: None,
             user: None,
+            gbnf: None,
         };
         assert!(validate_request(&req).is_err());
     }

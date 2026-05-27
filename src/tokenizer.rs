@@ -257,6 +257,11 @@ impl Tokenizer {
         self.id_to_token.len()
     }
 
+    /// Return the full vocabulary as a vector of strings.
+    pub fn vocab_vec(&self) -> &Vec<String> {
+        &self.id_to_token
+    }
+
     /// Iterate over `(token_id, token_string)` pairs.
     ///
     /// Used by `GgufLoader` to build `SpecialTokenThinking::from_vocab_iter`

@@ -147,7 +147,7 @@ impl CudaStreamPool {
     fn build_cuda(n_streams: usize, device_idx: usize) -> Result<Self> {
         use candle_core::cuda_backend::cudarc::driver::CudaDevice;
         let device = CudaDevice::new(device_idx)?;
-        let device = Arc::new(device);
+        // device is already Arc<CudaDevice> from CudaDevice::new
         let compute_stream = device.fork_default_stream()?;
         let dma_stream = device.fork_default_stream()?;
         let inner = CudaPoolInner { device, compute_stream, dma_stream };
@@ -168,8 +168,9 @@ impl CudaStreamPool {
     pub fn sync_all(&self) {
         #[cfg(feature = "cuda")]
         if let Some(ref inner) = self.inner {
-            let _ = inner.compute_stream.synchronize();
-            let _ = inner.dma_stream.synchronize();
+            // In cudarc 0.13, we synchronize the device or use events.
+            // For now, device synchronize covers all streams in this pool.
+            let _ = inner.device.synchronize();
         }
     }
 }
@@ -226,7 +227,8 @@ impl LayerScheduler {
             // this layer is complete (event recorded at end of H2D copy).
             if let Some(ref inner) = self.pool.inner {
                 // Wait for DMA stream to reach the copy-complete point.
-                let _ = inner.compute_stream.wait_on(&inner.dma_stream);
+                // In modern cudarc, we synchronize the device or use events.
+                let _ = inner.device.synchronize();
                 let _ = layer_id; // used implicitly via stream ordering
             }
         }
@@ -250,9 +252,7 @@ impl LayerScheduler {
                 if let Some(ref inner) = self.pool.inner {
                     let sync_start = Instant::now();
                     // Synchronize compute stream to measure any residual wait.
-                    // In practice, if DMA was fast enough to complete during
-                    // compute, this is ~0 ns.
-                    let _ = inner.compute_stream.synchronize();
+                    let _ = inner.device.synchronize();
                     let _ = layer_id;
                     sync_start.elapsed().as_nanos() as u64
                 } else { 0 }

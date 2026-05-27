@@ -20,7 +20,11 @@
 
 **DraftManifest** — JSON sidecar at `{gguf_path}.draft.json`. Contains GGUF mtime, size, `draft_layer_ratio`, `air_version`, draft layer indices + byte offsets into the GGUF, and offsets for `output.weight` (LM head) and `model.norm`. Invalidated and re-derived if any field mismatches (mtime/size/ratio/version). Built by `DraftManifestBuilder` in `manifest.rs`. Never tracked in git (`*.draft.json` in `.gitignore`).
 
-**DraftResult** — Value type returned by `GhostDrafter::draft_pass`: `{ tokens: Vec<u32>, logits: Vec<Vec<f32>> }`. `tokens` is k proposed IDs; `logits` is k probability distributions `[k, vocab_size]`. Used directly by `Speculative::rejection_sample`.
+**DraftResult** — Value type returned by `GhostDrafter::draft_pass`: `{ tokens: Vec<u32>, logits: Vec<Vec<f32>> }`. `tokens` is k proposed IDs; `logits` is k probability distributions `[k, vocab_size]`. Used directly by `Speculative::rejection_sample`. **Distinct from `DraftBundle`** — `DraftResult` is the GhostDrafter trait's output contract; `DraftBundle` is Medusa's internal output type and is never exposed across the `GhostDrafter` boundary.
+
+**DraftBundle** — Internal output type of `MedusaHeads::draft()`: `{ tokens: Vec<u64>, hiddens: Vec<Tensor>, n_heads: usize }`. Medusa-private. Consumed by `verify_greedy`. Never crosses the `GhostDrafter` boundary. Contrast with `DraftResult`.
+
+**DraftEnvelope** — Typed handoff between the Medusa subsystem and the Ghost Drafter subsystem. `{ positions: Vec<EnvelopeSlot> }` where `EnvelopeSlot { position: usize, candidates: Vec<(u32, f32)> }` holds the Top-K `(token_id, logit_score)` pairs for each draft position. Produced by `MedusaHeads::draft_envelope(k)` after the Medusa pass. Consumed by the constrained Ghost Drafter to restrict its evaluation space. Enables Draft-Space Pruning without exposing raw tensors across the module boundary.
 
 **Prefix Cache** — A content-addressed pool of KV blocks indexed by token-hash chunks. Allows sessions with identical system prompts to skip prefill. Per-Model Slot.
 
@@ -28,7 +32,7 @@
 
 **CompressionScheme** — A tag on each KV block indicating which M.I.S.T. version compressed it. Prevents stale blocks from being reused after a pipeline upgrade.
 
-**HERMES Eviction** — The KV cache eviction policy: hierarchical importance scoring combining recency, attention density, and position. Lives in `kv_tier.rs`.
+**Virtual Sliding Window** — A memory management strategy for `SlidingWindowAttention` layers where the KV cache appears to grow indefinitely in the RAM (Warm) tier for session persistence, but is strictly capped and managed as a circular buffer in the VRAM (Hot) tier. This satisfies the Gemma 4 training constraints while maintaining the existing `KvCacheManager` growing-cache API.
 
 **Ghost Drafting** — Speculative decoding using a small "ghost" model (1B/3B) to draft tokens that the main model verifies. Reduces decode latency by ~2–3×.
 
@@ -80,10 +84,14 @@
 
 **DeltaState** — State matrix `S_t ∈ ℝ^{d_v × d_k}` maintained by `GatedDeltaNetLayer` (one per head). Stored FP32 row-major; BF16 compressed at S.L.I.P. checkpoint. `is_recurrent()=true` → no KV-cache slice, mapped to `LayerCache::DeltaState` in the session cache.
 
-**DualRopeCache** — Struct in `src/dual_rope.rs`. Holds two `RopeFreqTable` instances: `local` (θ=10 000, for `SlidingWindow` layers) and `global` (θ=1 000 000, for `GlobalFull` layers). Populated from GGUF metadata keys `gemma4.attention.local_rope_theta` and `gemma4.attention.global_rope_theta`. `table_for(backend)` dispatches correct table; `apply_rope_batch` applies to a full QK batch.
+**DualRopeCache / Index-Dispatched** — Struct in `src/dual_rope.rs`. Holds two `RopeFreqTable` instances: `local` (θ=10 000, for `SlidingWindow` layers) and `global` (θ=1 000 000, for `GlobalFull` layers). Populated from GGUF metadata keys `gemma4.attention.local_rope_theta` and `gemma4.attention.global_rope_theta`. The implementation automatically selects the correct frequency base using the current layer's `AttentionBackend` metadata, hiding the dual-theta complexity from the `InferenceGenerator` loop.
 
 **GemmaRmsNorm** — Gemma-specific normalisation in `src/gemma4.rs`. Effective weight = `stored_weight + 1.0`. Stored tensor is a *residual* around 1, initialised to zero. Avoids re-centring (no mean subtraction). Shared by Gemma 1/2/3/4 variants.
 
 **SigmoidMoeRouter** — MoE router in `src/gemma4.rs` for Gemma 4 26B-A4B. Applies independent `sigmoid` to each of E router logits, then selects top-K by raw score (no softmax normalisation). Distinct from Mixtral-style softmax router. Top-K=2 of E=32 experts → 4B active params.
 
 **DenseGeGlu / ExpertPool** — GeGLU feed-forward network: `(xW_gate ⊙ GELU(xW_up)) W_down`. `DenseGeGlu` is used in Gemma 4 E4B; `ExpertPool` holds E independent `DenseGeGlu` experts and aggregates weighted outputs for the MoE path.
+*   **Timeline Semaphore** — A HAL-level progress counter used as an agnostic "Resource Readiness" signal. Synchronizes the NVMe prefetch engine with GPU/CPU compute execution at sub-layer granularity. See ADR-0005.
+*   **Flight Slot** — A fixed-size partition (256MB) of the **VRAM Arena** used for staging. Enables granular double-buffering without duplicating the entire 70B layer weight set in VRAM.
+*   **Numerical Identity** — The guarantee that $S_t$ state matrices remain bit-compatible across heterogeneous hardware. Enforced by **Strict FP32 Accumulation** and **FMA-Fusing**.
+*   **Regression Gate** — The CI-enforced policy requiring $\le 0.2\%$ drift on HellaSwag/MMLU benchmarks. Ensures optimizations do not compromise model quality.

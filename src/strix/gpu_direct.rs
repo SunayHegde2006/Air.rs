@@ -55,10 +55,11 @@ struct CuFileStatus {
 ///
 /// These symbols are resolved at link time against `libcufile.so`.
 /// When the `cuda` feature is disabled, none of this code compiles.
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "gds"))]
 mod cufile_ffi {
     use super::*;
 
+    #[cfg(all(feature = "cuda", feature = "gds"))]
     #[link(name = "cufile")]
     extern "C" {
         /// Initialize the cuFile driver.
@@ -501,14 +502,14 @@ impl GdsStorageHal {
     pub fn new() -> Self {
         let capability = GdsCapability::probe();
         // Initialize cuFile driver if available via cuFileDriverOpen.
-        #[cfg(feature = "cuda")]
+        #[cfg(all(feature = "cuda", feature = "gds"))]
         let driver_initialized = if capability.is_usable() {
             let code = unsafe { cufile_ffi::cuFileDriverOpen() };
             code == 0
         } else {
             false
         };
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(all(feature = "cuda", feature = "gds")))]
         let driver_initialized = false;
 
         // Allocate pinned staging buffer (16MB — matches max GDS transfer size).
@@ -609,7 +610,7 @@ impl GdsStorageHal {
     }
 
     /// Submit via cuFile DMA (Path A).
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", feature = "gds"))]
     fn submit_cufile(&mut self, transfer: &mut GdsTransfer) -> Result<(), HalError> {
         use std::os::unix::io::AsRawFd;
 
@@ -690,8 +691,8 @@ impl GdsStorageHal {
         Ok(())
     }
 
-    /// cuFile path not available without the cuda feature.
-    #[cfg(not(feature = "cuda"))]
+    /// cuFile path not available without the cuda+gds features.
+    #[cfg(not(all(feature = "cuda", feature = "gds")))]
     fn submit_cufile(&mut self, transfer: &mut GdsTransfer) -> Result<(), HalError> {
         transfer.method = TransferMethod::PinnedHostStaging;
         self.submit_pinned(transfer)
@@ -778,7 +779,7 @@ impl GdsStorageHal {
 impl Drop for GdsStorageHal {
     fn drop(&mut self) {
         // Close the cuFile driver if we initialized it.
-        #[cfg(feature = "cuda")]
+        #[cfg(all(feature = "cuda", feature = "gds"))]
         if self.driver_initialized {
             unsafe { cufile_ffi::cuFileDriverClose() };
         }

@@ -22,45 +22,7 @@
 //! for O(1) rollback semantics.
 
 use anyhow::Result;
-
-// ---------------------------------------------------------------------------
-// SamplerConfig — shared by draft and target (Gap 3 fix)
-// ---------------------------------------------------------------------------
-
-/// Sampling hyper-parameters — injected from the HTTP request.
-///
-/// Both draft and target use the **identical** `SamplerConfig`. This is
-/// required by Leviathan et al. (2023) Theorem 1 for lossless speculative
-/// acceleration. Do **not** override temperature for the draft pass.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SamplerConfig {
-    /// Sampling temperature (0.0 = greedy / argmax).
-    pub temperature: f32,
-    /// Nucleus sampling probability mass (1.0 = disabled).
-    pub top_p: f32,
-    /// Top-k cutoff (0 = disabled).
-    pub top_k: usize,
-    /// Random seed for reproducibility (`None` = entropy-seeded).
-    pub seed: Option<u64>,
-}
-
-impl Default for SamplerConfig {
-    fn default() -> Self {
-        Self { temperature: 0.8, top_p: 0.95, top_k: 0, seed: None }
-    }
-}
-
-impl SamplerConfig {
-    /// Greedy / argmax — deterministic, temperature = 0.
-    pub fn greedy() -> Self {
-        Self { temperature: 0.0, top_p: 1.0, top_k: 1, seed: Some(0) }
-    }
-
-    /// True if this config produces deterministic / greedy output.
-    pub fn is_greedy(&self) -> bool {
-        self.temperature == 0.0 || self.top_k == 1
-    }
-}
+use crate::sampler::SamplerConfig;
 
 // ---------------------------------------------------------------------------
 // DraftResult — output of one draft_pass call
@@ -168,6 +130,62 @@ impl Default for SpeculativeConfig {
             lookahead_k_max: 8,
             eos_token_id: 2,  // Common EOS for LLaMA family
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GemmaGhostDrafter — 2-bit Constrained Ghost
+// ---------------------------------------------------------------------------
+
+/// Ghost drafter using a 2-bit Gemma model (IQ2_XS) to prune Medusa drafts.
+/// Implements Draft-Space Pruning: Medusa Top-5 -> Gemma Score -> Rejection Sample.
+pub struct GemmaGhostDrafter {
+    pub config: SpeculativeConfig,
+    /// Minimum logit score to keep a draft token (per Decision Q19).
+    pub min_ghost_confidence: f32,
+    /// Vocab ID mapping: GhostID -> MainID
+    pub id_map: Vec<u32>,
+}
+
+impl GemmaGhostDrafter {
+    pub fn new(config: SpeculativeConfig, id_map: Vec<u32>) -> Self {
+        Self {
+            config,
+            min_ghost_confidence: 0.1, // Default threshold
+            id_map,
+        }
+    }
+
+    /// Convert a MainModel token ID to a GhostModel token ID using the static map.
+    fn map_id(&self, main_id: u32) -> u32 {
+        self.id_map.get(main_id as usize).cloned().unwrap_or(self.config.eos_token_id)
+    }
+}
+
+impl GhostDrafter for GemmaGhostDrafter {
+    fn draft_pass(
+        &mut self,
+        _context: &[u32],
+        k: usize,
+        _sampler: &SamplerConfig,
+    ) -> Result<DraftResult> {
+        // Note: For Draft-Space Pruning, the caller provides the logic via 
+        // the Medusa DraftEnvelope. This method is used as the trait entry point.
+        // In the hybrid loop (speculative.rs), we'll call into the Gemma block
+        // directly using the envelope candidates.
+        Ok(DraftResult {
+            tokens: vec![],
+            logits: vec![],
+            hit_eos: false,
+        })
+    }
+
+    fn on_accept(&mut self, _n_accept: usize, _context_len: usize) {
+        // Stateless: No KV cache to advance
+    }
+
+    fn reset(&mut self) {
+        // Stateless: No-op
     }
 }
 

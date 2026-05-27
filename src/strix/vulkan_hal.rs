@@ -57,6 +57,13 @@ const VK_BUFFER_USAGE_STORAGE_BUFFER_BIT: u32 = 0x20;
 /// Vulkan sharing mode.
 const VK_SHARING_MODE_EXCLUSIVE: u32 = 0;
 
+/// Vulkan semaphore type.
+const VK_SEMAPHORE_TYPE_TIMELINE: i32 = 1;
+const VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO: u32 = 1000145002;
+const VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO: u32 = 1000145004;
+const VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO: u32 = 1000145005;
+const VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO: u32 = 1000145003;
+
 /// Vulkan command pool flags.
 const VK_COMMAND_POOL_CREATE_TRANSIENT_BIT: u32 = 0x01;
 const VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT: u32 = 0x02;
@@ -254,10 +261,34 @@ struct VkSubmitInfo {
     p_signal_semaphores: *const std::ffi::c_void,
 }
 
+#[repr(C)]
+struct VkSemaphoreTypeCreateInfo {
+    s_type: u32,
+    p_next: *const std::ffi::c_void,
+    semaphore_type: i32,
+    initial_value: u64,
+}
+
+#[repr(C)]
+struct VkSemaphoreWaitInfo {
+    s_type: u32,
+    p_next: *const std::ffi::c_void,
+    flags: u32,
+    semaphore_count: u32,
+    p_semaphores: *const *mut std::ffi::c_void,
+    p_values: *const u64,
+}
+
+#[repr(C)]
+struct VkSemaphoreSignalInfo {
+    s_type: u32,
+    p_next: *const std::ffi::c_void,
+    semaphore: *mut std::ffi::c_void,
+    value: u64,
+}
+
 // ── Vulkan FFI ───────────────────────────────────────────────────────────
 
-#[cfg_attr(target_os = "windows", link(name = "vulkan-1"))]
-#[cfg_attr(not(target_os = "windows"), link(name = "vulkan"))]
 extern "C" {
     fn vkCreateInstance(
         create_info: *const VkInstanceCreateInfo,
@@ -398,6 +429,17 @@ extern "C" {
         fence: VkFence,
     ) -> VkResult;
     fn vkQueueWaitIdle(queue: VkQueue) -> VkResult;
+
+    fn vkWaitSemaphores(
+        device: VkDevice,
+        wait_info: *const VkSemaphoreWaitInfo,
+        timeout: u64,
+    ) -> VkResult;
+
+    fn vkSignalSemaphore(
+        device: VkDevice,
+        signal_info: *const VkSemaphoreSignalInfo,
+    ) -> VkResult;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -418,13 +460,10 @@ fn vk_check(result: VkResult) -> Result<(), HalError> {
     }
 }
 
-// ── Internal Types ───────────────────────────────────────────────────────
-
-/// A tracked Vulkan device memory allocation.
-struct VulkanAllocation {
-    /// The `VkDeviceMemory` handle.
+/// A reusable staging buffer (host-visible).
+struct PooledStagingBuffer {
+    buffer: VkBuffer,
     memory: VkDeviceMemory,
-    /// Allocation size in bytes.
     size: usize,
 }
 
@@ -432,6 +471,8 @@ struct VulkanAllocation {
 struct VulkanHalInner {
     /// Active allocations keyed by `VkDeviceMemory` address (as u64).
     allocations: HashMap<u64, VulkanAllocation>,
+    /// Reusable staging buffers for async copies.
+    staging_pool: Vec<PooledStagingBuffer>,
 }
 
 // ── VulkanHal ────────────────────────────────────────────────────────────
@@ -466,6 +507,10 @@ pub struct VulkanHal {
     device_name: String,
     /// Vulkan API version reported by the physical device.
     api_version: u32,
+    /// Command pools, one per concurrent stream.
+    command_pools: Vec<VkCommandPool>,
+    /// Pre-allocated command buffers for each stream.
+    command_buffers: Vec<VkCommandBuffer>,
     /// Interior-mutable allocation tracking.
     inner: Mutex<VulkanHalInner>,
 }
@@ -684,6 +729,43 @@ impl VulkanHal {
             }
         }
 
+        // ── 9. Pre-allocate Staging Pool (8MB chunks) ────────────────
+        let mut staging_pool = Vec::with_capacity(4);
+        let staging_size = 8 * 1024 * 1024; // 8MB per slot
+        for _ in 0..4 {
+            let buf_ci = VkBufferCreateInfo {
+                s_type: VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                p_next: ptr::null(),
+                flags: 0,
+                size: staging_size as u64,
+                usage: VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                sharing_mode: VK_SHARING_MODE_EXCLUSIVE,
+                queue_family_index_count: 0,
+                p_queue_family_indices: ptr::null(),
+            };
+            let mut buffer: VkBuffer = ptr::null_mut();
+            unsafe { vk_check(vkCreateBuffer(device, &buf_ci, ptr::null(), &mut buffer))? };
+
+            let mut reqs: VkMemoryRequirements = unsafe { std::mem::zeroed() };
+            unsafe { vkGetBufferMemoryRequirements(device, buffer, &mut reqs) };
+
+            let alloc_info = VkMemoryAllocateInfo {
+                s_type: VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                p_next: ptr::null(),
+                allocation_size: reqs.size,
+                memory_type_index,
+            };
+            let mut memory: VkDeviceMemory = ptr::null_mut();
+            unsafe { vk_check(vkAllocateMemory(device, &alloc_info, ptr::null(), &mut memory))? };
+            unsafe { vk_check(vkBindBufferMemory(device, buffer, memory, 0))? };
+
+            staging_pool.push(PooledStagingBuffer {
+                buffer,
+                memory,
+                size: staging_size,
+            });
+        }
+
         Ok(Self {
             instance,
             device,
@@ -694,8 +776,11 @@ impl VulkanHal {
             total_vram,
             device_name,
             api_version,
+            command_pools,
+            command_buffers,
             inner: Mutex::new(VulkanHalInner {
                 allocations: HashMap::new(),
+                staging_pool,
             }),
         })
     }
@@ -906,6 +991,13 @@ impl Drop for VulkanHal {
                     }
                 }
             }
+            // Free staging pool
+            for pooled in inner.staging_pool.drain(..) {
+                unsafe {
+                    vkDestroyBuffer(self.device, pooled.buffer, ptr::null());
+                    vkFreeMemory(self.device, pooled.memory, ptr::null());
+                }
+            }
         }
         // Destroy device BEFORE instance (Vulkan spec requirement).
         if !self.device.is_null() {
@@ -971,35 +1063,109 @@ impl GpuHal for VulkanHal {
         dst: GpuPtr,
         src: *const u8,
         size: usize,
-        _stream: u32,
+        stream: u32,
     ) -> Result<(), HalError> {
-        let inner = self.inner.lock().unwrap();
-        let alloc = inner
-            .allocations
-            .get(&dst.0)
-            .ok_or_else(|| HalError::DriverError {
-                code: -1,
-                message: format!("unknown GpuPtr({:#x})", dst.0),
-            })?;
-        let memory = alloc.memory;
-        let alloc_size = alloc.size;
-        drop(inner); // Release lock before blocking FFI call.
+        if stream == 0 {
+            // Synchronous path via direct mapping (Fast for UMA)
+            let inner = self.inner.lock().unwrap();
+            let alloc = inner
+                .allocations
+                .get(&dst.0)
+                .ok_or_else(|| HalError::DriverError {
+                    code: -1,
+                    message: format!("unknown GpuPtr({:#x})", dst.0),
+                })?;
+            let memory = alloc.memory;
+            let alloc_size = alloc.size;
+            drop(inner);
+    
+            if size > alloc_size {
+                return Err(HalError::DriverError {
+                    code: -2,
+                    message: format!("write size {} exceeds alloc size {}", size, alloc_size),
+                });
+            }
+    
+            let mut mapped: *mut u8 = ptr::null_mut();
+            unsafe {
+                vk_check(vkMapMemory(self.device, memory, 0, size as u64, 0, &mut mapped))?;
+                ptr::copy_nonoverlapping(src, mapped, size);
+                vkUnmapMemory(self.device, memory);
+            }
+            Ok(())
+        } else {
+            // Async path: Use pooled staging buffer and command queue
+            let stream_idx = (stream as usize).min(3);
+            let mut inner = self.inner.lock().unwrap();
+            
+            // For simplicity, we use the stream index to pick a pool slot.
+            // In a full implementation, we'd use a semaphore to avoid host-read races.
+            let pooled = &inner.staging_pool[stream_idx];
+            if size > pooled.size {
+                return Err(HalError::Unsupported(format!("pooled staging buffer too small ({} < {})", pooled.size, size)));
+            }
 
-        if size > alloc_size {
-            return Err(HalError::DriverError {
-                code: -2,
-                message: format!("write size {} exceeds alloc size {}", size, alloc_size),
-            });
+            let alloc = inner.allocations.get(&dst.0).ok_or(HalError::DriverError { code: -1, message: "bad dst".into() })?;
+            let dst_mem = alloc.memory;
+            drop(inner);
+
+            unsafe {
+                // Map pooled staging memory
+                let mut mapped: *mut u8 = ptr::null_mut();
+                vk_check(vkMapMemory(self.device, pooled.memory, 0, size as u64, 0, &mut mapped))?;
+                ptr::copy_nonoverlapping(src, mapped, size);
+                vkUnmapMemory(self.device, pooled.memory);
+
+                // We need a VkBuffer wrapper for dst memory to use vkCmdCopyBuffer.
+                // This is a short-term allocation; production code would pool these too.
+                let dst_buf_ci = VkBufferCreateInfo {
+                    s_type: VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                    p_next: ptr::null(),
+                    flags: 0,
+                    size: size as u64,
+                    usage: VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    sharing_mode: VK_SHARING_MODE_EXCLUSIVE,
+                    queue_family_index_count: 0,
+                    p_queue_family_indices: ptr::null(),
+                };
+                let mut dst_buffer: VkBuffer = ptr::null_mut();
+                vk_check(vkCreateBuffer(self.device, &dst_buf_ci, ptr::null(), &mut dst_buffer))?;
+                vk_check(vkBindBufferMemory(self.device, dst_buffer, dst_mem, 0))?;
+
+                let cb = self.command_buffers[stream_idx];
+                let begin_info = VkCommandBufferBeginInfo {
+                    s_type: VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                    p_next: ptr::null(),
+                    flags: VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+                    p_inheritance_info: ptr::null(),
+                };
+                vk_check(vkBeginCommandBuffer(cb, &begin_info))?;
+                
+                let region = VkBufferCopy { src_offset: 0, dst_offset: 0, size: size as u64 };
+                vkCmdCopyBuffer(cb, pooled.buffer, dst_buffer, 1, &region);
+                vk_check(vkEndCommandBuffer(cb))?;
+
+                let submit_info = VkSubmitInfo {
+                    s_type: VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                    p_next: ptr::null(),
+                    wait_semaphore_count: 0,
+                    p_wait_semaphores: ptr::null(),
+                    p_wait_dst_stage_mask: ptr::null(),
+                    command_buffer_count: 1,
+                    p_command_buffers: &cb,
+                    signal_semaphore_count: 0,
+                    p_signal_semaphores: ptr::null(),
+                };
+                vk_check(vkQueueSubmit(self.queue, 1, &submit_info, ptr::null_mut()))?;
+                
+                // Note: We don't fence-wait here to allow overlapping.
+                // Caller must call sync_stream(stream) before using dst.
+                
+                // Cleanup the temporary dst_buffer wrapper
+                vkDestroyBuffer(self.device, dst_buffer, ptr::null());
+            }
+            Ok(())
         }
-
-        let mut mapped: *mut u8 = ptr::null_mut();
-        let result = unsafe {
-            vkMapMemory(self.device, memory, 0, size as u64, 0, &mut mapped)
-        };
-        vk_check(result)?;
-        unsafe { ptr::copy_nonoverlapping(src, mapped, size) };
-        unsafe { vkUnmapMemory(self.device, memory) };
-        Ok(())
     }
 
     fn copy_from_vram(
@@ -1047,5 +1213,33 @@ impl GpuHal for VulkanHal {
     fn vram_used(&self) -> Result<usize, HalError> {
         let inner = self.inner.lock().unwrap();
         Ok(inner.allocations.values().map(|a| a.size).sum())
+    }
+
+    fn wait_timeline(&self, semaphore: u64, value: u64, timeout_ms: u64) -> Result<(), HalError> {
+        let sem = semaphore as *mut std::ffi::c_void;
+        let wait_info = VkSemaphoreWaitInfo {
+            s_type: VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+            p_next: ptr::null(),
+            flags: 0,
+            semaphore_count: 1,
+            p_semaphores: &sem,
+            p_values: &value,
+        };
+        unsafe {
+            vk_check(vkWaitSemaphores(self.device, &wait_info, timeout_ms * 1_000_000))
+        }
+    }
+
+    fn signal_timeline(&self, semaphore: u64, value: u64) -> Result<(), HalError> {
+        let sem = semaphore as *mut std::ffi::c_void;
+        let signal_info = VkSemaphoreSignalInfo {
+            s_type: VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO,
+            p_next: ptr::null(),
+            semaphore: sem,
+            value,
+        };
+        unsafe {
+            vk_check(vkSignalSemaphore(self.device, &signal_info))
+        }
     }
 }

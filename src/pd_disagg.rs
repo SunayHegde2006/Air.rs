@@ -61,6 +61,27 @@ impl KvBlock {
         buf
     }
 
+    /// Perform int8 delta-quantization for wire transfer (Decision Q13).
+    pub fn int8_quantize(bf16_data: &[u8]) -> (Vec<i8>, f32) {
+        let f16_slice: &[half::bf16] = unsafe {
+            std::slice::from_raw_parts(bf16_data.as_ptr() as *const half::bf16, bf16_data.len() / 2)
+        };
+        
+        let mut max_val = 0.0f32;
+        for &v in f16_slice {
+            max_val = max_val.max(v.to_f32().abs());
+        }
+        
+        let scale = if max_val > 0.0 { max_val / 127.0 } else { 1.0 };
+        let inv_scale = 1.0 / scale;
+        
+        let q_data: Vec<i8> = f16_slice.iter()
+            .map(|&v| (v.to_f32() * inv_scale).round() as i8)
+            .collect();
+            
+        (q_data, scale)
+    }
+
     /// Deserialise from a flat byte buffer.
     pub fn deserialise(buf: &[u8]) -> Option<Self> {
         if buf.len() < 10 {
@@ -235,11 +256,27 @@ impl KvConnector for TcpKvConnector {
         stream.set_write_timeout(Some(timeout))?;
         let mut total_bytes = 0u64;
 
+        // 1. Send Handshake with FeatureBitmask (Decision Q22)
+        let header = crate::warp_protocol::WarpHeader {
+            features: crate::warp_protocol::WarpFeature::Int8Quantization as u64 | 
+                      crate::warp_protocol::WarpFeature::AsyncPipelining as u64,
+            body_len: blocks.len() as u32,
+        };
+        stream.write_all(&header.serialise())?;
+
         for block in blocks {
-            let payload = block.serialise();
-            let payload_len = payload.len() as u32;
+            // Apply int8 quantization if negotiated
+            let (q_data, scale) = KvBlock::int8_quantize(&block.data);
+            
+            let mut payload = Vec::with_capacity(14 + q_data.len());
+            payload.extend_from_slice(&block.block_id.to_le_bytes());
+            payload.extend_from_slice(&block.layer_idx.to_le_bytes());
+            payload.extend_from_slice(&scale.to_le_bytes());
+            payload.extend_from_slice(&(q_data.len() as u32).to_le_bytes());
+            for &v in &q_data { payload.push(v as u8); }
+
             stream.write_all(&seq_id.to_le_bytes())?;
-            stream.write_all(&payload_len.to_le_bytes())?;
+            stream.write_all(&(payload.len() as u32).to_le_bytes())?;
             stream.write_all(&payload)?;
             total_bytes += 8 + 4 + payload.len() as u64;
         }

@@ -54,6 +54,8 @@ pub struct InferenceMetrics {
     total_compute: Duration,
     total_io: Duration,
     total_h2d: Duration,
+    /// Final hidden state [D] of the most recent token (input for Medusa draft).
+    pub last_hidden: Option<candle_core::Tensor>,
 }
 
 impl InferenceMetrics {
@@ -68,6 +70,7 @@ impl InferenceMetrics {
             total_compute: Duration::ZERO,
             total_io: Duration::ZERO,
             total_h2d: Duration::ZERO,
+            last_hidden: None,
         }
     }
 

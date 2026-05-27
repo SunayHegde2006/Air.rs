@@ -109,17 +109,56 @@ impl Q8Tensor {
 }
 
 // ---------------------------------------------------------------------------
-// Per-layer KV Cache with optional Q8_0
+// Unified Layer Cache — v0.11.0
+// ---------------------------------------------------------------------------
+
+/// Content-addressed / stateful cache for a single transformer layer.
+///
+/// Hides the architecture-specific state (KV vs SSM vs M.I.S.T.) from
+/// the generation loop.
+#[derive(Debug, Clone)]
+pub enum LayerCache {
+    /// Standard attention KV cache [2, batch, seq, heads, dim].
+    Attention { k: Tensor, v: Tensor },
+    /// Recurrent state matrix for Gated DeltaNet (Qwen 3.6).
+    Recurrent(crate::gated_deltanet::DeltaState),
+    /// M.I.S.T. v4 §Stage 1: quaternion-projected and compressed cache.
+    Quantized(crate::iso_quant::IsoQuantKey),
+    /// No state (first token of prefill, or non-stateful layer).
+    Empty,
+}
+
+impl LayerCache {
+    /// True if this variant represents a recurrent SSM state.
+    pub fn is_recurrent(&self) -> bool {
+        matches!(self, Self::Recurrent(_))
+    }
+
+    /// True if no tokens have been cached yet.
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    /// Equivalent sequence length (0 for Empty/Recurrent if not token-aligned).
+    pub fn seq_len(&self) -> usize {
+        match self {
+            Self::Attention { k, .. } => k.dim(1).unwrap_or(0),
+            Self::Quantized(q) => q.projected.len() / 128, // Approximation
+            _ => 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-layer KV Cache storage
 // ---------------------------------------------------------------------------
 
 /// Per-layer KV cache stored as Candle tensors in system RAM.
 pub struct LayerKvCache {
     pub layer_id: usize,
-    /// Key cache: [batch, seq_len, n_kv_heads, head_dim] — stored on CPU in storage_dtype
-    pub k_cache: Option<Tensor>,
-    /// Value cache: [batch, seq_len, n_kv_heads, head_dim] — stored on CPU in storage_dtype
-    pub v_cache: Option<Tensor>,
-    /// Q8_0-quantised key cache (mutually exclusive with k_cache when q8_0 is enabled).
+    /// The unified state for this layer.
+    pub state: LayerCache,
+    /// Q8_0-quantised key cache (Legacy/Cold Tier).
     pub k_q8: Option<Q8Tensor>,
     /// Q8_0-quantised value cache.
     pub v_q8: Option<Q8Tensor>,
@@ -136,6 +175,8 @@ pub struct KvCacheManager {
     compute_dtype: DType,  // The model's working dtype for GPU computation
     /// When true, use Q8_0 quantisation instead of storage_dtype.
     q8_0_enabled: bool,
+    /// The attention layout defining which layers use sliding windows (v0.10.1).
+    pub router: Option<crate::attention_backend::HybridAttentionRouter>,
 }
 
 impl KvCacheManager {
@@ -178,8 +219,7 @@ impl KvCacheManager {
         for id in 0..num_layers {
             layers.push(LayerKvCache {
                 layer_id: id,
-                k_cache: None,
-                v_cache: None,
+                state: LayerCache::Empty,
                 k_q8: None,
                 v_q8: None,
             });
@@ -191,6 +231,7 @@ impl KvCacheManager {
             storage_dtype,
             compute_dtype,
             q8_0_enabled: false,
+            router: None,
         }
     }
 
@@ -199,16 +240,12 @@ impl KvCacheManager {
         self.q8_0_enabled
     }
 
-    /// Load a specific layer's KV-cache from CPU RAM to GPU VRAM.
-    /// Returns None if no cache exists yet (first token / prefill).
-    ///
-    /// If Q8_0 is enabled, dequantises blocks back to compute_dtype tensors.
-    /// Otherwise casts from storage_dtype (F16) to compute_dtype (F32).
-    pub fn load_to_device(&self, layer_id: usize) -> Result<(Option<Tensor>, Option<Tensor>)> {
+    /// Load a specific layer's cache from CPU RAM to GPU VRAM.
+    pub fn load_layer(&self, layer_id: usize) -> Result<LayerCache> {
         let layer = &self.layers[layer_id];
 
-        if self.q8_0_enabled {
-            // Dequantise Q8_0 → F32 tensor → transfer to device
+        // Q8 legacy path
+        if self.q8_0_enabled && (layer.k_q8.is_some() || layer.v_q8.is_some()) {
             let k = layer.k_q8.as_ref().map(|q| {
                 let data = q.dequantize();
                 Tensor::new(data, &Device::Cpu)?
@@ -225,106 +262,91 @@ impl KvCacheManager {
                     .to_device(&self.device)
             }).transpose()?;
 
-            Ok((k, v))
-        } else {
-            // Fast path (P2-1): if cache is already on compute device in
-            // compute dtype, return a cheap Arc clone (no data copy).
-            let k = layer
-                .k_cache
-                .as_ref()
-                .map(|t| {
-                    if t.dtype() == self.compute_dtype && t.device().same_device(&self.device) {
-                        Ok(t.clone()) // Cheap clone — backed by Arc, not data copy
-                    } else {
-                        t.to_dtype(self.compute_dtype)?
-                            .to_device(&self.device)
-                    }
-                })
-                .transpose()?;
-            let v = layer
-                .v_cache
-                .as_ref()
-                .map(|t| {
-                    if t.dtype() == self.compute_dtype && t.device().same_device(&self.device) {
-                        Ok(t.clone())
-                    } else {
-                        t.to_dtype(self.compute_dtype)?
-                            .to_device(&self.device)
-                    }
-                })
-                .transpose()?;
+            return Ok(if let (Some(k), Some(v)) = (k, v) {
+                LayerCache::Attention { k, v }
+            } else {
+                LayerCache::Empty
+            });
+        }
 
-            Ok((k, v))
+        // Unified path
+        match &layer.state {
+            LayerCache::Attention { k, v } => {
+                let k_gpu = k.to_device(&self.device)?.to_dtype(self.compute_dtype)?;
+                let v_gpu = v.to_device(&self.device)?.to_dtype(self.compute_dtype)?;
+                Ok(LayerCache::Attention { k: k_gpu, v: v_gpu })
+            }
+            LayerCache::Recurrent(s) => Ok(LayerCache::Recurrent(s.clone())),
+            LayerCache::Quantized(q) => Ok(LayerCache::Quantized(q.clone())),
+            LayerCache::Empty => Ok(LayerCache::Empty),
         }
     }
 
-    /// After computing attention, save the updated K/V tensors back to CPU RAM.
-    ///
-    /// If Q8_0 is enabled, quantises F32 → Q8_0 blocks (~3.56× compression).
-    /// Otherwise casts to storage_dtype (F16) for ~2× compression.
-    pub fn save_from_device(
-        &mut self,
-        layer_id: usize,
-        new_k: &Tensor,
-        new_v: &Tensor,
-    ) -> Result<()> {
+    /// Save the updated layer cache back to CPU RAM.
+    pub fn save_layer(&mut self, layer_id: usize, cache: LayerCache) -> Result<()> {
         let layer = &mut self.layers[layer_id];
+        let backend = self.router.as_ref().map(|r| r.backend_for_layer(layer_id));
+
+        // Windowing logic for SWA
+        let final_cache = match (cache, backend) {
+            (LayerCache::Attention { k, v }, Some(crate::attention_backend::AttentionBackend::SlidingWindow { window })) => {
+                let slen = k.dims()[1];
+                if slen > window {
+                    let start = slen - window;
+                    LayerCache::Attention {
+                        k: k.narrow(1, start, window)?,
+                        v: v.narrow(1, start, window)?,
+                    }
+                } else {
+                    LayerCache::Attention { k, v }
+                }
+            }
+            (c, _) => c,
+        };
 
         if self.q8_0_enabled {
-            // Flatten to F32, quantise to Q8_0 blocks
-            let k_cpu = new_k.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
-            let v_cpu = new_v.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
-
-            let k_data: Vec<f32> = k_cpu.flatten_all()?.to_vec1()?;
-            let v_data: Vec<f32> = v_cpu.flatten_all()?.to_vec1()?;
-
-            let k_shape: Vec<usize> = k_cpu.shape().dims().to_vec();
-            let v_shape: Vec<usize> = v_cpu.shape().dims().to_vec();
-
-            layer.k_q8 = Some(Q8Tensor::quantize(&k_data, k_shape));
-            layer.v_q8 = Some(Q8Tensor::quantize(&v_data, v_shape));
-            layer.k_cache = None;
-            layer.v_cache = None;
-        } else {
-            // Cast to storage dtype (F16) and move to CPU
-            layer.k_cache = Some(
-                new_k
-                    .to_dtype(self.storage_dtype)?
-                    .to_device(&Device::Cpu)?,
-            );
-            layer.v_cache = Some(
-                new_v
-                    .to_dtype(self.storage_dtype)?
-                    .to_device(&Device::Cpu)?,
-            );
-            layer.k_q8 = None;
-            layer.v_q8 = None;
+            if let LayerCache::Attention { k, v } = final_cache {
+                let seq = k.dim(1)?;
+                let k_cpu = k.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
+                let v_cpu = v.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
+                let k_data: Vec<f32> = k_cpu.flatten_all()?.to_vec1()?;
+                let v_data: Vec<f32> = v_cpu.flatten_all()?.to_vec1()?;
+                layer.k_q8 = Some(Q8Tensor::quantize(&k_data, k_cpu.shape().dims().to_vec()));
+                layer.v_q8 = Some(Q8Tensor::quantize(&v_data, v_cpu.shape().dims().to_vec()));
+                // Store thin F16 tensors so seq_len() reads the correct value via state.seq_len()
+                layer.state = LayerCache::Attention {
+                    k: k_cpu.narrow(1, 0, seq)?.to_dtype(DType::F16)?,
+                    v: v_cpu.narrow(1, 0, seq)?.to_dtype(DType::F16)?,
+                };
+                return Ok(());
+            }
         }
+
+        // Move to CPU for storage
+        layer.state = match final_cache {
+            LayerCache::Attention { k, v } => {
+                LayerCache::Attention {
+                    k: k.to_device(&Device::Cpu)?.to_dtype(self.storage_dtype)?,
+                    v: v.to_device(&Device::Cpu)?.to_dtype(self.storage_dtype)?,
+                }
+            }
+            LayerCache::Recurrent(s) => LayerCache::Recurrent(s),
+            LayerCache::Quantized(q) => LayerCache::Quantized(q),
+            LayerCache::Empty => LayerCache::Empty,
+        };
 
         Ok(())
     }
 
     /// Get the current sequence length stored in the cache for a given layer.
     pub fn seq_len(&self, layer_id: usize) -> usize {
-        let layer = &self.layers[layer_id];
-        if self.q8_0_enabled {
-            // For Q8, reconstruct from shape[1] (seq dim)
-            layer.k_q8.as_ref()
-                .map(|q| if q.shape.len() >= 2 { q.shape[1] } else { 0 })
-                .unwrap_or(0)
-        } else {
-            layer.k_cache
-                .as_ref()
-                .map(|t| t.dim(1).unwrap_or(0))
-                .unwrap_or(0)
-        }
+        self.layers[layer_id].state.seq_len()
     }
 
-    /// Clear all cached KV data (e.g., starting a new conversation).
+    /// Clear all cached data.
     pub fn clear(&mut self) {
         for layer in &mut self.layers {
-            layer.k_cache = None;
-            layer.v_cache = None;
+            layer.state = LayerCache::Empty;
             layer.k_q8 = None;
             layer.v_q8 = None;
         }
@@ -338,22 +360,21 @@ impl KvCacheManager {
     ///
     /// **Q8 path**: Q8 block slicing is unsupported; Q8 should be disabled
     /// during speculative decoding (per the protocol spec).
+    /// Truncate cache to `pos` tokens.
     pub fn truncate_to(&mut self, pos: usize) {
         for layer in &mut self.layers {
-            // Float path: narrow seq dimension (dim 1) to `pos` tokens.
-            if let Some(ref k) = layer.k_cache.clone() {
-                let seq = k.dim(1).unwrap_or(0);
-                if pos < seq {
-                    layer.k_cache = k.narrow(1, 0, pos).ok();
+            match &mut layer.state {
+                LayerCache::Attention { k, v } => {
+                    let seq = k.dim(1).unwrap_or(0);
+                    if pos < seq {
+                        *k = k.narrow(1, 0, pos).unwrap();
+                        *v = v.narrow(1, 0, pos).unwrap();
+                    }
+                }
+                _ => {
+                    if pos == 0 { layer.state = LayerCache::Empty; }
                 }
             }
-            if let Some(ref v) = layer.v_cache.clone() {
-                let seq = v.dim(1).unwrap_or(0);
-                if pos < seq {
-                    layer.v_cache = v.narrow(1, 0, pos).ok();
-                }
-            }
-            // Q8 path: full block-slice not implemented; clear if pos == 0.
             if pos == 0 {
                 layer.k_q8 = None;
                 layer.v_q8 = None;
@@ -371,17 +392,18 @@ impl KvCacheManager {
                     let v_size = l.v_q8.as_ref().map(|q| q.size_bytes()).unwrap_or(0);
                     k_size + v_size
                 } else {
-                    let k_size = l
-                        .k_cache
-                        .as_ref()
-                        .map(|t| t.elem_count() * t.dtype().size_in_bytes())
-                        .unwrap_or(0);
-                    let v_size = l
-                        .v_cache
-                        .as_ref()
-                        .map(|t| t.elem_count() * t.dtype().size_in_bytes())
-                        .unwrap_or(0);
-                    k_size + v_size
+                    match &l.state {
+                        LayerCache::Attention { k, v } => {
+                            (k.elem_count() + v.elem_count()) * k.dtype().size_in_bytes()
+                        }
+                        LayerCache::Recurrent(s) => {
+                            s.numel() * 4 // FP32
+                        }
+                        LayerCache::Quantized(q) => {
+                            q.projected.len() * 4 // FP32 approx
+                        }
+                        LayerCache::Empty => 0,
+                    }
                 }
             })
             .sum()
@@ -410,41 +432,30 @@ pub trait SessionKvCache: Send + Sync {
     /// Sequence length stored in layer `layer` (0 if empty).
     fn seq_len(&self, layer: usize) -> usize;
 
-    /// Save new K/V tensors for `layer` to the cache.
-    ///
-    /// Maps to `KvCacheManager::save_from_device`. The tensors are
-    /// expected to be on the compute device; the impl handles dtype
-    /// conversion and transfer to CPU RAM.
-    fn append(&mut self, layer: usize, k: &Tensor, v: &Tensor) -> candle_core::Result<()>;
+    /// Save updated layer state.
+    fn save(&mut self, layer: usize, cache: LayerCache) -> candle_core::Result<()>;
 
-    /// Load the K/V tensors for `layer` from the cache to the compute device.
-    ///
-    /// Returns `(None, None)` if the layer has no cached tokens yet.
-    fn load(&self, layer: usize) -> candle_core::Result<(Option<Tensor>, Option<Tensor>)>;
+    /// Load layer state.
+    fn load(&self, layer: usize) -> candle_core::Result<LayerCache>;
 
-    /// Clear all cached KV data (start a new session / conversation).
+    /// Clear all cached data.
     fn clear(&mut self);
 
-    /// Truncate cached sequence to `pos` tokens across all layers.
-    ///
-    /// Required for speculative decoding: after the verifier rejects
-    /// `n_reject` draft tokens, call `truncate_to(verified_len)` to roll
-    /// back the cache without rebuilding it from scratch. See ADR-0006.
+    /// Truncate cached sequence to `pos` tokens.
     fn truncate_to(&mut self, pos: usize);
 }
 
 impl SessionKvCache for KvCacheManager {
     fn seq_len(&self, layer: usize) -> usize {
-        // Delegate to inherent method — avoids ambiguity with trait method name.
         KvCacheManager::seq_len(self, layer)
     }
 
-    fn append(&mut self, layer: usize, k: &Tensor, v: &Tensor) -> candle_core::Result<()> {
-        self.save_from_device(layer, k, v)
+    fn save(&mut self, layer: usize, cache: LayerCache) -> candle_core::Result<()> {
+        self.save_layer(layer, cache)
     }
 
-    fn load(&self, layer: usize) -> candle_core::Result<(Option<Tensor>, Option<Tensor>)> {
-        self.load_to_device(layer)
+    fn load(&self, layer: usize) -> candle_core::Result<LayerCache> {
+        self.load_layer(layer)
     }
 
     fn clear(&mut self) {
@@ -488,26 +499,28 @@ impl MockSessionKvCache {
 
 #[cfg(test)]
 impl SessionKvCache for MockSessionKvCache {
-    fn seq_len(&self, _layer: usize) -> usize { self.seq_count }
+    fn seq_len(&self, _layer: usize) -> usize {
+        self.seq_count
+    }
 
-    fn append(&mut self, _layer: usize, _k: &Tensor, _v: &Tensor) -> candle_core::Result<()> {
-        self.seq_count += 1;
+    fn save(&mut self, _layer: usize, cache: LayerCache) -> candle_core::Result<()> {
+        self.seq_count = cache.seq_len();
         Ok(())
     }
 
-    fn load(&self, _layer: usize) -> candle_core::Result<(Option<Tensor>, Option<Tensor>)> {
-        Ok((None, None))
+    fn load(&self, _layer: usize) -> candle_core::Result<LayerCache> {
+        Ok(LayerCache::Empty)
     }
 
     fn clear(&mut self) {
-        self.seq_count = 0;
         self.clear_count += 1;
+        self.seq_count = 0;
     }
 
     fn truncate_to(&mut self, pos: usize) {
-        self.seq_count = pos;
-        self.last_truncate_pos = pos;
         self.truncate_count += 1;
+        self.last_truncate_pos = pos;
+        self.seq_count = pos;
     }
 }
 
@@ -585,17 +598,18 @@ mod tests {
         let v = Tensor::new(data.clone(), &Device::Cpu)?.reshape((1, 4, 2, 32))?;
 
         // Save
-        mgr.save_from_device(0, &k, &v)?;
+        mgr.save(0, LayerCache::Attention { k: k.clone(), v: v.clone() })?;
         assert_eq!(mgr.seq_len(0), 4);
 
         // Check Q8 blocks exist
         assert!(mgr.layers[0].k_q8.is_some());
-        assert!(mgr.layers[0].k_cache.is_none());
-
+        
         // Load back
-        let (k_loaded, v_loaded) = mgr.load_to_device(0)?;
-        let k_loaded = k_loaded.unwrap();
-        let v_loaded = v_loaded.unwrap();
+        let cache = mgr.load(0)?;
+        let (k_loaded, v_loaded) = match cache {
+            LayerCache::Attention { k, v } => (k, v),
+            _ => panic!("Expected Attention cache"),
+        };
 
         // Shape should be preserved
         assert_eq!(k_loaded.shape().dims(), &[1, 4, 2, 32]);
@@ -623,10 +637,10 @@ mod tests {
         let v = Tensor::zeros((1, 100, 32, 128), DType::F32, &Device::Cpu)?;
 
         let mut mgr_q8 = KvCacheManager::with_q8_0(Device::Cpu, 1);
-        mgr_q8.save_from_device(0, &k, &v)?;
+        mgr_q8.save(0, LayerCache::Attention { k: k.clone(), v: v.clone() })?;
 
         let mut mgr_f16 = KvCacheManager::new(Device::Cpu, 1);
-        mgr_f16.save_from_device(0, &k, &v)?;
+        mgr_f16.save(0, LayerCache::Attention { k: k.clone(), v: v.clone() })?;
 
         let q8_bytes = mgr_q8.memory_usage();
         let f16_bytes = mgr_f16.memory_usage();
@@ -652,7 +666,7 @@ mod tests {
         let mut mgr = KvCacheManager::with_q8_0(Device::Cpu, 2);
         let k = Tensor::zeros((1, 4, 2, 32), DType::F32, &Device::Cpu)?;
         let v = Tensor::zeros((1, 4, 2, 32), DType::F32, &Device::Cpu)?;
-        mgr.save_from_device(0, &k, &v)?;
+        mgr.save(0, LayerCache::Attention { k, v })?;
 
         assert!(mgr.memory_usage() > 0);
         mgr.clear();
@@ -674,20 +688,22 @@ mod tests {
 
         // Save with F16 storage
         let mut mgr_f16 = mgr_f16;
-        mgr_f16.save_from_device(0, &k, &v)?;
+        mgr_f16.save(0, LayerCache::Attention { k: k.clone(), v: v.clone() })?;
 
         // Save with F32 storage
         let mut mgr_f32 = mgr_f32;
-        mgr_f32.save_from_device(0, &k, &v)?;
+        mgr_f32.save(0, LayerCache::Attention { k: k.clone(), v: v.clone() })?;
 
         // F16 should use half the memory
         assert!(mgr_f16.memory_usage() < mgr_f32.memory_usage());
         assert_eq!(mgr_f16.memory_usage() * 2, mgr_f32.memory_usage());
 
         // Load back and check values are close
-        let (k_f16, v_f16) = mgr_f16.load_to_device(0)?;
-        let k_f16 = k_f16.unwrap();
-        let v_f16 = v_f16.unwrap();
+        let cache = mgr_f16.load(0)?;
+        let (k_f16, v_f16) = match cache {
+            LayerCache::Attention { k, v } => (k, v),
+            _ => panic!("Expected Attention cache"),
+        };
 
         // Should be F32 after loading (compute dtype)
         assert_eq!(k_f16.dtype(), DType::F32);
@@ -717,7 +733,7 @@ mod tests {
         // Add 4 tokens to layer 0
         let k = Tensor::zeros((1, 4, 2, 4), DType::F32, &Device::Cpu)?;
         let v = Tensor::zeros((1, 4, 2, 4), DType::F32, &Device::Cpu)?;
-        mgr.save_from_device(0, &k, &v)?;
+        mgr.save(0, LayerCache::Attention { k, v })?;
 
         assert_eq!(mgr.seq_len(0), 4);
         assert_eq!(mgr.seq_len(1), 0); // layer 1 untouched
@@ -730,8 +746,8 @@ mod tests {
         let mut mgr = KvCacheManager::new(Device::Cpu, 2);
         let k = Tensor::zeros((1, 4, 2, 4), DType::F32, &Device::Cpu)?;
         let v = Tensor::zeros((1, 4, 2, 4), DType::F32, &Device::Cpu)?;
-        mgr.save_from_device(0, &k, &v)?;
-        mgr.save_from_device(1, &k, &v)?;
+        mgr.save(0, LayerCache::Attention { k: k.clone(), v: v.clone() })?;
+        mgr.save(1, LayerCache::Attention { k, v })?;
 
         assert!(mgr.memory_usage() > 0);
         mgr.clear();
@@ -747,10 +763,10 @@ mod tests {
         let v = Tensor::zeros((1, 100, 32, 128), DType::F32, &Device::Cpu)?;
 
         let mut mgr_f16 = KvCacheManager::new(Device::Cpu, 1);
-        mgr_f16.save_from_device(0, &k, &v)?;
+        mgr_f16.save(0, LayerCache::Attention { k: k.clone(), v: v.clone() })?;
 
         let mut mgr_f32 = KvCacheManager::with_dtypes(Device::Cpu, 1, DType::F32, DType::F32);
-        mgr_f32.save_from_device(0, &k, &v)?;
+        mgr_f32.save(0, LayerCache::Attention { k, v })?;
 
         // F16 = 2 bytes/elem, F32 = 4 bytes/elem → F16 is exactly half
         let f16_bytes = mgr_f16.memory_usage();

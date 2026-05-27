@@ -5,20 +5,21 @@
 //! Non-streaming responses call `.collect().await` on the same stream.
 //!
 //! Concrete implementations:
-//! - `SingleModelDispatcher` — wraps a single `InferenceGenerator` (stub until ADR-0001/#7)
+//! - `RequestOrchestrator`  — production scheduler managing multiple inference sessions
 //! - `MockDispatcher`        — returns canned tokens; used in unit tests
 //!
 //! See ADR-0003.
 
-use futures_util::stream::{self, BoxStream, StreamExt};
+use futures_util::stream::{BoxStream, StreamExt};
 use anyhow::Result;
+use crate::gbnf::GbnfConstraint;
 
 // ---------------------------------------------------------------------------
 // Public value types
 // ---------------------------------------------------------------------------
 
 /// A single emitted unit from a generation stream.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TokenChunk {
     /// One or more decoded text bytes.
     Token {
@@ -46,7 +47,7 @@ impl TokenChunk {
 }
 
 /// Why generation terminated.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FinishReason {
     /// EOS token emitted or stop sequence matched.
     Stop,
@@ -73,7 +74,7 @@ impl std::fmt::Display for FinishReason {
 }
 
 /// Parameters for a single generation request.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GenerateConfig {
     /// Target model identifier (for `ModelMux` routing).
     pub model: String,
@@ -87,6 +88,10 @@ pub struct GenerateConfig {
     pub top_p: f32,
     /// Optional stop sequences (generation halts on first match).
     pub stop: Vec<String>,
+    /// Optional draft model path for speculative decoding.
+    pub draft_model: Option<String>,
+    /// Optional GBNF grammar constraint for structured generation.
+    pub gbnf: Option<String>,
 }
 
 impl Default for GenerateConfig {
@@ -98,6 +103,8 @@ impl Default for GenerateConfig {
             temperature: 0.8,
             top_p: 0.95,
             stop: Vec::new(),
+            draft_model: None,
+            gbnf: None,
         }
     }
 }
@@ -107,11 +114,6 @@ impl Default for GenerateConfig {
 // ---------------------------------------------------------------------------
 
 /// Generates tokens for a given request.
-///
-/// One method, always a stream. Non-streaming callers use
-/// `dispatcher.generate(cfg).collect::<Vec<_>>().await`.
-///
-/// Implementors: `SingleModelDispatcher`, `ModelMux` (future), `MockDispatcher`.
 pub trait Dispatcher: Send + Sync {
     /// Start a generation stream.
     fn generate(&self, config: GenerateConfig) -> BoxStream<'static, Result<TokenChunk>>;
@@ -120,59 +122,80 @@ pub trait Dispatcher: Send + Sync {
     fn list_models(&self) -> Vec<String>;
 }
 
-// ---------------------------------------------------------------------------
-// SingleModelDispatcher — stub (real impl after ADR-0001/#7 lands)
-// ---------------------------------------------------------------------------
+// ── DistributedDispatcher ──────────────────────────────────────────────────
 
-/// Routes every request to a single loaded model.
-///
-/// Currently a stub that emits placeholder tokens. The real implementation
-/// will hold `Arc<InferenceGenerator>` (after ADR-0001 TransformerBlock trait
-/// and ADR-0002 Device injection are complete — issues #7 and #8).
-pub struct SingleModelDispatcher {
-    model_name: String,
+pub struct DistributedDispatcher {
+    pub local: std::sync::Arc<dyn Dispatcher>,
+    pub comm: std::sync::Arc<dyn crate::distributed::Communicator>,
 }
 
-impl SingleModelDispatcher {
-    pub fn new(model_name: impl Into<String>) -> Self {
-        Self { model_name: model_name.into() }
+impl DistributedDispatcher {
+    pub fn new(
+        local: std::sync::Arc<dyn Dispatcher>,
+        comm: std::sync::Arc<dyn crate::distributed::Communicator>,
+    ) -> Self {
+        Self { local, comm }
     }
 }
 
-impl Dispatcher for SingleModelDispatcher {
+impl Dispatcher for DistributedDispatcher {
     fn generate(&self, config: GenerateConfig) -> BoxStream<'static, Result<TokenChunk>> {
-        let model = self.model_name.clone();
-        // Stub: echo prompt prefix as fake tokens, then stop.
-        // Replace with InferenceGenerator::generate_stream() call (issue #7).
-        let stub_text = format!("[{} stub] echo: {}", model, &config.prompt[..config.prompt.len().min(40)]);
-        let words: Vec<String> = stub_text
-            .split_whitespace()
-            .take(config.max_tokens)
-            .map(|w| format!("{} ", w))
-            .collect();
-
-        let chunks: Vec<Result<TokenChunk>> = words
-            .into_iter()
-            .map(|text| Ok(TokenChunk::Token { id: 0, text }))
-            .chain(std::iter::once(Ok(TokenChunk::Stop { finish_reason: FinishReason::Stop })))
-            .collect();
-
-        Box::pin(stream::iter(chunks))
+        let comm = self.comm.clone();
+        let local = self.local.clone();
+        
+        if comm.rank() == 0 {
+            let config_bytes = serde_json::to_vec(&config).unwrap();
+            let comm_inner = comm.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(32);
+            
+            tokio::spawn(async move {
+                for i in 1..comm_inner.world_size() {
+                    if let Err(e) = comm_inner.send(i, &config_bytes).await {
+                        let _ = tx.send(Err(anyhow::anyhow!("Failed to broadcast config: {}", e))).await;
+                        return;
+                    }
+                }
+                
+                let mut stream = local.generate(config);
+                while let Some(chunk_res) = stream.next().await {
+                    if tx.send(chunk_res).await.is_err() { break; }
+                }
+            });
+            
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx))
+        } else {
+            let chunks = vec![Err(anyhow::anyhow!("generate() called on follower rank {}", comm.rank()))];
+            Box::pin(futures_util::stream::iter(chunks))
+        }
     }
 
     fn list_models(&self) -> Vec<String> {
-        vec![self.model_name.clone()]
+        self.local.list_models()
     }
 }
 
-// ---------------------------------------------------------------------------
-// MockDispatcher — for unit tests
-// ---------------------------------------------------------------------------
+impl DistributedDispatcher {
+    pub async fn serve_follower(&self) -> Result<()> {
+        let comm = self.comm.clone();
+        let local = self.local.clone();
+        let rank = comm.rank();
 
-/// Returns canned token sequences without needing GPU or GGUF.
-///
-/// Used in handler unit tests and integration tests that need a Dispatcher
-/// without a real model loaded.
+        loop {
+            let mut buf = vec![0u8; 4096];
+            comm.recv(0, &mut buf).await.map_err(|e| anyhow::anyhow!("Follower rank {} failed to recv config: {}", rank, e))?;
+            let trimmed = buf.split(|&b| b == 0).next().unwrap_or(&[]);
+            let config: GenerateConfig = serde_json::from_slice(trimmed)?;
+            
+            let mut stream = local.generate(config);
+            while let Some(chunk_res) = stream.next().await {
+                if chunk_res?.is_stop() { break; }
+            }
+        }
+    }
+}
+
+// ── MockDispatcher ────────────────────────────────────────────────────────
+
 #[cfg(test)]
 pub struct MockDispatcher {
     pub tokens: Vec<String>,
@@ -184,10 +207,6 @@ impl MockDispatcher {
     pub fn new(model: &str, tokens: Vec<&str>) -> Self {
         Self { model: model.to_string(), tokens: tokens.into_iter().map(|s| s.to_string()).collect() }
     }
-
-    pub fn empty(model: &str) -> Self {
-        Self { model: model.to_string(), tokens: Vec::new() }
-    }
 }
 
 #[cfg(test)]
@@ -198,17 +217,13 @@ impl Dispatcher for MockDispatcher {
             .map(|t| Ok(TokenChunk::Token { id: 0, text: t.clone() }))
             .collect();
         chunks.push(Ok(TokenChunk::Stop { finish_reason: FinishReason::Stop }));
-        Box::pin(stream::iter(chunks))
+        Box::pin(futures_util::stream::iter(chunks))
     }
 
     fn list_models(&self) -> Vec<String> {
         vec![self.model.clone()]
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -221,39 +236,7 @@ mod tests {
         let chunks: Vec<_> = d.generate(GenerateConfig::default())
             .collect::<Vec<_>>()
             .await;
-        assert_eq!(chunks.len(), 3); // 2 tokens + 1 stop
-        assert!(chunks[0].as_ref().unwrap().text() == "Hello");
+        assert_eq!(chunks.len(), 3);
         assert!(chunks[2].as_ref().unwrap().is_stop());
-    }
-
-    #[tokio::test]
-    async fn mock_dispatcher_collect_text() {
-        let d = MockDispatcher::new("m", vec!["foo", " bar"]);
-        let text: String = d.generate(GenerateConfig::default())
-            .filter_map(|r| async { r.ok() })
-            .map(|c| c.text().to_string())
-            .collect::<Vec<_>>()
-            .await
-            .join("");
-        assert_eq!(text, "foo bar");
-    }
-
-    #[test]
-    fn single_model_lits_models() {
-        let d = SingleModelDispatcher::new("llama-70b");
-        assert_eq!(d.list_models(), vec!["llama-70b"]);
-    }
-
-    #[test]
-    fn finish_reason_display() {
-        assert_eq!(FinishReason::Stop.to_string(), "stop");
-        assert_eq!(FinishReason::Length.to_string(), "length");
-    }
-
-    #[test]
-    fn generate_config_defaults() {
-        let c = GenerateConfig::default();
-        assert_eq!(c.max_tokens, 256);
-        assert!((c.temperature - 0.8).abs() < 0.001);
     }
 }

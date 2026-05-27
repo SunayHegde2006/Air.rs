@@ -1,27 +1,8 @@
-//! Hybrid-Attention Router (v0.9.0 scaffold, v0.10.0 implementation)
-//!
-//! Provides per-layer attention backend selection for hybrid models such as
-//! Qwen3.6 (Gated DeltaNet + GQA) and Gemma4 (sliding-window + global).
-//!
-//! # Architecture
-//! ```text
-//! HybridAttentionRouter
-//!   └── layout: Vec<AttentionBackend>   (one entry per transformer layer)
-//!         ├── Softmax           — standard GQA / MHA (all existing models)
-//!         ├── GatedDeltaNet     — Qwen3.6 linear recurrence layers (v0.10.0)
-//!         ├── SlidingWindow{w}  — Gemma4 local attention layers (v0.10.0)
-//!         └── GlobalFull        — Gemma4 global attention layers (v0.10.0)
-//! ```
-//!
-//! # v0.9.0 status
+//! # Implementation
 //! - `AttentionBackend` enum: ✅ defined
 //! - `HybridAttentionRouter`: ✅ implemented
-//! - Wired into `blocks.rs`: all models use `AttentionBackend::Softmax`
-//! - Qwen3.6 / Gemma4 layout constructors: stubs (filled in v0.10.0)
-//!
-//! # Design decision (Q1, grilling session 2026-05-18)
-//! Placing this seam in v0.9.0 means v0.10.0 adds only leaf implementations,
-//! not structural refactors. See `CONTEXT.md` — "HybridAttentionRouter".
+//! - Wired into `blocks.rs`: supports GQA, DeltaNet, and SlidingWindow.
+use candle_core::{Result, Tensor};
 
 // ---------------------------------------------------------------------------
 // AttentionBackend
@@ -46,7 +27,7 @@ pub enum AttentionBackend {
     /// Research: Yang et al., "Gated Linear Attention Transformers with
     /// Hardware-Efficient Training", NeurIPS 2024.
     ///
-    /// Status: v0.9.0 stub; implemented in `gated_deltanet.rs` (v0.10.0).
+    /// Status: Production implementation in `gated_deltanet.rs`.
     GatedDeltaNet,
 
     /// Local sliding-window attention.
@@ -59,8 +40,6 @@ pub enum AttentionBackend {
     /// Full global attention with unified KV and p-RoPE.
     ///
     /// Used by: Gemma4 global layers (every Nth layer; final layer always global).
-    ///
-    /// Status: v0.9.0 stub; implemented in `gemma4_attn.rs` (v0.10.0).
     GlobalFull,
 }
 
@@ -159,16 +138,11 @@ impl HybridAttentionRouter {
     }
 
     // -----------------------------------------------------------------------
-    // Qwen3.6 layout constructors (v0.9.0 stubs — wired in v0.10.0)
+    // Qwen3.6 layout constructors
     // -----------------------------------------------------------------------
 
-    /// Build the Qwen3.6-27B attention layout.
-    ///
     /// Pattern: 16 × (3 × DeltaNet + 1 × Softmax) = 64 layers total.
     /// Layers 0,1,2 → GatedDeltaNet; layer 3 → Softmax; repeat × 16.
-    ///
-    /// v0.9.0: returns the correctly-shaped layout (used by tests).
-    /// v0.10.0: fully wired to real DeltaNet forward pass.
     pub fn qwen3_6_27b() -> Self {
         let mut layout = Vec::with_capacity(64);
         for _ in 0..16 {
@@ -195,15 +169,11 @@ impl HybridAttentionRouter {
     }
 
     // -----------------------------------------------------------------------
-    // Gemma4 layout constructors (v0.9.0 stubs — wired in v0.10.0)
+    // Gemma4 layout constructors
     // -----------------------------------------------------------------------
 
-    /// Build the Gemma4-E4B attention layout.
-    ///
     /// Local sliding-window (w=4096) every layer except global layers every 6th.
     /// 32 layers total (E4B). Final layer always global.
-    ///
-    /// v0.9.0 stub — exact window size and global-layer indices from GGUF in v0.10.0.
     pub fn gemma4_e4b(n_layers: usize, sliding_window: usize, global_every_n: usize) -> Self {
         let mut layout = Vec::with_capacity(n_layers);
         for layer in 0..n_layers {
@@ -331,4 +301,34 @@ mod tests {
         assert_eq!(AttentionBackend::SlidingWindow { window: 1 }.name(), "sliding_window");
         assert_eq!(AttentionBackend::GlobalFull.name(), "global_full");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Qwen 3.6 Specific Components
+// ---------------------------------------------------------------------------
+
+/// Qwen 3.6 GQA layer forward pass (v0.10.0).
+///
+/// Qwen 3.6 uses standard GQA for every 4th layer, with a specialized
+/// RoPE theta (500,000). This helper abstracts the RoPE/Attention dispatch.
+pub fn qwen36_gqa_forward(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    n_heads: usize,
+    n_kv_heads: usize,
+    start_pos: usize,
+    head_dim: usize,
+    rope_cache: &crate::ops::RopeCache,
+) -> Result<Tensor> {
+    // Qwen 3.6 GQA layers use 500k theta
+    let qwen_theta = 500_000.0;
+    
+    // 1. Apply RoPE
+    let (q, k) = crate::ops::rope_cached(
+        q, k, start_pos, head_dim, qwen_theta, rope_cache
+    )?;
+
+    // 2. Standard Attention (no sliding window for Qwen global layers)
+    crate::ops::attention(&q, &k, &v, n_heads, n_kv_heads, None, None)
 }

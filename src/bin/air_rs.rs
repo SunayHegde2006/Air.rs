@@ -10,6 +10,15 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Instant;
+use std::sync::Arc;
+
+use air_rs::generator::InferenceGenerator;
+use air_rs::loader::GgufLoader;
+use air_rs::model::ModelConfig;
+use air_rs::sampler::SamplerConfig;
+use air_rs::weight_streamer::WeightStreamer;
+use air_rs::scheduler::RequestOrchestrator;
+
 
 // ── CLI argument parsing (hand-rolled, no external dep) ────────────────────
 
@@ -165,39 +174,30 @@ fn run_generate(
     max_tokens: usize,
     temperature: f32,
     top_p: f32,
-    stream: bool,
+    _stream: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Loading model: {}", model.display());
     let start = Instant::now();
 
-    // Attempt to use the compiled Rust engine; gracefully degrade otherwise.
-    #[cfg(feature = "python")]
-    {
-        // When built with --features python, air_rs_lib is available
-        eprintln!("Engine ready in {:.2}s", start.elapsed().as_secs_f64());
-        eprintln!("Generating up to {max_tokens} tokens (temp={temperature}, top_p={top_p})…\n");
-        // Placeholder: real integration wires into air_rs_lib::Generator
-        let _ = (model, prompt, max_tokens, temperature, top_p, stream);
-        eprintln!("[stub] generation would run here — wire to air_rs_lib::Generator");
-    }
+    let streamer = WeightStreamer::open(model)?;
+    let content = streamer.content();
+    let metadata = GgufLoader::extract_metadata(content);
+    let config = ModelConfig::from_gguf_metadata(&metadata);
+    let tokenizer = GgufLoader::extract_tokenizer(content, &metadata);
 
-    #[cfg(not(feature = "python"))]
-    {
-        let _ = (prompt, temperature, top_p);
-        eprintln!("Engine ready in {:.2}s", start.elapsed().as_secs_f64());
-        eprintln!("Generating up to {max_tokens} tokens…\n");
-        if stream {
-            // Simulate streaming output for demonstration
-            let tokens = ["Hello", " from", " Air", ".rs", "!"];
-            for tok in &tokens {
-                print!("{tok}");
-                io::stdout().flush()?;
-            }
-            println!();
-        } else {
-            println!("Hello from Air.rs!");
-        }
-    }
+    let sampler_config = SamplerConfig {
+        temperature,
+        top_p,
+        top_k: 40,
+        repetition_penalty: 1.1,
+    };
+
+    let mut generator = InferenceGenerator::new(config, sampler_config)?;
+
+    eprintln!("Engine ready in {:.2}s", start.elapsed().as_secs_f64());
+    eprintln!("Generating up to {max_tokens} tokens (temp={temperature}, top_p={top_p})…\n");
+
+    let _ = generator.generate(&tokenizer, prompt, max_tokens, &streamer)?;
 
     Ok(())
 }
@@ -207,36 +207,77 @@ fn run_serve(
     port: u16,
     host: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("Loading model: {}", model.display());
-    eprintln!("Starting HTTP server on {host}:{port}");
+    eprintln!("Loading model metadata for server: {}", model.display());
     eprintln!("Endpoints:");
     eprintln!("  POST http://{host}:{port}/v1/chat/completions");
     eprintln!("  POST http://{host}:{port}/v1/completions");
     eprintln!("  GET  http://{host}:{port}/v1/models");
     eprintln!("  GET  http://{host}:{port}/health");
     eprintln!("\nPress Ctrl-C to stop.");
-    // Real implementation: wire to air_rs_lib::ApiServer
-    // For now, block forever
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
-    }
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    let model_name = model.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let streamer = Arc::new(WeightStreamer::open(model)?);
+    let tokenizer = GgufLoader::extract_tokenizer(streamer.content(), &GgufLoader::extract_metadata(streamer.content()));
+    let config = ModelConfig::from_gguf_metadata(&GgufLoader::extract_metadata(streamer.content()));
+    let generator = InferenceGenerator::new(config, SamplerConfig::default())?;
+    
+    let dispatcher = Arc::new(RequestOrchestrator::new(
+        model_name.clone(),
+        generator,
+        tokenizer,
+        streamer,
+    ));
+
+    rt.block_on(async {
+        let app = air_rs::api::create_router_with_dispatcher(model_name, dispatcher);
+        let addr = format!("{}:{}", host, port);
+        eprintln!("Starting HTTP server on {addr}");
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        axum::serve(listener, app).await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+
+    Ok(())
 }
 
 fn run_bench(
-    model: &std::path::Path,
+    model_path: &std::path::Path,
     n_tokens: usize,
     n_runs: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("Loading model: {}", model.display());
-    eprintln!("Benchmark: {n_tokens} tokens × {n_runs} runs\n");
+    eprintln!("Loading model: {}", model_path.display());
+    
+    let streamer = WeightStreamer::open(model_path)?;
+    let loader = air_rs::loader::GgufLoader::new(model_path)?; // Fix 1: loader::new
+    let config = loader.model_config.clone(); // Access field
+    let sampler = air_rs::sampler::SamplerConfig::default();
+    let mut generator = air_rs::generator::InferenceGenerator::new(config, sampler)?;
+    
+    // Auto-enable W.C.P.S.R. for Qwen 3.6
+    generator.enable_wavefront(8, false, &streamer).ok();
+
+    let prompt = "The quick brown fox";
+    eprintln!("Benchmark: {n_tokens} tokens × {n_runs} runs (Prompt: '{prompt}')\n");
 
     let mut tps_samples = Vec::new();
     for run in 0..n_runs {
         let t0 = Instant::now();
-        // Placeholder: counts a sleep as a "run"
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        
+        // Sync generate call
+        let _text = generator.generate(
+            &loader.tokenizer, // Access field
+            prompt,
+            n_tokens,
+            &streamer
+        )?;
+        
         let elapsed = t0.elapsed().as_secs_f64();
-        let tps = n_tokens as f64 / elapsed;
+        let tokens_count = n_tokens; // approximate or read from metrics
+        let tps = tokens_count as f64 / elapsed;
         tps_samples.push(tps);
         eprintln!("  Run {}/{n_runs}: {tps:.1} tok/s", run + 1);
     }
@@ -246,7 +287,7 @@ fn run_bench(
     let max_tps = tps_samples.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
     println!("\n=== Benchmark Results ===");
-    println!("  Model:    {}", model.display());
+    println!("  Model:    {}", model_path.display()); // Fix 2: model_path
     println!("  Tokens:   {n_tokens}");
     println!("  Runs:     {n_runs}");
     println!("  Mean TPS: {mean_tps:.1}");

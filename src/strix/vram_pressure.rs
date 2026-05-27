@@ -60,6 +60,8 @@ pub enum PressureAction {
     CompressKvCache,
     /// Emergency: evict all non-pinned tensors.
     EmergencyEvict,
+    /// Recommendation for the prefetch Flight Slot size (bytes).
+    SetFlightSlot { size_bytes: usize },
 }
 
 // ── VramPressureManager ─────────────────────────────────────────────────
@@ -162,6 +164,21 @@ impl VramPressureManager {
             ],
 
             PressureLevel::Critical => vec![PressureAction::EmergencyEvict],
+        }
+    }
+
+    /// Optimal Flight Slot size based on pressure (§12.4).
+    ///
+    /// - Green: 512MB (maximum throughut)
+    /// - Yellow: 256MB (balanced)
+    /// - Orange: 128MB (aggressive memory saving)
+    /// - Red/Critical: 64MB (OOM avoidance)
+    pub fn recommended_flight_slot_size(&self, level: PressureLevel) -> usize {
+        match level {
+            PressureLevel::Green => 512 * 1024 * 1024,
+            PressureLevel::Yellow => 256 * 1024 * 1024,
+            PressureLevel::Orange => 128 * 1024 * 1024,
+            _ => 64 * 1024 * 1024,
         }
     }
 }

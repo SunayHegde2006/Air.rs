@@ -18,13 +18,13 @@ use crate::dual_rope::DualRopeCache;
 //   RMSNorm(x) = x * weight / sqrt(mean(x²) + eps)
 //
 pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
-    let x_dtype = x.dtype();
+    let in_dtype = x.dtype();
     // Upcast to f32 for numerical stability during norm computation
-    let x = x.to_dtype(DType::F32)?;
-    let variance = x.sqr()?.mean_keepdim(D::Minus1)?;
-    let x_normed = x.broadcast_div(&(variance + eps)?.sqrt()?)?;
-    // Cast back and apply learned scale
-    x_normed.to_dtype(x_dtype)?.broadcast_mul(weight)
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let variance = x_f32.sqr()?.mean_keepdim(D::Minus1)?;
+    let x_normed = x_f32.broadcast_div(&(variance + eps)?.sqrt()?)?;
+    // Apply learned scale (in F32) and cast back to input dtype
+    x_normed.broadcast_mul(&weight.to_dtype(DType::F32)?)?.to_dtype(in_dtype)
 }
 
 // ---------------------------------------------------------------------------
@@ -52,7 +52,6 @@ pub fn layer_norm(
     bias: Option<&Tensor>,
     eps: f64,
 ) -> Result<Tensor> {
-    let x_dtype = x.dtype();
     // Upcast to f32 for numerical stability
     let x_f32 = x.to_dtype(DType::F32)?;
     // mean(x) over last dim, kept for broadcasting
@@ -63,9 +62,9 @@ pub fn layer_norm(
     // Normalize
     let x_normed = x_centered.broadcast_div(&(variance + eps)?.sqrt()?)?;
     // Apply learned affine transform: x_normed * weight + bias
-    let scaled = x_normed.to_dtype(x_dtype)?.broadcast_mul(weight)?;
+    let scaled = x_normed.broadcast_mul(&weight.to_dtype(DType::F32)?)?;
     match bias {
-        Some(b) => scaled.broadcast_add(b),
+        Some(b) => scaled.broadcast_add(&b.to_dtype(DType::F32)?),
         None => Ok(scaled),
     }
 }
@@ -80,14 +79,14 @@ pub fn layer_norm(
 ///
 /// Applied in all Gemma 2/3/4 and CodeGemma transformer layers.
 /// Unlike standard RMSNorm, the bias-free scale is shifted by 1.
-pub fn rms_norm_gemma(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
-    let x_dtype = x.dtype();
+pub fn rms_norm_gemma(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+    let dtype = x.dtype();
     let x_f32 = x.to_dtype(DType::F32)?;
-    let variance = x_f32.sqr()?.mean_keepdim(D::Minus1)?;
-    let x_normed = x_f32.broadcast_div(&(variance + eps)?.sqrt()?)?;
-    // Effective weight = stored_weight + 1.0
-    let effective_weight = (weight + 1.0_f64)?;
-    x_normed.to_dtype(x_dtype)?.broadcast_mul(&effective_weight)
+    let rms = (x_f32.sqr()?.mean_keepdim(D::Minus1)? + eps as f64)?.sqrt()?;
+    let x_normed = x_f32.broadcast_div(&rms)?;
+    // Effective weight = stored_weight + 1.0 (residual scaling)
+    let effective_weight = (weight.to_dtype(DType::F32)? + 1.0_f64)?;
+    x_normed.broadcast_mul(&effective_weight)?.to_dtype(dtype)
 }
 
 // ---------------------------------------------------------------------------
@@ -247,37 +246,14 @@ pub fn rope_cached(
 /// * `backend`   — `AttentionBackend` for this layer (from `HybridAttentionRouter`)
 /// * `cache`     — `DualRopeCache` pre-built from GGUF metadata
 pub fn rope_dual_cached(
-    q:         &Tensor,
-    k:         &Tensor,
+    q: &Tensor,
+    k: &Tensor,
     start_pos: usize,
-    head_dim:  usize,
-    backend:   AttentionBackend,
-    cache:     &DualRopeCache,
+    _head_dim: usize,
+    backend: AttentionBackend,
+    cache: &crate::dual_rope::DualRopeCache,
 ) -> Result<(Tensor, Tensor)> {
-    let device  = q.device();
-    let dtype   = q.dtype();
-    let seq_len = q.dim(1)?;
-
-    // Select the correct inv_freq table
-    let freq_table = cache.table_for(backend);
-    let half = head_dim / 2;
-
-    // Build inv_freq as a Candle tensor (f32 for compatibility with existing RoPE path)
-    let inv_freq_f32: Vec<f32> = freq_table.inv_freq.iter().map(|&f| f as f32).collect();
-    let inv_freq_t = Tensor::new(inv_freq_f32, device)?;
-
-    // Position indices [start_pos .. start_pos+seq_len]
-    let positions: Vec<f32> = (start_pos..start_pos + seq_len).map(|p| p as f32).collect();
-    let positions_t = Tensor::new(positions, device)?.unsqueeze(1)?;
-
-    // angles [seq_len × half_dim]
-    let angles = positions_t.matmul(&inv_freq_t.unsqueeze(0)?)?;
-    let cos = angles.cos()?.to_dtype(dtype)?;
-    let sin = angles.sin()?.to_dtype(dtype)?;
-
-    let q_rot = apply_rotary_emb(q, &cos, &sin)?;
-    let k_rot = apply_rotary_emb(k, &cos, &sin)?;
-    Ok((q_rot, k_rot))
+    cache.apply(q, k, start_pos, backend)
 }
 
 /// Uncached rope — retained for backward compatibility and tests.
@@ -313,8 +289,18 @@ pub fn rope(
     Ok((q_rotated, k_rotated))
 }
 
+/// Apply rotary embedding to Q and K tensors using pre-computed cos/sin tables.
+pub fn apply_rotary_emb_with_tables(
+    q: &Tensor,
+    k: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+) -> Result<(Tensor, Tensor)> {
+    Ok((apply_rotary_emb(q, cos, sin)?, apply_rotary_emb(k, cos, sin)?))
+}
+
 /// Apply rotary embedding to a tensor of shape [batch, seq_len, n_heads, head_dim]
-fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+pub(crate) fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
     let half = x.dim(D::Minus1)? / 2;
     // Split last dimension into two halves
     let x1 = x.narrow(D::Minus1, 0, half)?;
@@ -350,6 +336,8 @@ pub fn attention(
     v: &Tensor,
     n_heads: usize,
     n_kv_heads: usize,
+    window_size: Option<usize>,
+    custom_mask: Option<&Tensor>,
 ) -> Result<Tensor> {
     #[cfg(feature = "flash-attn")]
     {
@@ -357,11 +345,106 @@ pub fn attention(
         // Fall back to standard path on CPU or if dtype isn't supported.
         let on_cuda = !q.device().is_cpu();
         let dtype_ok = matches!(q.dtype(), DType::F16 | DType::BF16);
-        if on_cuda && dtype_ok {
-            return flash_grouped_query_attention(q, k, v, n_heads, n_kv_heads);
+        // Flash-attn currently doesn't support custom masks for tree verification.
+        if on_cuda && dtype_ok && custom_mask.is_none() {
+            return flash_grouped_query_attention(q, k, v, n_heads, n_kv_heads, window_size);
         }
     }
-    grouped_query_attention(q, k, v, n_heads, n_kv_heads)
+    match window_size {
+        Some(w) => sliding_window_gqa(q, k, v, n_heads, n_kv_heads, w, 0, custom_mask), 
+        None => grouped_query_attention(q, k, v, n_heads, n_kv_heads, custom_mask),
+    }
+}
+
+/// Gemma 4 Attention — includes logit softcapping.
+///
+/// Gemma 4 applies `cap * tanh(logits / cap)` before softmax to prevent
+/// logit explosion in long-context or high-precision scenarios.
+///
+/// Cap is typically 50.0 for attention.
+pub fn gemma4_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    n_heads: usize,
+    n_kv_heads: usize,
+    window_size: Option<usize>,
+    custom_mask: Option<&Tensor>,
+    softcap: f64,
+) -> Result<Tensor> {
+    #[cfg(feature = "flash-attn")]
+    {
+        let on_cuda = !q.device().is_cpu();
+        let dtype_ok = matches!(q.dtype(), DType::F16 | DType::BF16);
+        if on_cuda && dtype_ok && custom_mask.is_none() {
+            let head_dim = q.dim(D::Minus1)?;
+            let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+
+            let repeat_factor = n_heads / n_kv_heads;
+            let (k_exp, v_exp) = if repeat_factor > 1 {
+                let (batch, seq_kv, _n_kv, hd) = k.dims4()?;
+                let k_exp = k.unsqueeze(3)?
+                    .expand(&[batch, seq_kv, n_kv_heads, repeat_factor, hd])?
+                    .contiguous()?
+                    .reshape(&[batch, seq_kv, n_heads, hd])?;
+                let v_exp = v.unsqueeze(3)?
+                    .expand(&[batch, seq_kv, n_kv_heads, repeat_factor, hd])?
+                    .contiguous()?
+                    .reshape(&[batch, seq_kv, n_heads, hd])?;
+                (k_exp, v_exp)
+            } else {
+                (k.clone(), v.clone())
+            };
+
+            let flash = candle_flash_attn::FlashAttn {
+                softmax_scale,
+                alibi_slopes: None,
+                window_size_left: window_size,
+                window_size_right: Some(0),
+                softcap: Some(softcap as f32),
+            };
+            return q.contiguous()?.apply_op3_no_bwd(&k_exp.contiguous()?, &v_exp.contiguous()?, &flash);
+        }
+    }
+
+    let head_dim = q.dim(D::Minus1)?;
+    let scale = 1.0 / (head_dim as f64).sqrt();
+
+    // 1. Matmul: [batch, heads, seq_q, head_dim] × [batch, heads, head_dim, seq_kv]
+    let q_t = q.transpose(1, 2)?.contiguous()?;
+    let k_t = k.transpose(1, 2)?.contiguous()?;
+    let v_t = v.transpose(1, 2)?.contiguous()?;
+
+    let repeat_factor = n_heads / n_kv_heads;
+    let (k_exp, v_exp) = if repeat_factor > 1 {
+        (repeat_kv(&k_t, repeat_factor)?, repeat_kv(&v_t, repeat_factor)?)
+    } else {
+        (k_t, v_t)
+    };
+
+    let k_t_final = k_exp.transpose(D::Minus2, D::Minus1)?;
+    let mut scores = (q_t.matmul(&k_t_final)? * scale)?;
+
+    // 2. Logit Soft-capping: cap * tanh(scores / cap)
+    scores = crate::moe::softcap_logits(&scores, softcap)?;
+
+    // 3. Masking
+    let seq_q = scores.dim(D::Minus2)?;
+    let seq_kv = scores.dim(D::Minus1)?;
+    
+    let scores = if let Some(mask) = custom_mask {
+        apply_tree_mask(&scores, mask)?
+    } else if let Some(w) = window_size {
+        sliding_window_attention(&scores, seq_q, seq_kv, w, 0)?
+    } else {
+        apply_causal_mask(&scores, seq_q, seq_kv)?
+    };
+
+    // 4. Softmax + Value output
+    let weights = softmax(&scores, D::Minus1)?;
+    let output = weights.matmul(&v_exp)?;
+
+    output.transpose(1, 2)?.contiguous()
 }
 
 // ---------------------------------------------------------------------------
@@ -374,11 +457,9 @@ pub fn attention(
 /// Input shapes: [batch, seq, heads, dim]
 #[cfg(feature = "flash-attn")]
 pub fn flash_grouped_query_attention(
-    q: &Tensor,     // [batch, seq_q, n_heads, head_dim]
-    k: &Tensor,     // [batch, seq_kv, n_kv_heads, head_dim]
-    v: &Tensor,     // [batch, seq_kv, n_kv_heads, head_dim]
     n_heads: usize,
     n_kv_heads: usize,
+    window_size: Option<usize>,
 ) -> Result<Tensor> {
     let head_dim = q.dim(D::Minus1)?;
     let softmax_scale = 1.0 / (head_dim as f32).sqrt();
@@ -413,7 +494,7 @@ pub fn flash_grouped_query_attention(
     let flash = candle_flash_attn::FlashAttn {
         softmax_scale,
         alibi_slopes: None,
-        window_size_left: None,
+        window_size_left: window_size,
         window_size_right: Some(0), // causal: can only attend to current + past
         softcap: None,
     };
@@ -432,6 +513,7 @@ pub fn grouped_query_attention(
     v: &Tensor,     // [batch, total_seq, n_kv_heads, head_dim]
     n_heads: usize,
     n_kv_heads: usize,
+    custom_mask: Option<&Tensor>,
 ) -> Result<Tensor> {
     let head_dim = q.dim(D::Minus1)?;
     let scale = 1.0 / (head_dim as f64).sqrt();
@@ -462,7 +544,12 @@ pub fn grouped_query_attention(
     // Causal mask: prevent attending to future positions
     let seq_q = attn_weights.dim(D::Minus2)?;
     let seq_kv = attn_weights.dim(D::Minus1)?;
-    let attn_weights = apply_causal_mask(&attn_weights, seq_q, seq_kv)?;
+    
+    let attn_weights = if let Some(mask) = custom_mask {
+        apply_tree_mask(&attn_weights, mask)?
+    } else {
+        apply_causal_mask(&attn_weights, seq_q, seq_kv)?
+    };
 
     // Softmax over key dimension
     let attn_weights = softmax(&attn_weights, D::Minus1)?;
@@ -502,21 +589,21 @@ fn repeat_kv(x: &Tensor, repeat: usize) -> Result<Tensor> {
 //
 pub fn silu_ffn(
     x: &Tensor,
-    w_gate: &candle_core::quantized::QMatMul,  // [intermediate_dim, hidden_dim] quantized
-    w_up: &candle_core::quantized::QMatMul,    // [intermediate_dim, hidden_dim] quantized
-    w_down: &candle_core::quantized::QMatMul,  // [hidden_dim, intermediate_dim] quantized
+    w_gate: &candle_core::quantized::QMatMul,
+    w_up: &candle_core::quantized::QMatMul,
+    w_down: &candle_core::quantized::QMatMul,
 ) -> Result<Tensor> {
     use candle_core::Module;
-
-    // gate_proj(x) and up_proj(x): quantized linear projections
-    let gate = w_gate.forward(x)?;
-    let up = w_up.forward(x)?;
+    let in_dtype = x.dtype();
+    // Enforce F32 input for quantized matmul on CUDA to avoid "unsupported dtype F16"
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let gate = w_gate.forward(&x_f32)?;
+    let up = w_up.forward(&x_f32)?;
 
     // SiLU activation on gate, then element-wise multiply with up
     let activated = silu(&gate)?.mul(&up)?;
 
-    // down_proj: project back to hidden_dim (quantized)
-    w_down.forward(&activated)
+    w_down.forward(&activated.to_dtype(DType::F32)?)?.to_dtype(in_dtype)
 }
 
 /// SiLU (Sigmoid Linear Unit): x * σ(x) = x / (1 + exp(-x))
@@ -604,6 +691,7 @@ pub fn sliding_window_gqa(
     n_kv_heads: usize,
     window_size: usize,
     start_pos: usize,
+    custom_mask: Option<&Tensor>,
 ) -> Result<Tensor> {
     let (batch, seq_q, _n_heads_q, head_dim) = q.dims4()?;
     let (_batch, seq_kv, _n_kv_heads, _head_dim_kv) = k.dims4()?;
@@ -632,8 +720,12 @@ pub fn sliding_window_gqa(
     let k_exp_t = k_exp.transpose(2, 3)?;
     let scores = (q_t.matmul(&k_exp_t)? * scale)?;
 
-    // Apply sliding-window causal mask
-    let scores = sliding_window_attention(&scores, seq_q, seq_kv, window_size, start_pos)?;
+    // Apply sliding-window causal mask or custom mask
+    let scores = if let Some(mask) = custom_mask {
+        apply_tree_mask(&scores, mask)?
+    } else {
+        sliding_window_attention(&scores, seq_q, seq_kv, window_size, start_pos)?
+    };
 
     // Softmax + weighted sum
     let weights = softmax(&scores, D::Minus1)?;
@@ -722,6 +814,30 @@ pub fn apply_causal_mask_phased(
     apply_causal_mask(scores, seq_q, seq_kv)
 }
 
+/// Apply a custom tree mask to attention scores.
+///
+/// Each token in a speculative tree can only attend to its ancestors.
+/// The mask should be `[batch, 1, seq_q, seq_kv]` where `1` indicates
+/// allowed attention and `0` indicates blocked (-inf).
+pub fn apply_tree_mask(
+    scores: &Tensor,
+    mask: &Tensor,
+) -> Result<Tensor> {
+    let (b, h, q, k) = scores.dims4()?;
+    
+    // Broadcast mask to [b, h, q, k]
+    let mask = mask
+        .broadcast_as((b, h, q, k))?
+        .to_dtype(scores.dtype())?;
+        
+    // Apply: score = where(mask == 1, score, -inf)
+    let on_true = scores.clone();
+    let on_false = Tensor::full(f32::NEG_INFINITY, (b, h, q, k), scores.device())?
+        .to_dtype(scores.dtype())?;
+        
+    mask.where_cond(&on_true, &on_false)
+}
+
 // ---------------------------------------------------------------------------
 // I1 — Sliding Window Attention (Mistral, Gemma 3, StarCoder2)
 // ---------------------------------------------------------------------------
@@ -760,28 +876,42 @@ pub fn sliding_window_attention(
     start_pos: usize,
 ) -> Result<Tensor> {
     let device = scores.device();
-    let dtype = scores.dtype();
-    // Build the mask: 1 = attend, 0 = mask out
-    // For query position q_i (absolute = start_pos + i) and key position k_j (absolute = j):
-    //   attend if: k_j <= q_i (causal) AND k_j >= q_i - window_size + 1 (sliding)
-    let neg_inf = f32::NEG_INFINITY;
+    let dtype  = scores.dtype();
 
-    let mut mask_data = vec![0.0f32; seq_q * seq_kv];
-    for i in 0..seq_q {
-        let q_abs = start_pos + i;
-        for j in 0..seq_kv {
-            let k_abs = j; // KV positions are absolute (0..seq_kv)
-            let causal_ok = k_abs <= q_abs;
-            let window_ok = k_abs + window_size > q_abs; // k_abs >= q_abs - window_size + 1
-            if !causal_ok || !window_ok {
-                mask_data[i * seq_kv + j] = neg_inf;
-            }
-        }
-    }
+    // Build [seq_q, 1] absolute query positions
+    let q_indices = Tensor::arange(start_pos as u32, (start_pos + seq_q) as u32, device)?
+        .to_dtype(DType::F32)?
+        .unsqueeze(1)?;
 
-    let mask = Tensor::from_vec(mask_data, (1, 1, seq_q, seq_kv), device)?
-        .to_dtype(dtype)?;
-    scores.broadcast_add(&mask)
+    // Build [1, seq_kv] absolute key positions
+    let k_indices = Tensor::arange(0u32, seq_kv as u32, device)?
+        .to_dtype(DType::F32)?
+        .unsqueeze(0)?;
+
+    // causal: k > q  (must mask out)
+    let causal_mask = k_indices.broadcast_gt(&q_indices)?;  // [seq_q, seq_kv] bool
+
+    // window: k < q - window_size + 1  (too old, must mask out)
+    // Compute q - (window_size-1) as a [seq_q,1] tensor
+    let window_offset = Tensor::full(
+        (window_size as f32) - 1.0,
+        (seq_q, 1),
+        device,
+    )?.to_dtype(DType::F32)?;
+    let q_window_start = q_indices.sub(&window_offset)?;
+    let window_mask = k_indices.broadcast_lt(&q_window_start)?; // [seq_q, seq_kv] bool
+
+    // Combine: mask out where causal OR window
+    // Use u8 arithmetic (logical OR = max of {0,1} values)
+    let combined = causal_mask
+        .to_dtype(candle_core::DType::U8)?
+        .maximum(&window_mask.to_dtype(candle_core::DType::U8)?)?
+        .to_dtype(candle_core::DType::U8)?
+        .unsqueeze(0)?
+        .unsqueeze(0)?; // [1, 1, seq_q, seq_kv]
+
+    let neg_inf = Tensor::new(&[f32::NEG_INFINITY], device)?.to_dtype(dtype)?;
+    combined.where_cond(&neg_inf.broadcast_as(scores.shape())?, scores)
 }
 
 // ---------------------------------------------------------------------------
@@ -1468,6 +1598,54 @@ pub fn rope_interleaved(
     Ok((apply_interleaved(q)?, apply_interleaved(k)?))
 }
 
+// ---------------------------------------------------------------------------
+// SSM Operations — 1D Convolution & State Management
+// ---------------------------------------------------------------------------
+
+/// Apply causal 1D depthwise convolution.
+///
+/// # Arguments
+/// * `x`      — input tensor `[batch, heads, dim_per_head]` or `[batch, dim]`
+/// * `weight` — depthwise kernel `[dim, kernel_size]`
+/// * `state`  — optional previous tokens `[batch, dim, kernel_size - 1]`
+///
+/// Returns `(output, next_state)`.
+pub fn apply_conv1d_causal(
+    x: &Tensor,
+    weight: &Tensor,
+    state: Option<&Tensor>,
+) -> Result<(Tensor, Tensor)> {
+    let dims = x.dims();
+    let batch = dims[0];
+    let dim = dims[dims.len() - 1];
+    let w_dims = weight.dims();
+    let kernel_size = w_dims[w_dims.len() - 1];
+    
+    // x: [batch, ..., dim] -> [batch, ..., dim, 1]
+    let x_expanded = x.unsqueeze(candle_core::D::Minus1)?;
+    
+    // Concat with state: [batch, ..., dim, kernel_size]
+    let full = if let Some(s) = state {
+        Tensor::cat(&[s, &x_expanded], candle_core::D::Minus1)?
+    } else {
+        // Zero-padding for the first token
+        let mut p_shape = x.shape().dims().to_vec();
+        p_shape.push(kernel_size - 1);
+        let padding = Tensor::zeros(p_shape, x.dtype(), x.device())?;
+        Tensor::cat(&[&padding, &x_expanded], candle_core::D::Minus1)?
+    };
+    
+    // depthwise conv: dot product of [batch, ..., dim, kernel_size] and [dim, kernel_size]
+    // output[b, ..., d] = sum_j (full[b, ..., d, j] * weight[d, j])
+    // We can use broadcast_mul then sum over the last dimension.
+    let out = (full.broadcast_mul(weight)?.sum(candle_core::D::Minus1))?;
+    
+    // next_state: [batch, ..., dim, kernel_size - 1] (last kernel_size - 1 tokens)
+    let next_state = full.narrow(candle_core::D::Minus1, 1, kernel_size - 1)?;
+    
+    Ok((out, next_state))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1628,7 +1806,7 @@ pub fn fp4_attention(
         .to_dtype(original_dtype)?;
 
     // Standard GQA with FP4-degraded Q and K.
-    grouped_query_attention(&q_qt, &k_qt, v, n_heads, n_kv_heads)
+    grouped_query_attention(&q_qt, &k_qt, v, n_heads, n_kv_heads, None)
 }
 
 // ============================================================================
@@ -1874,7 +2052,7 @@ pub fn gated_attention(
     n_heads: usize,
     n_kv_heads: usize,
 ) -> Result<Tensor> {
-    let attn_out = grouped_query_attention(q, k, v, n_heads, n_kv_heads)?;
+    let attn_out = grouped_query_attention(q, k, v, n_heads, n_kv_heads, None)?;
     gated_attention_output(&attn_out, x, n_heads)
 }
 
@@ -2094,4 +2272,67 @@ mod ocs_attn_tests {
         assert_eq!(out.dims(), &[1, 4, 2, 8]);
         Ok(())
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Gemma 4 MoE Routing (Sigmoid-based)
+// ---------------------------------------------------------------------------
+
+/// Sigmoid-based MoE routing for Gemma 4.
+pub fn gemma_moe_route(
+    x: &Tensor,
+    w_router: &candle_core::quantized::QMatMul,
+    top_k: usize,
+) -> Result<(Vec<Vec<usize>>, Tensor)> {
+    use candle_core::Module;
+    let logits = w_router.forward(x)?; // [batch, seq, n_experts]
+    
+    // Apply sigmoid independently
+    let scores = {
+        let neg_logits = logits.neg()?;
+        (neg_logits.exp()? + 1.0_f64)?.recip()?
+    };
+    
+    let (batch, seq, n_experts) = scores.dims3()?;
+    let scores_flat = scores.reshape((batch * seq, n_experts))?;
+    
+    // For each token, pick top-k expert indices
+    let scores_cpu = scores_flat.to_vec2::<f32>()?;
+    let mut all_indices = Vec::with_capacity(scores_cpu.len());
+    let mut all_weights = Vec::with_capacity(scores_cpu.len());
+    
+    for row in scores_cpu {
+        let mut indexed: Vec<(usize, f32)> = row.into_iter().enumerate().collect();
+        indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        
+        let mut top_idx = Vec::with_capacity(top_k);
+        let mut top_wt = Vec::with_capacity(top_k);
+        for i in 0..top_k {
+            top_idx.push(indexed[i].0);
+            top_wt.push(indexed[i].1);
+        }
+        all_indices.push(top_idx);
+        all_weights.push(top_wt);
+    }
+    
+    // Convert weights back to tensor [batch * seq, top_k]
+    let weights_flat = Tensor::new(all_weights.into_iter().flatten().collect::<Vec<f32>>(), scores.device())?
+        .reshape((batch * seq, top_k))?;
+        
+    Ok((all_indices, weights_flat))
+}
+
+/// Compute weighted sum of expert outputs for Gemma 4.
+pub fn gemma_moe_weighted_sum(
+    expert_outputs: &[Tensor], // vector of [batch * seq, d_model]
+    weights: &Tensor,           // [batch * seq, top_k]
+) -> Result<Tensor> {
+    let top_k = expert_outputs.len();
+    let mut out = expert_outputs[0].broadcast_mul(&weights.narrow(1, 0, 1)?)?;
+    for i in 1..top_k {
+        let scaled = expert_outputs[i].broadcast_mul(&weights.narrow(1, i, 1)?)?;
+        out = (out + scaled)?;
+    }
+    Ok(out)
 }

@@ -87,7 +87,7 @@ impl std::fmt::Display for CompressionScheme {
 pub struct PrefixEntry {
     /// Per-layer KV tensors: `layers[i] = (K_cache, V_cache)`.
     /// `None` when a layer has no cached tokens (empty prefix).
-    pub layers: Vec<(Option<Tensor>, Option<Tensor>)>,
+    pub layers: Vec<crate::kv_cache::LayerCache>,
     /// How the tensors in this entry are encoded.
     pub scheme: CompressionScheme,
     /// Number of tokens encoded in this prefix (system prompt length).
@@ -97,19 +97,19 @@ pub struct PrefixEntry {
 }
 
 impl PrefixEntry {
-    fn estimate_size(layers: &[(Option<Tensor>, Option<Tensor>)]) -> u64 {
+    fn estimate_size(layers: &[crate::kv_cache::LayerCache]) -> u64 {
         layers
             .iter()
-            .map(|(k, v)| {
-                let k_bytes = k
-                    .as_ref()
-                    .map(|t| t.elem_count() * t.dtype().size_in_bytes())
-                    .unwrap_or(0);
-                let v_bytes = v
-                    .as_ref()
-                    .map(|t| t.elem_count() * t.dtype().size_in_bytes())
-                    .unwrap_or(0);
-                (k_bytes + v_bytes) as u64
+            .map(|cache| {
+                match cache {
+                    crate::kv_cache::LayerCache::Attention { k, v } => {
+                        (k.elem_count() * k.dtype().size_in_bytes() + v.elem_count() * v.dtype().size_in_bytes()) as u64
+                    }
+                    crate::kv_cache::LayerCache::Recurrent(s) => {
+                        (s.numel() * 4) as u64
+                    }
+                    _ => 0,
+                }
             })
             .sum()
     }
@@ -180,14 +180,10 @@ impl PrefixKvCache {
         // Snapshot all layers
         let mut layers = Vec::with_capacity(n_layers);
         for layer in 0..n_layers {
-            let (k, v) = cache
+            let cache_state = cache
                 .load(layer)
                 .map_err(|e| anyhow::anyhow!("prefix store: load layer {layer}: {e}"))?;
-
-            // Clone tensors so this entry owns independent storage
-            let k_owned = k;
-            let v_owned = v;
-            layers.push((k_owned, v_owned));
+            layers.push(cache_state);
         }
 
         let size_bytes = PrefixEntry::estimate_size(&layers);
@@ -233,17 +229,10 @@ impl PrefixKvCache {
 
         cache.clear();
 
-        for (layer, (k, v)) in entry.layers.iter().enumerate() {
-            match (k, v) {
-                (Some(k), Some(v)) => {
-                    cache
-                        .append(layer, k, v)
-                        .map_err(|e| anyhow::anyhow!("prefix restore: append layer {layer}: {e}"))?;
-                }
-                _ => {
-                    // Layer has no cached data — leave empty
-                }
-            }
+        for (layer, cache_state) in entry.layers.iter().enumerate() {
+            cache
+                .save(layer, cache_state.clone())
+                .map_err(|e| anyhow::anyhow!("prefix restore: save layer {layer}: {e}"))?;
         }
 
         Ok(Some(entry.prefix_len))
@@ -350,8 +339,7 @@ mod tests {
     fn store_and_contains() {
         let mut prefix = PrefixKvCache::new(4);
         let mock = MockSessionKvCache::new();
-        // Empty mock → no tensors, but prefix_len=1 is still allowed only after append
-        // Use store with prefix_len=1; layers will be (None,None) for empty mock
+        // Empty mock → no tensors
         prefix
             .store("llama-7b", &mock, 2, CompressionScheme::F16, 1)
             .unwrap();

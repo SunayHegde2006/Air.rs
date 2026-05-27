@@ -54,7 +54,7 @@ done
 # ── Banner ───────────────────────────────────────────────────────────────────
 echo ""
 echo "${MAGENTA}  ======================================================${RESET}"
-echo "${MAGENTA}       Air.rs Build System (macOS / Linux)              ${RESET}"
+echo "${MAGENTA}       Air.rs Build System — v1.1.0 (Stable)            ${RESET}"
 echo "${MAGENTA}  ======================================================${RESET}"
 echo ""
 
@@ -282,19 +282,6 @@ else
     done
 fi
 
-# =============================================================================
-# STEP 4: PRE-BUILD CLEANUP
-# =============================================================================
-echo ""
-echo "${BOLD}  --- Step 4: Pre-Build ---${RESET}"
-echo ""
-
-# Remove stale small stdc++.lib stubs (Linux cross-build artifacts)
-if find ./target -name "stdc++.lib" -size -72c 2>/dev/null | grep -q .; then
-    find ./target -name "stdc++.lib" -size -72c -print -delete 2>/dev/null
-    info "Removed stale stdc++.lib stub(s)"
-fi
-
 # Build profile
 if $DEBUG_BUILD; then
     PROFILE_FLAG=""
@@ -322,17 +309,17 @@ CMD="cargo build $PROFILE_FLAG $FEATURE_ARG"
 info "Running: $CMD"
 echo ""
 
-# ── OCS Algorithm Summary (always compiled-in) ────────────────────────────
+# ── Architectural Summary ──────────────────────────────────────────────
 echo ""
-echo "${BOLD}  --- Optimal Compounding Stack (always enabled) ---${RESET}"
+echo "${BOLD}  --- Air.rs Consolidated Stack ---${RESET}"
 echo ""
-echo "${GREEN}  [✓] SageAttention3 FP4 microscaling    ${RESET}(fp4_attention, ops.rs)"
-echo "${GREEN}  [✓] KIMI Linear Attention O(N·D²)       ${RESET}(linear_attention_kimi, ops.rs)"
-echo "${GREEN}  [✓] Gated Attention sink-suppression    ${RESET}(gated_attention, ops.rs)"
-echo "${GREEN}  [✓] QJL 1-bit JL-transform KV keys      ${RESET}(QjlKey, kv_compress.rs)"
-echo "${GREEN}  [✓] Fast KV Compaction (cosine merge)   ${RESET}(compact_kv_by_similarity, kv_compress.rs)"
-echo "${GREEN}  [✓] HERMES importance-scored eviction   ${RESET}(HermesTierManager, kv_tier.rs)"
-echo "${GREEN}  [✓] ConceptMoE adaptive token routing   ${RESET}(concept_moe_forward, moe.rs)"
+echo "${GREEN}  [✓] Actor-Based Threading              ${RESET}(RequestOrchestrator, scheduler.rs)"
+echo "${GREEN}  [✓] S.L.I.P. Lazy Weight Streaming     ${RESET}(LayerUnit, layer_pipeline.rs)"
+echo "${GREEN}  [✓] Flash-Attn 2 + cuBLAS DeltaNet     ${RESET}(fused kernels, ops.rs)"
+echo "${GREEN}  [✓] Parallel Prefix-Scan (Rayon)       ${RESET}(recurrence, gated_deltanet.rs)"
+echo "${GREEN}  [✓] STRIX Vulkan Buffer Pooling        ${RESET}(Managed pool, vulkan_hal.rs)"
+echo "${GREEN}  [✓] Evaluation Gates (CI Guard)        ${RESET}(HellaSwag/MMLU, eval.rs)"
+echo "${GREEN}  [✓] Whisper Production Pipeline        ${RESET}(Beam Search, whisper.rs)"
 echo ""
 
 BUILD_START=$(date +%s)

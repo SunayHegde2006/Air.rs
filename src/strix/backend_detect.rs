@@ -25,6 +25,7 @@
 
 use std::fmt;
 use std::time::{Duration, Instant};
+use super::hal::GpuHal;
 
 // ── Backend Identification ──────────────────────────────────────────────
 
@@ -265,6 +266,7 @@ impl BackendDetector {
     /// unavailable. The `sla_met` field indicates compliance.
     pub fn detect() -> DetectionResult {
         let start = Instant::now();
+        eprintln!("[BackendDetector] Starting detection...");
 
         // Probe all GPU backends.
         let gpu_probes = vec![
@@ -275,6 +277,11 @@ impl BackendDetector {
             Self::probe_cpu(),
         ];
 
+        for probe in &gpu_probes {
+            eprintln!("[BackendDetector] GPU Probe: {:?} available={} time={:?} error={}", 
+                probe.kind, probe.available, probe.detection_time, probe.error);
+        }
+
         // Probe storage backends.
         let storage_probes = vec![
             Self::probe_io_uring(),
@@ -282,6 +289,11 @@ impl BackendDetector {
             Self::probe_kqueue(),
             Self::probe_std_fs(),
         ];
+
+        for probe in &storage_probes {
+             eprintln!("[BackendDetector] Storage Probe: {:?} available={} time={:?} error={}", 
+                probe.kind, probe.available, probe.detection_time, probe.error);
+        }
 
         // Select primary GPU: highest rank score.
         let primary_gpu = gpu_probes.iter()

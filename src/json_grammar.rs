@@ -420,6 +420,7 @@ pub enum AllowedHint {
 ///
 /// # Usage
 /// Build once per model, call `step_mask()` at each sampling step.
+#[derive(Debug, Clone)]
 pub struct JsonConstrainedSampler {
     parser: JsonParser,
     /// Decoded text for each vocab token (pre-computed at model load)
@@ -450,6 +451,11 @@ impl JsonConstrainedSampler {
             .iter()
             .map(|text| self.parser.can_push_str(text))
             .collect()
+    }
+
+    /// Check if a token id and its text would be valid in the current state.
+    pub fn can_push_token(&self, _token_id: u32, decoded: &str) -> bool {
+        self.parser.can_push_str(decoded)
     }
 
     /// Commit a sampled token into the parser state.

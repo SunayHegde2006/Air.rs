@@ -80,11 +80,24 @@ fn main() -> Result<()> {
         repetition_penalty: args.repetition_penalty,
     };
 
-    // 4. Create the generator
-    let mut generator = InferenceGenerator::new(
+    // 4. Create the generator with device injection + streamer (ADR-0001)
+    let device = candle_core::Device::new_cuda(0)
+        .unwrap_or(candle_core::Device::Cpu);
+    
+    let streamer_arc = std::sync::Arc::new(streamer);
+    let mut generator = InferenceGenerator::with_streamer(
         loader.model_config.clone(),
         sampler_config,
+        device,
+        streamer_arc,
+        None, // use per-step RoPE if no cache provided
+        loader.dual_rope_cache,
     )?;
+
+    // 4b. Enable Gemma 4 Speculative Decoding Warp-up
+    if loader.model_config.arch == air_rs::model_variant::ModelVariant::Gemma {
+        generator.warp_up_drafter(&streamer);
+    }
 
     // 5. Generate — weights stream from mmap one layer at a time
     println!("📝 Prompt: \"{}\"", args.prompt);
