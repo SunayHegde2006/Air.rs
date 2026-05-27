@@ -109,6 +109,7 @@ pub mod execution_cursor;
 pub mod gpu_direct;
 
 // Phase 9: Hardware polish — cuFile FFI, Multi-GPU, VRAM zeroing verification
+#[cfg(feature = "gds")]
 pub mod cufile_ffi;
 pub mod multi_gpu;
 
@@ -151,5 +152,6 @@ pub use backend_detect::{
     BackendDetector, DetectionResult, GpuBackendKind, StorageBackendKind,
     GpuProbeResult, StorageProbeResult,
 };
+#[cfg(feature = "gds")]
 pub use cufile_ffi::CUfileStatus;
 pub use multi_gpu::{GpuTopology, ShardStrategy, PeerTransfer, PeerTransferStatus, Interconnect};

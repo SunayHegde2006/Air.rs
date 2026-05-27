@@ -128,6 +128,58 @@ impl DraftTree {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
+
+    /// Flatten the tree into a unique set of draft tokens.
+    pub fn flatten(&self) -> Vec<u32> {
+        self.nodes.iter().map(|n| n.token_id).collect()
+    }
+
+    /// Generate an attention mask for the flattened tree.
+    /// Shape: [1, 1, tree_size, tree_size]
+    /// where (i, j) is 1 if token_j is an ancestor of token_i.
+    pub fn to_mask(&self, device: &candle_core::Device) -> candle_core::Result<candle_core::Tensor> {
+        self.to_gbnf_mask(device, None, None)
+    }
+
+    /// Generate an attention mask with optional GBNF filtering.
+    pub fn to_gbnf_mask(
+        &self,
+        device: &candle_core::Device,
+        gbnf: Option<&crate::gbnf::GbnfConstraint>,
+        tokenizer: Option<&crate::tokenizer::Tokenizer>,
+    ) -> candle_core::Result<candle_core::Tensor> {
+        let n = self.nodes.len();
+        let mut mask_data = vec![0u8; n * n];
+
+        // 1. Pre-calculate GBNF validity for each node
+        let mut node_valid = vec![true; n];
+        if let (Some(constraint), Some(tok)) = (gbnf, tokenizer) {
+            for i in 0..n {
+                let path = self.path_to_root(i);
+                if !constraint.validate_path(&path, tok) {
+                    node_valid[i] = false;
+                }
+            }
+        }
+
+        for i in 0..n {
+            if !node_valid[i] { continue; } // Row is all 0s
+
+            let mut curr = i;
+            // Token i can see itself
+            mask_data[i * n + i] = 1;
+            
+            // Travel up to root
+            while let Some(parent) = self.nodes[curr].parent_idx {
+                // Token i can only see parent if parent is valid (which it must be if child reached here)
+                mask_data[i * n + parent] = 1;
+                curr = parent;
+            }
+        }
+
+        candle_core::Tensor::from_vec(mask_data, (1, 1, n, n), device)
+    }
+
 }
 
 // ── Draft Model Interface ──────────────────────────────────────────────────
@@ -136,10 +188,10 @@ impl DraftTree {
 ///
 /// In production this wraps a small LM (e.g. LLaMA-3.2-1B when target is
 /// LLaMA-3.1-8B). For tests, a `MockDraftModel` is provided.
-pub trait DraftModel: Send + Sync {
+pub trait DraftModel {
     /// Given the current context tokens, return logits for the next token.
     /// Returns a `Vec<f32>` of length `vocab_size`.
-    fn next_logits(&self, context: &[u32]) -> Vec<f32>;
+    fn next_logits(&mut self, context: &[u32]) -> Vec<f32>;
 
     /// Vocabulary size of this draft model.
     fn vocab_size(&self) -> usize;
@@ -168,7 +220,7 @@ pub fn top_k(probs: &[f32], k: usize) -> Vec<(usize, f32)> {
 /// Uses BFS expansion: nodes are enqueued if their draft probability ≥ τ
 /// AND depth < MAX_TREE_DEPTH.
 pub struct Eagle2Builder<'a> {
-    draft: &'a dyn DraftModel,
+    draft: &'a mut dyn DraftModel,
     tau: f32,
     top_k: usize,
     max_depth: usize,
@@ -176,12 +228,12 @@ pub struct Eagle2Builder<'a> {
 
 impl<'a> Eagle2Builder<'a> {
     /// Create a builder with the given expansion threshold τ.
-    pub fn new(draft: &'a dyn DraftModel, tau: f32) -> Self {
+    pub fn new(draft: &'a mut dyn DraftModel, tau: f32) -> Self {
         Self { draft, tau, top_k: DRAFT_TOP_K, max_depth: MAX_TREE_DEPTH }
     }
 
     /// Build a draft tree from `context` (accepted tokens so far).
-    pub fn build(&self, context: &[u32]) -> DraftTree {
+    pub fn build(&mut self, context: &[u32]) -> DraftTree {
         let root_token = *context.last().unwrap_or(&0);
         let mut tree = DraftTree::new(root_token);
 
@@ -356,7 +408,7 @@ mod tests {
     }
 
     impl DraftModel for MockDraftModel {
-        fn next_logits(&self, context: &[u32]) -> Vec<f32> {
+        fn next_logits(&mut self, context: &[u32]) -> Vec<f32> {
             let mut logits = vec![1.0f32; self.vocab];
             if let Some(&last) = context.last() {
                 let next = ((last + 1) as usize) % self.vocab;
@@ -392,8 +444,8 @@ mod tests {
 
     #[test]
     fn draft_tree_built_nonempty() {
-        let model = MockDraftModel { vocab: 100 };
-        let builder = Eagle2Builder::new(&model, EXPAND_THRESHOLD);
+        let mut model = MockDraftModel { vocab: 100 };
+        let mut builder = Eagle2Builder::new(&mut model, EXPAND_THRESHOLD);
         let context = vec![0u32, 1, 2];
         let tree = builder.build(&context);
         assert!(!tree.is_empty(), "draft tree should not be empty");
@@ -401,8 +453,8 @@ mod tests {
 
     #[test]
     fn draft_tree_depth_bounded() {
-        let model = MockDraftModel { vocab: 50 };
-        let builder = Eagle2Builder::new(&model, 0.0); // expand everything
+        let mut model = MockDraftModel { vocab: 50 };
+        let mut builder = Eagle2Builder::new(&mut model, 0.0); // expand everything
         let tree = builder.build(&[0u32]);
         for node in &tree.nodes {
             assert!(node.depth < MAX_TREE_DEPTH, "node depth {} ≥ MAX", node.depth);
@@ -411,8 +463,8 @@ mod tests {
 
     #[test]
     fn path_to_root_matches_depth() {
-        let model = MockDraftModel { vocab: 100 };
-        let builder = Eagle2Builder::new(&model, EXPAND_THRESHOLD);
+        let mut model = MockDraftModel { vocab: 100 };
+        let mut builder = Eagle2Builder::new(&mut model, EXPAND_THRESHOLD);
         let tree = builder.build(&[5u32, 6, 7]);
         // Every path should have length ≤ MAX_TREE_DEPTH
         for i in 0..tree.len() {

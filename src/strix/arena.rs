@@ -26,6 +26,21 @@ pub struct Allocation {
     pub alignment: usize,
 }
 
+// ── FlightSlot ───────────────────────────────────────────────────────────
+
+/// A pipelined staging slot for weight prefetch (§12.4).
+///
+/// Slots are reused in a circular pool to overlap IO and compute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlightSlot {
+    /// Index of the slot in the pool.
+    pub index: usize,
+    /// Physical allocation for this slot.
+    pub alloc: Allocation,
+    /// Current value of the timeline semaphore tracking this slot.
+    pub timeline_value: u64,
+}
+
 // ── FreeRegion ───────────────────────────────────────────────────────────
 
 /// A contiguous free region within the arena.
@@ -51,6 +66,10 @@ pub struct VramArena {
     free_list: Vec<FreeRegion>,
     /// Total bytes currently allocated.
     used: usize,
+    /// Active flight slots for S.L.I.P. pipelining.
+    pub flight_slots: Vec<FlightSlot>,
+    /// Current head of the flight slot pool.
+    pub next_slot_idx: usize,
 }
 
 impl VramArena {
@@ -68,7 +87,30 @@ impl VramArena {
                 size: usable,
             }],
             used: 0,
+            flight_slots: Vec::new(),
+            next_slot_idx: 0,
         }
+    }
+
+    /// Register a pool of flight slots for the arena.
+    pub fn register_flight_slots(&mut self, slot_count: usize, slot_size: usize, alignment: usize) -> Result<(), String> {
+        for i in 0..slot_count {
+            let alloc = self.allocate(slot_size, alignment)
+                .ok_or_else(|| format!("failed to allocate flight slot {i} (OOM)"))?;
+            self.flight_slots.push(FlightSlot {
+                index: i,
+                alloc,
+                timeline_value: 0,
+            });
+        }
+        Ok(())
+    }
+
+    /// Get the next available flight slot for prefetch.
+    pub fn next_flight_slot(&mut self) -> &mut FlightSlot {
+        let idx = self.next_slot_idx;
+        self.next_slot_idx = (self.next_slot_idx + 1) % self.flight_slots.len();
+        &mut self.flight_slots[idx]
     }
 
     /// Total VRAM budget (including safety margin).

@@ -30,6 +30,17 @@ pub struct TensorRecord {
     pub size_in_bytes: u64,
 }
 
+impl TensorRecord {
+    /// Maps the GGML dtype to a Candle DType.
+    pub fn candle_dtype(&self) -> candle_core::DType {
+        match self.ggml_dtype {
+            candle_core::quantized::GgmlDType::F32  => candle_core::DType::F32,
+            candle_core::quantized::GgmlDType::F16  => candle_core::DType::F16,
+            _ => candle_core::DType::F16, // Default for quantised blocks
+        }
+    }
+}
+
 /// The Loader bridges the GGUF file metadata and exposes exact physical locations.
 pub struct GgufLoader {
     pub tensors:      HashMap<String, TensorRecord>,
@@ -105,9 +116,9 @@ impl GgufLoader {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let variant  = ModelVariant::from_arch_str(arch_str);
-        let head_dim = (model_config.hidden_dim / model_config.n_heads).max(1);
+        let head_dim = model_config.head_dim; // Use correctly parsed dim
 
-        let dual_rope_cache = if variant.is_hybrid_attention() {
+        let dual_rope_cache = if variant == ModelVariant::Gemma4 {
             // Gemma 4 — build from metadata keys
             let meta_str: HashMap<String, String> = metadata.iter()
                 .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned()))

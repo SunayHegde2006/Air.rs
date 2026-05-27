@@ -245,43 +245,46 @@ pub struct ScheduledBatch {
     pub prefill_tokens_used: usize,
 }
 
-// ── KV Transfer (PD-Disagg stub) ──────────────────────────────────────────
+// ── KV Transfer (PD-Disagg) ──────────────────────────────────────────
 
-/// Simulates KV cache transfer from prefill GPU to decode GPU.
-///
-/// In production this performs a pinned-memory DMA via NVLink or PCIe.
-/// Here we simply record the transfer request.
-#[derive(Debug, Default)]
-pub struct KvTransferQueue {
-    pending: VecDeque<KvTransferRequest>,
-    completed: Vec<KvTransferRequest>,
+use crate::pd_disagg::{KvBlock, KvConnector, KvTransferError};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Manages KV cache transfer from prefill GPU to decode GPU via PD-Disagg.
+pub struct KvTransferManager {
+    connector: Arc<dyn KvConnector>,
+    target_addr: SocketAddr,
+    timeout: Duration,
 }
 
-#[derive(Debug, Clone)]
-pub struct KvTransferRequest {
-    pub seq_id: u64,
-    pub block_ids: Vec<u32>,
-    pub bytes: u64,
-}
-
-impl KvTransferQueue {
-    pub fn new() -> Self { Self::default() }
-
-    /// Enqueue a KV transfer for `seq_id`.
-    pub fn enqueue(&mut self, seq_id: u64, block_ids: Vec<u32>, bytes_per_block: u64) {
-        let bytes = block_ids.len() as u64 * bytes_per_block;
-        self.pending.push_back(KvTransferRequest { seq_id, block_ids, bytes });
+impl KvTransferManager {
+    pub fn new(connector: Arc<dyn KvConnector>, target_addr: SocketAddr) -> Self {
+        Self {
+            connector,
+            target_addr,
+            timeout: Duration::from_millis(2000),
+        }
     }
 
-    /// "Complete" the next pending transfer (simulates DMA completion).
-    pub fn complete_next(&mut self) -> Option<KvTransferRequest> {
-        let req = self.pending.pop_front()?;
-        self.completed.push(req.clone());
-        Some(req)
-    }
+    /// Transfer KV blocks for a sequence to the decode node.
+    pub async fn transfer_blocks(
+        &self,
+        seq_id: u64,
+        blocks: Vec<KvBlock>,
+    ) -> Result<u64, KvTransferError> {
+        let connector = self.connector.clone();
+        let target = self.target_addr;
+        let timeout = self.timeout;
 
-    pub fn pending_count(&self) -> usize { self.pending.len() }
-    pub fn completed_count(&self) -> usize { self.completed.len() }
+        // Perform the transfer in a blocking task to avoid stalling the executor
+        tokio::task::spawn_blocking(move || {
+            connector.send_blocks(seq_id, &blocks, target, timeout)
+        })
+        .await
+        .map_err(|_| KvTransferError::Timeout)?
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -354,21 +357,19 @@ mod tests {
     }
 
     #[test]
-    fn kv_transfer_queue_enqueue_complete() {
-        let mut q = KvTransferQueue::new();
-        q.enqueue(1, vec![0, 1, 2], 65536);
-        assert_eq!(q.pending_count(), 1);
-        let done = q.complete_next().unwrap();
-        assert_eq!(done.seq_id, 1);
-        assert_eq!(done.bytes, 3 * 65536);
-        assert_eq!(q.pending_count(), 0);
-        assert_eq!(q.completed_count(), 1);
+    fn kv_transfer_manager_constructs() {
+        use crate::pd_disagg::ShmKvConnector;
+        use std::sync::Arc;
+        let connector = Arc::new(ShmKvConnector::new());
+        let addr = "127.0.0.1:0".parse().unwrap();
+        let _mgr = KvTransferManager::new(connector, addr);
+        // Construction is sufficient — async transfer_blocks tested via integration tests
     }
 
     #[test]
     fn scheduler_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<ContinuousBatchScheduler>();
-        assert_send::<KvTransferQueue>();
+        assert_send::<KvTransferManager>();
     }
 }

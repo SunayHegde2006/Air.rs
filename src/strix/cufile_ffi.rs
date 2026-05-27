@@ -149,7 +149,7 @@ impl CUfileDriverProps {
 // The `cuda` feature flag gates compilation; this file does NOT compile
 // without `--features cuda` on Linux.
 
-#[cfg(all(feature = "cuda", target_os = "linux"))]
+#[cfg(all(feature = "cuda", feature = "gds", target_os = "linux"))]
 #[link(name = "cufile")]
 extern "C" {
     /// Initialize the cuFile library. Must be called once before any I/O.

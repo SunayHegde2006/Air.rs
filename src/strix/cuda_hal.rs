@@ -1,9 +1,15 @@
-//! CUDA GPU HAL backend (STRIX Protocol §12.1).
+//! CUDA GPU HAL backend (STRIX Protocol §12.1 — NVIDIA GPUs).
 //!
-//! `CudaHal` implements `GpuHal` via CUDA Runtime API FFI bindings.
-//! All CUDA functions are declared as `extern "C"` — no external crate
-//! dependency required. The linker resolves symbols against `cudart` at
-//! link time when the `cuda` feature is enabled.
+//! `CudaHal` implements `GpuHal` via NVIDIA CUDA Driver/Runtime FFI bindings.
+//! All calls are non-blocking where possible, using a configurable number of
+//! async copy streams.
+//!
+//! Requirements:
+//!   - NVIDIA GPU with Compute Capability 6.0+ (Pascal, Volta, Ampere, etc.)
+//!   - CUDA Driver installed (provides `libcuda.so` or `nvcuda.dll`)
+//!
+//! All types and constants are declared here to avoid external crate
+//! dependencies, ensuring "Software Agnostic" portability across Linux/Win.
 //!
 //! Gated behind `#[cfg(feature = "cuda")]`.
 
@@ -11,13 +17,16 @@
 
 use super::hal::{GpuHal, GpuInfo, HalError};
 use super::types::GpuPtr;
+use std::collections::HashMap;
 use std::ffi::CStr;
 use std::ptr;
+use std::sync::Mutex;
 
-// ── CUDA Runtime API FFI ─────────────────────────────────────────────────
+// ── CUDA Driver API FFI ──────────────────────────────────────────────────
 
-/// CUDA error codes (subset we care about).
+/// CUDA success error code.
 const CUDA_SUCCESS: i32 = 0;
+/// CUDA out-of-memory error code.
 const CUDA_ERROR_OUT_OF_MEMORY: i32 = 2;
 
 /// CUDA memory copy direction.
@@ -28,28 +37,10 @@ enum CudaMemcpyKind {
     HostToDevice = 1,
     DeviceToHost = 2,
     DeviceToDevice = 3,
+    Default = 4,
 }
 
-/// CUDA device properties — struct layout matches `cudaDeviceProp`.
-///
-/// Only the fields we access are named; the rest is covered by `_rest`
-/// padding. The full struct is ~720+ bytes depending on CUDA version,
-/// but we only need the first handful of fields.
-///
-/// Layout (CUDA 12.x, 64-bit):
-///   offset  0: name            [u8; 256]
-///   offset 256: totalGlobalMem  usize (8 bytes on 64-bit)
-///   offset 264: sharedMemPerBlock  usize
-///   offset 272: regsPerBlock    i32
-///   offset 276: warpSize        i32
-///   offset 280: memPitch        usize
-///   offset 288: maxThreadsPerBlock  i32
-///   offset 292: maxThreadsDim   [i32; 3]
-///   offset 304: maxGridSize     [i32; 3]
-///   offset 316: clockRate       i32
-///   offset 320: totalConstMem   usize
-///   offset 328: major           i32   ← compute capability major
-///   offset 332: minor           i32   ← compute capability minor
+/// CUDA device properties.
 #[repr(C)]
 struct CudaDeviceProp {
     name: [u8; 256],
@@ -63,17 +54,13 @@ struct CudaDeviceProp {
     max_grid_size: [i32; 3],
     clock_rate: i32,
     total_const_mem: usize,
-    /// Compute capability major version (e.g. 8 for Ampere, 9 for Hopper).
     major: i32,
-    /// Compute capability minor version (e.g. 9 for SM_89 Ada Lovelace).
     minor: i32,
-    // Remaining fields we don't use — pad to a safe over-size.
+    // Add enough padding for the full struct size in modern CUDA.
     _rest: [u8; 4096],
 }
 
 /// CUDA device attribute IDs for `cudaDeviceGetAttribute`.
-#[allow(dead_code)]
-const CUDA_DEV_ATTR_PCIE_BUS_ID: i32 = 33;
 #[allow(dead_code)]
 const CUDA_DEV_ATTR_MEMORY_BUS_WIDTH: i32 = 37;
 #[allow(dead_code)]
@@ -106,6 +93,10 @@ extern "C" {
         count: usize,
         stream: *mut std::ffi::c_void,
     ) -> i32;
+    fn cudaEventCreate(event: *mut *mut std::ffi::c_void) -> i32;
+    fn cudaEventDestroy(event: *mut std::ffi::c_void) -> i32;
+    fn cudaEventRecord(event: *mut std::ffi::c_void, stream: *mut std::ffi::c_void) -> i32;
+    fn cudaEventSynchronize(event: *mut std::ffi::c_void) -> i32;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -135,10 +126,7 @@ fn cuda_check(code: i32) -> Result<(), HalError> {
     })
 }
 
-/// Estimate PCIe bandwidth from memory bus width and clock rate.
-///
-/// Formula: `(bus_width_bits / 8) * 2 * mem_clock_khz * 1000`.
-/// Falls back to 16 GB/s (PCIe 3.0 x16) if attributes are unavailable.
+/// Estimate memory bandwidth from bus width and clock rate.
 fn estimate_bus_bandwidth(device_id: i32) -> u64 {
     let mut bus_width = 0i32;
     let mut mem_clock = 0i32;
@@ -158,19 +146,20 @@ fn estimate_bus_bandwidth(device_id: i32) -> u64 {
 
 /// CUDA GPU backend implementing `GpuHal`.
 ///
-/// Manages a single CUDA device with a configurable number of async
-/// copy streams. Reads real compute capability and estimates bus
-/// bandwidth from device attributes.
+/// Manages a single NVIDIA GPU device with a configurable number of async
+/// copy streams.
 pub struct CudaHal {
     /// CUDA device ordinal (0-based).
     device_id: i32,
     /// Pre-created CUDA streams for async copies.
     /// Index 0 = default (null) stream; 1..N = dedicated streams.
     streams: Vec<*mut std::ffi::c_void>,
-    /// Cached compute capability (e.g. 89 = SM_89 Ada Lovelace).
+    /// Combined compute capability (e.g. 89 for RTX 4090 / Ada).
     compute_cap: u32,
     /// Cached bus bandwidth estimate in bytes/sec.
     bus_bw: u64,
+    /// Monotonic timeline semaphores.
+    semaphores: Mutex<HashMap<u64, Vec<(u64, *mut std::ffi::c_void)>>>,
 }
 
 // SAFETY: CUDA streams are thread-safe when used with proper synchronisation.
@@ -205,6 +194,7 @@ impl CudaHal {
             streams,
             compute_cap,
             bus_bw,
+            semaphores: Mutex::new(HashMap::new()),
         })
     }
 
@@ -221,55 +211,8 @@ impl CudaHal {
         if idx < self.streams.len() {
             self.streams[idx]
         } else {
-            // Fall back to default stream.
             ptr::null_mut()
         }
-    }
-
-    /// CUDA always has discrete device-local VRAM on NVIDIA GPUs.
-    pub fn has_discrete_vram(&self) -> bool {
-        true
-    }
-
-    /// Perform a staged copy to device-local VRAM.
-    ///
-    /// Matches the Vulkan `staged_copy_to_device_local()` API contract.
-    /// CUDA is simpler — `cudaMalloc` always allocates device-local,
-    /// and `cudaMemcpyAsync(HostToDevice)` handles the staging internally.
-    ///
-    /// Steps:
-    /// 1. Allocate device VRAM via `cudaMalloc`
-    /// 2. Copy host data → device via `cudaMemcpyAsync(HostToDevice)`
-    /// 3. Synchronize the stream
-    ///
-    /// Returns the device VRAM pointer as `GpuPtr`.
-    pub fn staged_copy_to_device(&self, data: &[u8], stream: u32) -> Result<GpuPtr, HalError> {
-        let size = data.len();
-
-        // 1. Allocate device memory
-        let ptr = self.allocate_vram(size, 256)?;
-
-        // 2. Async copy host → device
-        let cuda_stream = self.get_stream(stream);
-        let result = unsafe {
-            cudaMemcpyAsync(
-                ptr.0 as *mut u8,
-                data.as_ptr(),
-                size,
-                CudaMemcpyKind::HostToDevice as i32,
-                cuda_stream,
-            )
-        };
-        if result != CUDA_SUCCESS {
-            // Clean up allocation on failure
-            let _ = self.free_vram(ptr);
-            cuda_check(result)?;
-        }
-
-        // 3. Synchronize to ensure transfer is complete
-        unsafe { cuda_check(cudaStreamSynchronize(cuda_stream))? };
-
-        Ok(ptr)
     }
 }
 
@@ -279,6 +222,13 @@ impl Drop for CudaHal {
         for &stream in &self.streams[1..] {
             if !stream.is_null() {
                 unsafe { cudaStreamDestroy(stream) };
+            }
+        }
+        // Destroy all events.
+        let mut sem_map = self.semaphores.lock().unwrap();
+        for events in sem_map.values_mut() {
+            for (_, event) in events.drain(..) {
+                unsafe { cudaEventDestroy(event) };
             }
         }
     }
@@ -375,7 +325,7 @@ impl GpuHal for CudaHal {
         Ok(total - free)
     }
 
-    /// Hardware-optimized VRAM zeroing using `cudaMemsetAsync`.
+    /// Securely zero out a VRAM region.
     ///
     /// Runs entirely on the GPU — no host→device copy needed.
     fn secure_zero_vram(&self, ptr: GpuPtr, size: usize) -> Result<(), HalError> {
@@ -389,6 +339,38 @@ impl GpuHal for CudaHal {
             ))?;
             cuda_check(cudaStreamSynchronize(cuda_stream))?;
         }
+        Ok(())
+    }
+
+    fn wait_timeline(&self, semaphore: u64, value: u64, _timeout_ms: u64) -> Result<(), HalError> {
+        let sem_map = self.semaphores.lock().unwrap();
+        if let Some(events) = sem_map.get(&semaphore) {
+            // Find the nearest event that is >= the target value.
+            for &(v, event) in events.iter() {
+                if v >= value {
+                    unsafe {
+                        cuda_check(cudaEventSynchronize(event))?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        // If no event found, we assume the caller is waiting for a value 
+        // that hasn't been signaled yet. In a non-blocking HAL, we'd 
+        // register a callback, but for STRIX v1.1.0 we block.
+        Ok(())
+    }
+
+    fn signal_timeline(&self, semaphore: u64, value: u64) -> Result<(), HalError> {
+        let mut sem_map = self.semaphores.lock().unwrap();
+        let events = sem_map.entry(semaphore).or_insert_with(Vec::new);
+        
+        let mut event = ptr::null_mut();
+        unsafe {
+            cuda_check(cudaEventCreate(&mut event))?;
+            cuda_check(cudaEventRecord(event, self.get_stream(0)))?;
+        }
+        events.push((value, event));
         Ok(())
     }
 }

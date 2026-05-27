@@ -1,25 +1,3 @@
-# Air.rs Cargo Configuration
-# Windows-specific linker paths (ignored on Linux/macOS).
-# If paths don't match your system, run: .\setup_build_env.ps1
-# which will regenerate this file with auto-detected paths.
-
-[target.x86_64-pc-windows-msvc]
-rustflags = [
-    "-Lnative=C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\um\\x64",
-    "-Lnative=C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\ucrt\\x64",
-    "-Lnative=C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\VC\\Tools\\MSVC\\14.44.35207\\lib\\x64",
-]
-
-# These sections are harmless placeholders for other targets.
-# Cargo ignores target sections that don't match the current build.
-[target.x86_64-unknown-linux-gnu]
-rustflags = []
-
-[target.aarch64-apple-darwin]
-rustflags = []
-
-[target.x86_64-apple-darwin]
-rustflags = []
-
-[profile.dev]
-incremental = true
+[env]
+LD_LIBRARY_PATH = { value = "/usr/lib/wsl/lib", relative = false }
+CUDA_VISIBLE_DEVICES = { value = "0", relative = false }

@@ -103,3 +103,32 @@ jobs:
           python-version: "3.11"
       - run: pip install ruff
       - run: ruff check python/
+  # ── Evaluation: Regression Gates ─────────────────────────────────────────────
+  eval:
+    name: Evaluation Gates (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+      - name: Run evaluation gates
+        run: |
+          chmod +x scripts/eval_gate.sh
+          ./scripts/eval_gate.sh
+  # ── Release: GitHub Release ──────────────────────────────────────────────────
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [rust, python, eval]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create ${{ github.ref_name }} \
+            --title "Release ${{ github.ref_name }}" \
+            --generate-notes

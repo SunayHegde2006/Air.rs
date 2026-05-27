@@ -1039,3 +1039,118 @@ mod concept_moe_tests {
         assert_eq!(ConceptRouting::Hard { top_k_used: 4 }.active_experts(), 4);
     }
 }
+
+// ============================================================================
+// Gemma 4 Sigmoid MoE Routing (v0.10.0)
+// ============================================================================
+//
+// Gemma 4 26B-A4B uses a Sigmoid-based MoE router.
+//
+// Formula:
+//   weights = sigmoid(router_logits)
+//   selected_indices = top_k(weights)
+//   output = sum_{i in selected} weights[i] * expert_i(x)
+//
+// Note: Weights are NOT normalized to sum to 1.0.
+
+/// Configuration for Gemma 4 MoE.
+#[derive(Debug, Clone)]
+pub struct Gemma4MoeConfig {
+    pub n_experts: usize,
+    pub top_k: usize,
+}
+
+impl Default for Gemma4MoeConfig {
+    fn default() -> Self {
+        Self {
+            n_experts: 32,
+            top_k: 2,
+        }
+    }
+}
+
+/// Compute top-k expert indices and their sigmoid-gated weights for Gemma 4.
+///
+/// Unlike softmax routing, these weights are independent and do not sum to 1.0.
+pub fn compute_sigmoid_routing(logits: &[f32], top_k: usize) -> (Vec<usize>, Vec<f32>) {
+    // 1. Apply sigmoid to all logits: w = 1 / (1 + exp(-x))
+    let weights: Vec<f32> = logits.iter().map(|&l| 1.0 / (1.0 + (-l).exp())).collect();
+
+    // 2. Select top-k experts by weight
+    let mut indexed: Vec<(usize, f32)> = weights.iter().cloned().enumerate().collect();
+    indexed.sort_unstable_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+    let selected = &indexed[..top_k];
+    let indices: Vec<usize> = selected.iter().map(|(i, _)| *i).collect();
+    let selected_weights: Vec<f32> = selected.iter().map(|(_, w)| *w).collect();
+
+    (indices, selected_weights)
+}
+
+/// Gemma 4 Sigmoid MoE forward pass.
+pub fn gemma4_moe_forward(
+    x: &Tensor,
+    router_weight: &candle_core::quantized::QMatMul,
+    experts: &[crate::gemma4::DenseGeGlu],
+    cfg: &Gemma4MoeConfig,
+) -> Result<Tensor> {
+    let (batch, seq_len, hidden_dim) = x.dims3()?;
+    let n_tokens = batch * seq_len;
+    let x_flat = x.reshape((n_tokens, hidden_dim))?;
+
+    // Compute router logits
+    let router_logits = router_weight.forward(&x_flat)?;
+    let router_f32 = router_logits.to_dtype(DType::F32)?;
+
+    let mut output_slices = Vec::with_capacity(n_tokens);
+
+    for token_idx in 0..n_tokens {
+        let logits: Vec<f32> = router_f32.i(token_idx)?.to_vec1()?;
+        let (indices, weights) = compute_sigmoid_routing(&logits, cfg.top_k);
+
+        let token_x = x_flat.i(token_idx)?.unsqueeze(0)?;
+        let mut combined: Option<Tensor> = None;
+
+        for (expert_id, weight) in indices.iter().zip(weights.iter()) {
+            let expert = &experts[*expert_id];
+            let expert_out = expert.forward(&token_x)?;
+            let scaled = expert_out.affine(*weight as f64, 0.0)?;
+            
+            combined = Some(match combined {
+                None => scaled,
+                Some(acc) => (acc + scaled)?,
+            });
+        }
+
+        output_slices.push(combined.expect("at least one expert selected"));
+    }
+
+    let output_flat = Tensor::cat(&output_slices, 0)?;
+    output_flat.reshape((batch, seq_len, hidden_dim))
+}
+
+#[cfg(test)]
+mod gemma4_moe_tests {
+    use super::*;
+
+    #[test]
+    fn test_sigmoid_routing_values() {
+        // raw logit 0.0 -> sigmoid 0.5
+        let logits = vec![0.0f32; 4];
+        let (indices, weights) = compute_sigmoid_routing(&logits, 2);
+        assert_eq!(indices.len(), 2);
+        for w in weights {
+            assert!((w - 0.5).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_sigmoid_routing_ordering() {
+        let logits = vec![-10.0, 10.0, 0.0, 5.0];
+        let (indices, weights) = compute_sigmoid_routing(&logits, 2);
+        // Sorted by sigmoid output (which is monotonic with logit)
+        assert_eq!(indices[0], 1); // 10.0
+        assert_eq!(indices[1], 3); // 5.0
+        assert!(weights[0] > weights[1]);
+    }
+}

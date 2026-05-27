@@ -79,7 +79,7 @@ impl ModelVariant {
             "qwen2" | "qwen" => Self::Qwen2,
             // Qwen3.6: HuggingFace tags as qwen3_5 (same arch family);
             // Unsloth GGUF may use qwen3_6. Accept all reasonable variants.
-            "qwen3_5" | "qwen3.5" | "qwen3_6" | "qwen3.6" => Self::Qwen3_6,
+            "qwen3_5" | "qwen3.5" | "qwen3_6" | "qwen3.6" | "qwen35" => Self::Qwen3_6,
             "gemma" | "gemma2" | "gemma3" => Self::Gemma,
             // Gemma4 is a distinct architecture family with hybrid attention.
             "gemma4" => Self::Gemma4,
@@ -171,13 +171,19 @@ pub enum FfnType {
     GeGlu,
     /// Standard dense MLP with GELU (Falcon, GPT-2)
     DenseMlp,
+    /// Gemma 4 Sigmoid MoE — top-k selection with sigmoid confidence
+    SigmoidMoE,
+    /// Standard Softmax MoE — top-k selection with softmax confidence (Mixtral, Qwen MoE)
+    SoftmaxMoE,
 }
 
 impl FfnType {
     pub fn for_variant(variant: ModelVariant) -> Self {
         match variant {
             ModelVariant::Gemma  => Self::GeGlu,
+            ModelVariant::Gemma4 => Self::SigmoidMoE,
             ModelVariant::Falcon => Self::DenseMlp,
+            ModelVariant::Mistral if variant.name().to_lowercase().contains("moe") => Self::SoftmaxMoE,
             _                    => Self::SwiGlu,
         }
     }
@@ -245,9 +251,11 @@ pub fn arch_summary(
         NormType::GemmaRmsNorm => "GemmaRMSNorm",
     };
     let ffn_str = match ffn {
-        FfnType::SwiGlu  => "SwiGLU",
-        FfnType::GeGlu   => "GeGLU",
-        FfnType::DenseMlp=> "DenseMLP",
+        FfnType::SwiGlu     => "SwiGLU",
+        FfnType::GeGlu      => "GeGLU",
+        FfnType::DenseMlp   => "DenseMLP",
+        FfnType::SigmoidMoE => "SigmoidMoE",
+        FfnType::SoftmaxMoE => "SoftmaxMoE",
     };
     let mut extras = Vec::new();
     if let Some(w) = sliding_window {

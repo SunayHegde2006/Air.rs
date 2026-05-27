@@ -25,6 +25,9 @@ pub mod speculative;
 pub mod tokenizer;
 pub mod tui;
 pub mod weight_streamer;
+pub mod sparsity_predictor; // A2WS — Adaptive Weight Sparsity predictor (W.C.P.S.R. v1)
+pub mod medusa_heads;      // Medusa speculative draft heads (W.C.P.S.R. v1)
+pub mod wavefront;         // W.C.P.S.R. wavefront orchestrator — draft+verify cycle loop
 pub mod shared_buffer;     // platform-agnostic SharedBuffer + ComputeBackend (ADR-0005)
 pub mod metal_compute;     // Metal kernels, context, command encoding (ADR-0005)
 pub mod ucal;              // compat shim — re-exports shared_buffer + metal_compute (ADR-0005)
@@ -64,7 +67,8 @@ pub mod audit_log;        // Enterprise: HMAC-chained SOC 2 audit log (v0.9.0)
 pub mod attention_backend; // AttentionBackend trait + HybridAttentionRouter scaffold (v0.9.0)
 pub mod gated_deltanet;   // Gated DeltaNet chunk-parallel recurrence kernel, AVX-512 (v0.10.0)
 pub mod dual_rope;        // Dual p-RoPE freq cache for Gemma 4 local/global layers (v0.10.0)
-pub mod gemma4;           // Gemma 4 hybrid-attention block + sigmoid MoE router (v0.10.0)
+pub mod slip;          // S.L.I.P. Dispatcher — Candidate 3
+pub mod gemma4;        // Gemma 4 hybrid-attention block + sigmoid MoE router (v0.10.0)
 pub mod metrics;
 pub mod pipeline;
 pub mod neuron_predicate;
@@ -89,6 +93,15 @@ pub mod alt_quant;    // P12 — GPTQ/AWQ/EXL2 format readers
 pub mod mcp_server;   // P13 — MCP server (Model Context Protocol)
 pub mod hqq;          // F1  — HQQ Half-Quadratic Quantization dequantizer
 pub mod q4_tiled;     // F2  — Q4_0_4_4 / Q4_0_4_8 / Q4_0_8_8 ARM NEON/SVE tile dequant
+pub mod tq2_drafter;
+pub mod warp_protocol;
+pub mod fft;
+pub mod distributed;
+pub mod session_context;
+pub mod execution_policy;
+pub mod inference_step;
+pub mod layer_pipeline;
+
 #[cfg(feature = "cuda")]
 pub mod uploader;
 

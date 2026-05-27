@@ -1,6 +1,6 @@
 [package]
 name = "air-rs"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 authors = ["Sunay Hegde"]
 description = "A high-performance, memory-fluid LLM inference engine."
@@ -22,6 +22,8 @@ libc = "0.2"
 # candle-core is always included for tensor operations (CPU fallback).
 # The "cuda" feature enables GPU acceleration via candle-core's cuda feature.
 candle-core = "0.8.0"
+# FIX: Explicitly pin cudarc with 12.8 compatibility to bypass 12.9 panics in build.rs
+cudarc = { version = "0.13.9", features = ["cuda-12080"] }
 candle-flash-attn = { version = "0.8.0", optional = true }
 half = { version = "2.4", features = ["num-traits"] }
 safetensors = "0.5.2"
@@ -37,8 +39,12 @@ thiserror = "2.0"
 byteorder = "1.5"
 dashmap = "6.1"
 rayon = "1.10"
-rand = "0.8"
+rand = { version = "0.8", features = ["small_rng"] }
+rand_chacha = "0.3"
 indicatif = "0.17"
+jsonwebtoken = "9.3"
+base64 = "0.22"
+ring = "0.17"
 
 # §13 optional ARB performance deps (feature-gated, default = std-only)
 ordered-float = { version = "4.2", optional = true }
@@ -54,6 +60,7 @@ log = "0.4"
 env_logger = "0.11"
 clap = { version = "4.5", features = ["derive"] }
 tracing = "0.1"
+async-trait = "0.1"
 tracing-subscriber = "0.3"
 
 [features]
@@ -63,6 +70,7 @@ rocm = []
 vulkan = []
 metal = ["candle-core/metal"]
 flash-attn = ["candle-flash-attn"]
+gds = []
 python = ["pyo3"]
 # §13 optional performance deps
 # Enable BinaryHeap-based O(log n) priority queue for waiting queue (W > 512)
@@ -88,6 +96,7 @@ lto = "thin"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+httpmock = "0.7"
 
 [[bench]]
 name = "throughput"

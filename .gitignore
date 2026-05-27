@@ -12,12 +12,17 @@
 *.so
 uv.lock
 /.fallow/
+.env
+.env.*
+!.env.example
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*.tmp
+*~
 
 # OS
 Thumbs.db
@@ -62,6 +67,8 @@ results/
 __pycache__/
 *.pyc
 scripts/__pycache__/
+.ipynb_checkpoints/
+.python-version
 
 # Claw Code editor sessions
 .claw/
@@ -70,4 +77,12 @@ scripts/__pycache__/
 #graphify
 .graphifyignore
 0.80
+
+# Profiling and coverage
+*.profraw
+*.gcda
+*.gcno
+
+# Local cargo artifacts
+.cargo/
 

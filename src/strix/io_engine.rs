@@ -28,13 +28,13 @@ pub struct IoRequest {
 /// Priority levels for I/O requests (lower ordinal = higher priority).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IoPriority {
-    /// Immediate — blocking the inference pipeline (Class A).
+    /// Immediate — blocking the main inference pipeline (Class A).
     Critical = 0,
-    /// High — needed within the prefetch window (Class B, current layer).
+    /// High — needed for the Ghost Drafter or immediate prefetch (Class B/C).
     High = 1,
-    /// Normal — prefetch for upcoming layers (Class B, future layers).
+    /// Normal — general prefetch for upcoming layers (Class B).
     Normal = 2,
-    /// Low — speculative or archival (Class C/D).
+    /// Low — archival or secondary speculative tasks (Class D).
     Low = 3,
 }
 
@@ -45,6 +45,7 @@ impl IoPriority {
             TensorClass::A => IoPriority::Critical,
             TensorClass::B if within_window => IoPriority::High,
             TensorClass::B => IoPriority::Normal,
+            TensorClass::C if within_window => IoPriority::High, // Ghost model urgency
             TensorClass::C | TensorClass::D => IoPriority::Low,
         }
     }

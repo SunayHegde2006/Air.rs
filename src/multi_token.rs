@@ -37,6 +37,7 @@
 
 use candle_core::quantized::QMatMul;
 use candle_core::{DType, Module, Result, Tensor, D};
+use crate::sampler::Sampler;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -184,17 +185,18 @@ pub fn mtp_forward_all(
 pub fn mtp_speculative_draft(
     main_logits: &Tensor,
     extra_logits: &[Tensor],
-    temperature: f32,
+    sampler: &mut Sampler,
+    past_tokens: &[u32],
 ) -> Result<(u32, Option<u32>)> {
     // Sample main token from last position
     let last_main = main_logits.dim(1)? - 1;
     let main_last = main_logits.narrow(1, last_main, 1)?.squeeze(1)?; // [b, vocab]
-    let main_token = greedy_or_sample(&main_last, temperature)?;
+    let main_token = sampler.sample(&main_last, past_tokens)?;
 
     // Draft from MTP head if available
     let draft_token = if let Some(extra) = extra_logits.first() {
         let extra_last = extra.narrow(1, last_main, 1)?.squeeze(1)?;
-        Some(greedy_or_sample(&extra_last, temperature)?)
+        Some(sampler.sample(&extra_last, past_tokens)?)
     } else {
         None
     };
@@ -202,15 +204,7 @@ pub fn mtp_speculative_draft(
     Ok((main_token, draft_token))
 }
 
-/// Greedy (temperature=0) or argmax sampling.
-fn greedy_or_sample(logits: &Tensor, temperature: f32) -> Result<u32> {
-    // For now: always greedy (argmax)
-    // TODO: integrate with sampler.rs for temperature/top-p
-    let _ = temperature;
-    let idx = logits.argmax(D::Minus1)?;
-    let id: Vec<u32> = idx.flatten_all()?.to_vec1()?;
-    Ok(id[0])
-}
+// Removed greedy_or_sample stub — now using sampler.rs
 
 // ---------------------------------------------------------------------------
 // Tests

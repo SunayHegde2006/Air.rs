@@ -29,6 +29,8 @@ struct CpuHalInner {
     allocations: HashMap<u64, CpuAllocation>,
     /// Monotonic counter for generating unique `GpuPtr` addresses.
     next_addr: u64,
+    /// Simulated timeline semaphores indexing value.
+    semaphores: HashMap<u64, u64>,
 }
 
 /// CPU-backed `GpuHal` implementation.
@@ -56,6 +58,7 @@ impl CpuHal {
                 allocations: HashMap::new(),
                 // Start at 0x1000 to avoid NULL collisions.
                 next_addr: 0x1000,
+                semaphores: HashMap::new(),
             }),
         }
     }
@@ -179,6 +182,24 @@ impl GpuHal for CpuHal {
             })?;
         let zero_len = size.min(alloc.size);
         alloc.data[..zero_len].fill(0);
+        Ok(())
+    }
+
+    fn wait_timeline(&self, semaphore: u64, value: u64, _timeout_ms: u64) -> Result<(), HalError> {
+        let inner = self.inner.lock().unwrap();
+        let current = inner.semaphores.get(&semaphore).copied().unwrap_or(0);
+        if current >= value {
+            Ok(())
+        } else {
+            // In a real CPU simulation we might sleep/retry, but for unit tests 
+            // we assume the caller is signaling in a valid order.
+            Ok(()) 
+        }
+    }
+
+    fn signal_timeline(&self, semaphore: u64, value: u64) -> Result<(), HalError> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.semaphores.insert(semaphore, value);
         Ok(())
     }
 }

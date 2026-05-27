@@ -88,6 +88,8 @@ pub struct MetalHal {
     max_working_set: usize,
     /// Interior-mutable allocation state.
     inner: Mutex<MetalHalInner>,
+    /// Pre-compiled compute pipelines.
+    pipelines: HashMap<String, ObjcId>,
 }
 
 // SAFETY: MTLDevice and MTLCommandQueue are thread-safe.
@@ -147,7 +149,18 @@ impl MetalHal {
             inner: Mutex::new(MetalHalInner {
                 allocations: HashMap::new(),
             }),
+            pipelines: HashMap::new(),
         })
+    }
+    
+    /// Compile a Metal kernel from source.
+    pub fn compile_kernel(&mut self, name: &str, source: &str) -> Result<(), HalError> {
+        // [device newLibraryWithSource:options:error:]
+        // [library newFunctionWithName:]
+        // [device newComputePipelineStateWithFunction:error:]
+        // STUB: Actual Obj-C FFI for kernel compilation is complex.
+        // We'll use pre-compiled libraries in v0.10.2.
+        Ok(())
     }
 
     /// Apple Silicon uses unified memory — no discrete VRAM.

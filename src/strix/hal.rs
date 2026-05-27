@@ -107,6 +107,15 @@ pub trait GpuHal: Send + Sync {
     /// Current VRAM usage snapshot.
     fn vram_used(&self) -> Result<usize, HalError>;
 
+    /// Wait until a timeline semaphore reaches the given value.
+    ///
+    /// This is the hardware-agnostic primitive for 'Flight Slot' synchronization.
+    /// See STRIX Protocol §12.4.
+    fn wait_timeline(&self, semaphore: u64, value: u64, timeout_ms: u64) -> Result<(), HalError>;
+
+    /// Signal a timeline semaphore to the given value.
+    fn signal_timeline(&self, semaphore: u64, value: u64) -> Result<(), HalError>;
+
     /// Securely zero a VRAM region before freeing.
     ///
     /// Overwrites `size` bytes at `ptr` with zeros to prevent data leakage

@@ -35,7 +35,7 @@ function Write-Err   { param([string]$msg) Write-Host "  [X] $msg" -ForegroundCo
 
 Write-Host ""
 Write-Host "  ======================================================" -ForegroundColor Magenta
-Write-Host "       Air.rs Build System                               " -ForegroundColor Magenta
+Write-Host "       Air.rs Build System — v1.1.0 (Stable)            " -ForegroundColor Magenta
 Write-Host "  ======================================================" -ForegroundColor Magenta
 Write-Host ""
 
@@ -269,23 +269,6 @@ if ($SkipPrompt) {
     }
 }
 
-# ============================================================================
-# STEP 4: PRE-BUILD CLEANUP
-# ============================================================================
-Write-Host ""
-Write-Host "  --- Step 4: Pre-Build ---" -ForegroundColor White
-Write-Host ""
-
-# Clean stale stdc++.lib stubs (the old 8-byte ones that cause LNK1107)
-$staleStubs = Get-ChildItem -Path ".\target" -Recurse -Filter "stdc++.lib" -ErrorAction SilentlyContinue
-foreach ($stub in $staleStubs) {
-    $size = $stub.Length
-    if ($size -lt 72) {
-        Remove-Item $stub.FullName -Force
-        Write-Info "Removed invalid stdc++.lib stub ($size bytes) at $($stub.FullName)"
-    }
-}
-
 # Determine build profile
 $buildProfile = if ($DebugBuild) { "" } else { "--release" }
 $profileName = if ($DebugBuild) { "debug" } else { "release" }
@@ -308,17 +291,17 @@ $cmd = "cargo build $buildProfile $featureArg"
 Write-Info "Running: $cmd"
 Write-Host ""
 
-# OCS Algorithm Summary
+# Architectural Summary
 Write-Host ""
-Write-Host "  --- Optimal Compounding Stack (always enabled) ---" -ForegroundColor White
+Write-Host "  --- Air.rs Consolidated Stack ---" -ForegroundColor White
 Write-Host ""
-Write-Host "  [+] SageAttention3 FP4 microscaling    (fp4_attention, ops.rs)" -ForegroundColor Green
-Write-Host "  [+] KIMI Linear Attention O(N*D2)       (linear_attention_kimi, ops.rs)" -ForegroundColor Green
-Write-Host "  [+] Gated Attention sink-suppression    (gated_attention, ops.rs)" -ForegroundColor Green
-Write-Host "  [+] QJL 1-bit JL-transform KV keys      (QjlKey, kv_compress.rs)" -ForegroundColor Green
-Write-Host "  [+] Fast KV Compaction (cosine merge)   (compact_kv_by_similarity, kv_compress.rs)" -ForegroundColor Green
-Write-Host "  [+] HERMES importance-scored eviction   (HermesTierManager, kv_tier.rs)" -ForegroundColor Green
-Write-Host "  [+] ConceptMoE adaptive token routing   (concept_moe_forward, moe.rs)" -ForegroundColor Green
+Write-Host "  [+] Actor-Based Threading              (RequestOrchestrator, scheduler.rs)" -ForegroundColor Green
+Write-Host "  [+] S.L.I.P. Lazy Weight Streaming     (LayerUnit, layer_pipeline.rs)" -ForegroundColor Green
+Write-Host "  [+] Flash-Attn 2 + cuBLAS DeltaNet     (fused kernels, ops.rs)" -ForegroundColor Green
+Write-Host "  [+] Parallel Prefix-Scan (Rayon)       (recurrence, gated_deltanet.rs)" -ForegroundColor Green
+Write-Host "  [+] STRIX Vulkan Buffer Pooling        (Managed pool, vulkan_hal.rs)" -ForegroundColor Green
+Write-Host "  [+] Evaluation Gates (CI Guard)        (HellaSwag/MMLU, eval.rs)" -ForegroundColor Green
+Write-Host "  [+] Whisper Production Pipeline        (Beam Search, whisper.rs)" -ForegroundColor Green
 Write-Host ""
 
 # Execute build

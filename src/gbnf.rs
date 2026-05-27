@@ -57,17 +57,27 @@ pub enum GbnfItem {
     AnyChar,
 }
 
-/// A GBNF alternative — an ordered sequence of items that must all match.
-pub type GbnfAlt = Vec<GbnfItem>;
+/// A single GBNF element consisting of an item and its quantifier.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GbnfElement {
+    pub item: GbnfItem,
+    pub quant: Quantifier,
+}
+
+impl GbnfElement {
+    pub fn new(item: GbnfItem) -> Self {
+        Self { item, quant: Quantifier::One }
+    }
+}
+
+/// A GBNF alternative — an ordered sequence of elements that must all match.
+pub type GbnfAlt = Vec<GbnfElement>;
 
 /// A GBNF rule — one or more alternatives (`|` separated).
 #[derive(Debug, Clone)]
 pub struct GbnfRule {
     pub name: String,
     pub alternatives: Vec<GbnfAlt>,
-    /// Quantifier applied to the entire rule reference (not stored here —
-    /// quantifiers are stored per-item in the parent alt)
-    pub _placeholder: (),
 }
 
 /// Parsed GBNF grammar: a set of named rules starting from `root`.
@@ -121,7 +131,6 @@ impl GbnfGrammar {
                     rules.insert(name.clone(), GbnfRule {
                         name,
                         alternatives: std::mem::take(&mut current_alts),
-                        _placeholder: (),
                     });
                 }
                 continue;
@@ -141,11 +150,10 @@ impl GbnfGrammar {
 
             // Flush previous rule
             if let Some(name) = current_rule_name.take() {
-                rules.insert(name.clone(), GbnfRule {
-                    name,
-                    alternatives: std::mem::take(&mut current_alts),
-                    _placeholder: (),
-                });
+                    rules.insert(name.clone(), GbnfRule {
+                        name,
+                        alternatives: std::mem::take(&mut current_alts),
+                    });
             }
 
             let rule_name = trimmed[..arrow_pos].trim().to_string();
@@ -169,7 +177,6 @@ impl GbnfGrammar {
             rules.insert(name.clone(), GbnfRule {
                 name,
                 alternatives: std::mem::take(&mut current_alts),
-                _placeholder: (),
             });
         }
 
@@ -249,7 +256,7 @@ impl GbnfGrammar {
                         return Err("Unterminated string literal".to_string());
                     }
                     if !lit.is_empty() {
-                        items.push(GbnfItem::Literal(lit));
+                        items.push(GbnfElement::new(GbnfItem::Literal(lit)));
                     }
                 }
 
@@ -280,13 +287,13 @@ impl GbnfGrammar {
                             ranges.push((lo, lo));
                         }
                     }
-                    items.push(GbnfItem::CharClass { ranges, negated });
+                    items.push(GbnfElement::new(GbnfItem::CharClass { ranges, negated }));
                 }
 
                 // Wildcard
                 '.' => {
                     chars.next();
-                    items.push(GbnfItem::AnyChar);
+                    items.push(GbnfElement::new(GbnfItem::AnyChar));
                 }
 
                 // Rule reference: identifier
@@ -300,17 +307,23 @@ impl GbnfGrammar {
                             break;
                         }
                     }
-                    items.push(GbnfItem::RuleRef(name));
+                    items.push(GbnfElement::new(GbnfItem::RuleRef(name)));
                 }
 
                 // Skip parentheses (simplification: treat as flat sequence)
                 '(' | ')' => { chars.next(); }
 
-                // Quantifiers on last item
                 '?' | '*' | '+' => {
-                    // For now we record quantifiers as sentinel items
-                    // (full quantifier tracking is in GbnfState stack)
-                    chars.next();
+                    let q = match chars.next().unwrap() {
+                        '?' => Quantifier::ZeroOrOne,
+                        '*' => Quantifier::ZeroOrMore,
+                        '+' => Quantifier::OneOrMore,
+                        _ => unreachable!(),
+                    };
+                    if let Some(mut last) = items.pop() {
+                        last.quant = q;
+                        items.push(last);
+                    }
                 }
 
                 other => {
@@ -327,13 +340,11 @@ impl GbnfGrammar {
 // Grammar State Machine
 // ---------------------------------------------------------------------------
 
-/// A frame on the GBNF parse stack.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct StackFrame {
     rule_name: String,
     alt_idx: usize,
     item_idx: usize,
-    /// Characters consumed so far in the current literal item
     lit_pos: usize,
 }
 
@@ -341,39 +352,38 @@ struct StackFrame {
 #[derive(Debug, Clone)]
 pub struct GbnfState {
     grammar: Arc<GbnfGrammar>,
-    /// Stack of frames; bottom = root, top = current
-    stack: Vec<StackFrame>,
+    /// Set of active stacks (possible parse positions).
+    /// Using Vec instead of HashSet for deterministic ordering and because
+    /// the number of active paths is usually small (<10).
+    active_stacks: Vec<Vec<StackFrame>>,
     /// Accumulated output text
     output: String,
-    /// Whether a fatal error has occurred
-    error: bool,
-    /// Whether the grammar has been fully satisfied
-    complete: bool,
 }
 
 impl GbnfState {
     fn new(grammar: Arc<GbnfGrammar>) -> Self {
-        // Start with root rule, first alternative, first item
-        let stack = vec![StackFrame {
-            rule_name: "root".to_string(),
-            alt_idx: 0,
-            item_idx: 0,
-            lit_pos: 0,
-        }];
-        Self {
-            grammar,
-            stack,
-            output: String::new(),
-            error: false,
-            complete: false,
+        let root_rule = &grammar.rules["root"];
+        let mut active_stacks = Vec::new();
+        for alt_idx in 0..root_rule.alternatives.len() {
+            active_stacks.push(vec![StackFrame {
+                rule_name: "root".to_string(),
+                alt_idx,
+                item_idx: 0,
+                lit_pos: 0,
+            }]);
         }
+        let mut state = Self {
+            grammar,
+            active_stacks,
+            output: String::new(),
+        };
+        state.expand_active_stacks();
+        state
     }
 
-    /// Check whether the given string can be appended at the current state
-    /// without committing. Returns true if valid (fast path: clone + simulate).
     pub fn can_push_str(&self, s: &str) -> bool {
-        if self.error { return false; }
-        if s.is_empty() { return self.complete; }
+        if self.is_error() { return false; }
+        if s.is_empty() { return self.is_complete(); }
         let mut sim = self.clone();
         for c in s.chars() {
             if !sim.push_char(c) {
@@ -383,170 +393,169 @@ impl GbnfState {
         true
     }
 
-    /// Commit a character, advancing the state machine.
-    /// Returns false if invalid in the current state.
     pub fn push_char(&mut self, c: char) -> bool {
-        if self.error || self.complete {
+        if self.is_error() {
             return false;
         }
-        let accepted = self.advance(c);
-        if accepted {
-            self.output.push(c);
-        } else {
-            self.error = true;
-        }
-        accepted
-    }
+        let mut next_stacks = Vec::new();
 
-    fn advance(&mut self, c: char) -> bool {
-        loop {
-            if self.stack.is_empty() {
-                // Grammar already complete — extra char is invalid
-                return false;
-            }
-
-            // ── Eagerly drain fully-consumed frames ──────────────────────
-            {
-                let frame = self.stack.last().unwrap();
-                let rule = match self.grammar.rules.get(&frame.rule_name) {
-                    Some(r) => r,
-                    None    => { self.error = true; return false; }
-                };
-                if frame.alt_idx >= rule.alternatives.len() {
-                    self.error = true;
-                    return false;
-                }
-                let alt_len = rule.alternatives[frame.alt_idx].len();
-                if frame.item_idx >= alt_len {
-                    self.stack.pop();
-                    if self.stack.is_empty() {
-                        self.complete = true;
-                        return false; // grammar done; char not accepted
-                    }
-                    self.stack.last_mut().unwrap().item_idx += 1;
+        for stack in &self.active_stacks {
+            if let Some(frame) = stack.last() {
+                let rule = &self.grammar.rules[&frame.rule_name];
+                if frame.item_idx >= rule.alternatives[frame.alt_idx].len() {
                     continue;
                 }
-            }
-
-            let frame = self.stack.last().unwrap().clone();
-            let rule = self.grammar.rules.get(&frame.rule_name).unwrap().clone();
-            let n_alts = rule.alternatives.len();
-            let alt = rule.alternatives[frame.alt_idx].clone();
-            let item = alt[frame.item_idx].clone();
-
-            match item {
-                GbnfItem::Literal(ref lit) => {
-                    let expected: Vec<char> = lit.chars().collect();
-                    let pos = frame.lit_pos;
-                    if pos < expected.len() && expected[pos] == c {
-                        let f = self.stack.last_mut().unwrap();
-                        f.lit_pos += 1;
-                        if f.lit_pos >= expected.len() {
-                            // Literal fully consumed — advance item
-                            f.item_idx += 1;
-                            f.lit_pos = 0;
-                            // Eagerly drain any now-exhausted frames
-                            self.drain_completed_frames();
+                let elem = &rule.alternatives[frame.alt_idx][frame.item_idx];
+                
+                match &elem.item {
+                    GbnfItem::Literal(lit) => {
+                        let expected: Vec<char> = lit.chars().collect();
+                        if frame.lit_pos < expected.len() && expected[frame.lit_pos] == c {
+                            let mut new_stack = stack.clone();
+                            let f = new_stack.last_mut().unwrap();
+                            f.lit_pos += 1;
+                            if f.lit_pos >= expected.len() {
+                                f.lit_pos = 0;
+                                f.item_idx += 1;
+                            }
+                            next_stacks.push(new_stack);
                         }
-                        return true;
                     }
-                    // Wrong char — try next alternative
-                    let f = self.stack.last_mut().unwrap();
-                    f.alt_idx += 1;
-                    f.item_idx = 0;
-                    f.lit_pos = 0;
-                    if f.alt_idx >= n_alts {
-                        self.error = true;
-                        return false;
+                    GbnfItem::CharClass { ranges, negated } => {
+                        let in_class = ranges.iter().any(|&(lo, hi)| c >= lo && c <= hi);
+                        let accepted = if *negated { !in_class } else { in_class };
+                        if accepted {
+                            let mut new_stack = stack.clone();
+                            let f = new_stack.last_mut().unwrap();
+                            f.item_idx += 1;
+                            next_stacks.push(new_stack);
+                        }
                     }
-                    continue;
-                }
-
-                GbnfItem::CharClass { ref ranges, negated } => {
-                    let in_class = ranges.iter().any(|&(lo, hi)| c >= lo && c <= hi);
-                    let accepted = if negated { !in_class } else { in_class };
-                    if accepted {
-                        let f = self.stack.last_mut().unwrap();
+                    GbnfItem::AnyChar => {
+                        let mut new_stack = stack.clone();
+                        let f = new_stack.last_mut().unwrap();
                         f.item_idx += 1;
-                        f.lit_pos = 0;
-                        self.drain_completed_frames();
-                        return true;
+                        next_stacks.push(new_stack);
                     }
-                    // Try next alternative
-                    let f = self.stack.last_mut().unwrap();
-                    f.alt_idx += 1;
-                    f.item_idx = 0;
-                    f.lit_pos = 0;
-                    if f.alt_idx >= n_alts {
-                        self.error = true;
-                        return false;
+                    GbnfItem::RuleRef(_) => {
+                        unreachable!("RuleRef should have been expanded");
                     }
-                    continue;
-                }
-
-                GbnfItem::AnyChar => {
-                    let f = self.stack.last_mut().unwrap();
-                    f.item_idx += 1;
-                    self.drain_completed_frames();
-                    return true;
-                }
-
-                GbnfItem::RuleRef(ref ref_name) => {
-                    let ref_name = ref_name.clone();
-                    // Advance parent past this ref *before* pushing child
-                    self.stack.last_mut().unwrap().item_idx += 1;
-                    self.stack.push(StackFrame {
-                        rule_name: ref_name,
-                        alt_idx: 0,
-                        item_idx: 0,
-                        lit_pos: 0,
-                    });
-                    continue;
                 }
             }
         }
+
+        if next_stacks.is_empty() {
+            self.active_stacks.clear();
+            return false;
+        }
+
+        next_stacks.sort();
+        next_stacks.dedup();
+        self.active_stacks = next_stacks;
+        self.output.push(c);
+        self.expand_active_stacks();
+        true
     }
 
-    /// Eagerly pop any stack frames whose current alternative is fully consumed.
-    ///
-    /// Called immediately after any `item_idx` advance so that `is_complete()`
-    /// returns true as soon as the last item is consumed — not one char later.
-    fn drain_completed_frames(&mut self) {
-        loop {
-            if self.stack.is_empty() {
-                self.complete = true;
-                return;
-            }
-            let frame = self.stack.last().unwrap();
-            let rule = match self.grammar.rules.get(&frame.rule_name) {
-                Some(r) => r,
-                None    => { self.error = true; return; }
-            };
-            if frame.alt_idx >= rule.alternatives.len() {
-                self.error = true;
-                return;
-            }
-            let alt_len = rule.alternatives[frame.alt_idx].len();
-            if frame.item_idx >= alt_len {
-                self.stack.pop();
-                if self.stack.is_empty() {
-                    self.complete = true;
-                    return;
+    fn expand_active_stacks(&mut self) {
+        let mut expanded = self.active_stacks.clone();
+        let mut processed = 0;
+
+        while processed < expanded.len() {
+            let mut stack = expanded[processed].clone();
+            processed += 1;
+
+            if stack.is_empty() { continue; }
+
+            let frame = stack.last().unwrap();
+            let rule = &self.grammar.rules[&frame.rule_name];
+            
+            if frame.item_idx >= rule.alternatives[frame.alt_idx].len() {
+                stack.pop();
+                if stack.is_empty() {
+                    if !expanded.contains(&stack) { expanded.push(stack); }
+                } else {
+                    stack.last_mut().unwrap().item_idx += 1;
+                    if !expanded.contains(&stack) { expanded.push(stack); }
                 }
-                self.stack.last_mut().unwrap().item_idx += 1;
-                // keep looping — parent may also now be exhausted
-            } else {
-                break;
+                continue;
+            }
+
+            let frame = stack.last().unwrap();
+            let rule = &self.grammar.rules[&frame.rule_name];
+            let elem = &rule.alternatives[frame.alt_idx][frame.item_idx];
+
+            match &elem.item {
+                GbnfItem::RuleRef(name) => {
+                    let sub_rule = match self.grammar.rules.get(name) {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    for alt_idx in 0..sub_rule.alternatives.len() {
+                        let mut new_stack = stack.clone();
+                        new_stack.push(StackFrame {
+                            rule_name: name.clone(),
+                            alt_idx,
+                            item_idx: 0,
+                            lit_pos: 0,
+                        });
+                        if !expanded.contains(&new_stack) {
+                            expanded.push(new_stack);
+                        }
+                    }
+                }
+                _ => {
+                    match elem.quant {
+                        Quantifier::ZeroOrOne | Quantifier::ZeroOrMore => {
+                            let mut skip_stack = stack.clone();
+                            skip_stack.last_mut().unwrap().item_idx += 1;
+                            if !expanded.contains(&skip_stack) {
+                                expanded.push(skip_stack);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
+
+        self.active_stacks = self.finalize_expansion(expanded);
+    }
+
+    fn finalize_expansion(&self, mut stacks: Vec<Vec<StackFrame>>) -> Vec<Vec<StackFrame>> {
+        let mut i = 0;
+        while i < stacks.len() {
+            let stack = stacks[i].clone();
+            i += 1;
+            if stack.is_empty() { continue; }
+
+            let frame = stack.last().unwrap();
+            let rule = &self.grammar.rules[&frame.rule_name];
+            
+            if frame.item_idx > 0 {
+                let prev_elem = &rule.alternatives[frame.alt_idx][frame.item_idx - 1];
+                if matches!(prev_elem.quant, Quantifier::OneOrMore | Quantifier::ZeroOrMore) {
+                    let mut loop_stack = stack.clone();
+                    let f = loop_stack.last_mut().unwrap();
+                    f.item_idx -= 1;
+                    f.lit_pos = 0;
+                    if !stacks.contains(&loop_stack) {
+                        stacks.push(loop_stack);
+                    }
+                }
+            }
+        }
+        stacks.sort();
+        stacks.dedup();
+        stacks
     }
 
     pub fn is_complete(&self) -> bool {
-        self.complete
+        self.active_stacks.iter().any(|s| s.is_empty())
     }
 
     pub fn is_error(&self) -> bool {
-        self.error
+        self.active_stacks.is_empty()
     }
 
     pub fn output(&self) -> &str {
@@ -562,6 +571,7 @@ impl GbnfState {
 ///
 /// Create once per generation, call [`step_mask`] before each sampling step,
 /// then [`push_token`] after sampling to advance the state.
+#[derive(Debug, Clone)]
 pub enum GbnfConstraint {
     /// Full GBNF grammar engine
     Grammar {
@@ -598,12 +608,8 @@ impl GbnfConstraint {
         Self::from_str(grammar, token_texts)
     }
 
-    /// Integer constraint: a digit or negative digit.
-    ///
-    /// Uses explicit alternatives because the current parser silently drops
-    /// `?`/`+` quantifiers (full quantifier support is a future extension).
     pub fn integer(token_texts: Vec<String>) -> Result<Self, String> {
-        let grammar = "root ::= [0-9] | \"-\" [0-9]";
+        let grammar = "root ::= \"-\"? [0-9]+";
         Self::from_str(grammar, token_texts)
     }
 
@@ -640,6 +646,27 @@ impl GbnfConstraint {
         }
     }
 
+    /// Validate a sequence of tokens from the current state.
+    /// Returns true if the entire path is valid.
+    pub fn validate_path(&self, tokens: &[u32], tokenizer: &crate::tokenizer::Tokenizer) -> bool {
+        let mut sim = self.clone();
+        for &token_id in tokens {
+            let text = tokenizer.decode_token(token_id);
+            // Check if this token is valid in current state
+            match &sim {
+                Self::Grammar { state, .. } => {
+                    if !state.can_push_str(&text) { return false; }
+                }
+                Self::Json(sampler) => {
+                    // Primitive check for JSON
+                    if !sampler.can_push_token(token_id, &text) { return false; }
+                }
+            }
+            sim.push_token(&text);
+        }
+        true
+    }
+
     /// Apply the constraint mask directly to a logits slice (in-place).
     ///
     /// Convenience wrapper: calls `step_mask()` then `apply_logit_mask()`.
@@ -662,8 +689,8 @@ impl GbnfConstraint {
                 }
             }
             Self::Json(sampler) => {
-                // JsonConstrainedSampler::push_token takes (token_id, decoded)
-                // We use 0 as placeholder — only decoded text is used internally
+                // JsonConstrainedSampler::push_token only requires decoded text 
+                // for structural state transition.
                 sampler.push_token(0, decoded);
             }
         }
@@ -853,6 +880,47 @@ mod tests {
         assert!(mask[0], "\"yes\" allowed");
         assert!(mask[1], "\"no\" allowed");
         assert!(!mask[2], "\"maybe\" blocked");
+    }
+
+    #[test]
+    fn test_quantifier_optional() {
+        let g = Arc::new(GbnfGrammar::parse("root ::= \"a\"? \"b\"").unwrap());
+        let state = GbnfState::new(g);
+        assert!(state.can_push_str("b"), "Optional 'a' skipped");
+        assert!(state.can_push_str("ab"), "Optional 'a' included");
+    }
+
+    #[test]
+    fn test_quantifier_star() {
+        let g = Arc::new(GbnfGrammar::parse("root ::= \"a\"* \"b\"").unwrap());
+        let state = GbnfState::new(g);
+        assert!(state.can_push_str("b"), "Zero 'a's");
+        assert!(state.can_push_str("ab"), "One 'a'");
+        assert!(state.can_push_str("aaab"), "Multiple 'a's");
+    }
+
+    #[test]
+    fn test_quantifier_plus() {
+        let g = Arc::new(GbnfGrammar::parse("root ::= \"a\"+ \"b\"").unwrap());
+        let state = GbnfState::new(g);
+        assert!(!state.can_push_str("b"), "Should require at least one 'a'");
+        assert!(state.can_push_str("ab"), "One 'a' works");
+        assert!(state.can_push_str("aaaab"), "Multiple 'a's work");
+    }
+
+    #[test]
+    fn test_integer_multi_digit() {
+        let vocab = mk_vocab(&["1", "2", "3", "456", "-", " "]);
+        let c = GbnfConstraint::integer(vocab).unwrap();
+        let mut sim = c;
+        sim.push_token("1");
+        let mask = sim.step_mask();
+        assert!(mask[1], "Should allow '2' after '1'");
+        assert!(mask[3], "Should allow '456' after '1'");
+        
+        sim.push_token("456");
+        assert!(sim.is_complete(), "Integer can be complete after digits");
+        assert!(sim.step_mask()[1], "But can also continue with more digits");
     }
 
     #[test]

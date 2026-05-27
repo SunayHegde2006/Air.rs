@@ -396,6 +396,14 @@ impl<H: GpuHal> GpuHal for SecureAllocator<H> {
     fn vram_used(&self) -> Result<usize, HalError> {
         self.inner.vram_used()
     }
+
+    fn wait_timeline(&self, semaphore: u64, value: u64, timeout_ms: u64) -> Result<(), HalError> {
+        self.inner.wait_timeline(semaphore, value, timeout_ms)
+    }
+
+    fn signal_timeline(&self, semaphore: u64, value: u64) -> Result<(), HalError> {
+        self.inner.signal_timeline(semaphore, value)
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
