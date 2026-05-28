@@ -13,21 +13,27 @@ use crate::tensor_parallel::TensorParallelConfig;
 use crate::ops::RopeCache;
 use crate::dual_rope::DualRopeCache;
 
+/// Execution context for a single layer unit.
+/// Bundles environmental invariants and data to reduce interface noise.
+pub struct LayerExecutionContext<'a> {
+    pub x: &'a Tensor,
+    pub weights: Option<&'a QBlockWeights>,
+    pub state: Option<&'a LayerCache>,
+    pub pos: usize,
+    pub config: &'a ModelConfig,
+    pub rope_cache: Option<&'a RopeCache>,
+    pub dual_cache: Option<&'a DualRopeCache>,
+    pub mask: Option<&'a Tensor>,
+    pub tp: Option<&'a TensorParallelConfig>,
+}
+
 /// A functional unit of computation within a layer (e.g. Attention, FFN, MoE).
 ///
-/// Interface is purely functional: (input, stage) -> (output, updated_state)
+/// Interface is purely functional: context -> (output, updated_state)
 pub trait LayerUnit: Send + Sync {
     fn execute(
         &self,
-        x: &Tensor,
-        weights: &QBlockWeights,
-        state: Option<&LayerCache>,
-        pos: usize,
-        config: &ModelConfig,
-        rope_cache: Option<&RopeCache>,
-        dual_cache: Option<&DualRopeCache>,
-        mask: Option<&Tensor>,
-        tp: Option<&TensorParallelConfig>,
+        ctx: &LayerExecutionContext,
     ) -> Result<(Tensor, LayerCache)>;
 
     fn clone_box(&self) -> Box<dyn LayerUnit>;
@@ -80,17 +86,18 @@ impl LayerPipeline {
         let mut current_state = state.cloned().unwrap_or(LayerCache::Empty);
 
         for unit in &self.units {
-            let (out_x, out_state) = unit.execute(
-                &current_x,
-                weights,
-                Some(&current_state),
+            let ctx = LayerExecutionContext {
+                x: &current_x,
+                weights: Some(weights),
+                state: Some(&current_state),
                 pos,
-                &self.config,
+                config: &self.config,
                 rope_cache,
                 dual_cache,
                 mask,
                 tp,
-            )?;
+            };
+            let (out_x, out_state) = unit.execute(&ctx)?;
             current_x = out_x;
             current_state = out_state;
         }
@@ -125,3 +132,46 @@ impl LayerPipeline {
         Ok((current_x, current_state))
     }
 }
+
+/// A LayerUnit adapter that manages weight residency via a WeightStreamer.
+///
+/// Hides the loading/releasing lifecycle from the compute units.
+pub struct ResidentLayer {
+    pub inner: Box<dyn LayerUnit>,
+    pub streamer: Arc<WeightStreamer>,
+    pub layer_id: usize,
+    pub device: Device,
+}
+
+impl LayerUnit for ResidentLayer {
+    fn execute(&self, ctx: &LayerExecutionContext) -> Result<(Tensor, LayerCache)> {
+        // Ensure weights are resident
+        let weights = self.streamer.load_layer(self.layer_id, &self.device, ctx.tp)
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        
+        // Build a new context with the resident weights
+        let local_ctx = LayerExecutionContext {
+            weights: Some(&weights),
+            ..*ctx
+        };
+        
+        self.inner.execute(&local_ctx)
+    }
+
+    fn clone_box(&self) -> Box<dyn LayerUnit> {
+        Box::new(Self {
+            inner: self.inner.clone(),
+            streamer: Arc::clone(&self.streamer),
+            layer_id: self.layer_id,
+            device: self.device.clone(),
+        })
+    }
+}
+
+// Ensure LayerExecutionContext is Cloneable (shallow) for context patching.
+impl<'a> Clone for LayerExecutionContext<'a> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<'a> Copy for LayerExecutionContext<'a> {}

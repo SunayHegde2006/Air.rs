@@ -707,6 +707,21 @@ STRIX (**S**treamed **T**ensor **R**esidence & **I**ntelligent e**X**change) man
 - [x] **HellaSwag / MMLU eval gates** — CI regression guard with real likelihood scoring
 - [x] **STRIX Vulkan Buffer Pooling** — Async staging overlap (8MB managed pool)
 
+### 🗓️ v1.2.0 — The Deepening Series (Upcoming)
+
+> **Theme: Ultra-Lightweight Persistence.** Shifting from bulk data movement to differential state updates and hardware-native kernels.
+
+| Innovation | Inspiration | Goal |
+|---|---|---|
+| **Speculative Checkpointing (SC)** | `llama.cpp` | Replace heavy KV-copy rollbacks with 40% lighter diff-trees. |
+| **Expert Parallelism (EP)** | `vLLM` | Decentralized MoE expert-swapping via WARP-drive. |
+| **FP4 / MXFP8 States** | `TensorRT-LLM` | Blackwell-tier precision for DeltaNet recurrent matrices. |
+| **Hardware-native MLX-seam** | `MLX` | JIT kernel acceleration for Apple M5/STRIX architectures. |
+| **Predictive Prefill Routing** | `vLLM` | Hide latency in disaggregated serving via speculative prompt routing. |
+
+> [!NOTE]
+> **State of the Art (SOTA) Analysis (May 2026):** Our roadmap aligns with the shift toward **Disaggregated Serving** (pioneered by TensorRT-LLM) and **Speculative Checkpointing** (llama.cpp). While `MLX` leads in raw Apple Silicon performance, Air.rs v1.2.0 aims to leapfrog by combining DeltaNet's $O(d^2)$ recurrence with the ultra-lightweight rollback mechanics seen in the latest `llama.cpp` breakthroughs.
+
 ---
 
 ## Build

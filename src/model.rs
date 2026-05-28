@@ -421,7 +421,7 @@ fn apply_norm(
 ///
 /// Returns `(new_hidden, new_k, new_v)` — caller saves K/V to cache.
 use crate::kv_cache::LayerCache;
-use crate::layer_pipeline::LayerUnit;
+use crate::layer_pipeline::{LayerUnit, LayerExecutionContext};
 
 #[derive(Clone)]
 pub struct StandardLayerUnit;
@@ -429,33 +429,25 @@ pub struct StandardLayerUnit;
 impl LayerUnit for StandardLayerUnit {
     fn execute(
         &self,
-        x: &Tensor,
-        weights: &QBlockWeights,
-        state: Option<&LayerCache>,
-        pos: usize,
-        config: &ModelConfig,
-        rope_cache: Option<&crate::ops::RopeCache>,
-        dual_cache: Option<&crate::dual_rope::DualRopeCache>,
-        mask: Option<&Tensor>,
-        tp: Option<&crate::tensor_parallel::TensorParallelConfig>,
+        ctx: &crate::layer_pipeline::LayerExecutionContext,
     ) -> candle_core::Result<(Tensor, LayerCache)> {
-        let (k_in, v_in) = match state {
+        let (k_in, v_in) = match ctx.state {
             Some(LayerCache::Attention { k, v }) => (Some(k), Some(v)),
             _ => (None, None),
         };
         let (out, nk, nv) = transformer_block(
             0,
-            x,
-            weights,
+            ctx.x,
+            ctx.weights.ok_or_else(|| candle_core::Error::Msg("weights missing in StandardLayerUnit".to_string()))?,
             k_in,
             v_in,
             None,
-            config,
-            pos,
-            rope_cache,
-            dual_cache,
-            mask,
-            tp,
+            ctx.config,
+            ctx.pos,
+            ctx.rope_cache,
+            ctx.dual_cache,
+            ctx.mask,
+            ctx.tp,
         )?;
         Ok((out, LayerCache::Attention { k: nk, v: nv }))
     }
@@ -524,10 +516,9 @@ pub fn transformer_block(
                 .ok_or_else(|| candle_core::Error::Msg(format!("attn_gate missing for DeltaNet layer {layer_id}")))?
                 .forward(&normed.to_dtype(candle_core::DType::F32)?)?;
             
-            // Run the AVX-512 optimized recurrence (status: CPU fallback on non-AVX)
-            // TODO: Move to CUDA kernel in v0.10.1
+            // Run the production-ready unified recurrence (AVX-512 for CPU, cuBLAS for GPU)
             let out = forward_deltanet(
-                &q, &k, &v, &gate, weights, state, config
+                &q, &k, &v, &gate, weights, state, config, layer_id
             )?;
 
             // DeltaNet doesn't use standard KV cache for subsequent tokens
@@ -799,6 +790,7 @@ pub fn forward_deltanet(
     _weights: &QBlockWeights,
     state: &mut crate::gated_deltanet::DeltaState,
     _config: &ModelConfig,
+    layer_idx: usize,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = q.dims3()?;
     let device = q.device();
@@ -816,98 +808,28 @@ pub fn forward_deltanet(
         (q.clone(), k.clone(), v.clone())
     };
 
-    // α and β from weights if available, else defaults.
-    let alpha = _weights.ssm_alpha.as_ref().map(|t| t.to_scalar::<f32>().unwrap_or(1.0)).unwrap_or(1.0);
-    let beta  = _weights.ssm_beta.as_ref().map(|t| t.to_scalar::<f32>().unwrap_or(0.0)).unwrap_or(0.0);
-    let dt_bias = _weights.ssm_dt_bias.as_ref().map(|t| t.to_scalar::<f32>().unwrap_or(0.0)).unwrap_or(0.0);
+    // ── 2. Unified Dispatch ────────────────────────────────────────────
+    let alpha_val = _weights.ssm_alpha.as_ref().map(|t| t.to_scalar::<f32>().unwrap_or(0.8)).unwrap_or(0.8);
+    let beta_val  = _weights.ssm_beta.as_ref().map(|t| t.to_scalar::<f32>().unwrap_or(0.5)).unwrap_or(0.5);
 
-    // ── GPU-native path ────────────────────────────────────────────────────
-    if !matches!(device, Device::Cpu) {
-        if state.tensor.is_none() {
-            state.tensor = Some(Tensor::zeros((state.n_heads, state.d_v, state.d_k), candle_core::DType::F32, device)?);
-        }
-        let d_k = state.d_k;
-        let s = state.tensor.as_mut().unwrap();
-        let mut outputs = Vec::with_capacity(seq_len);
+    let alpha = (Tensor::ones((batch, seq_len, state.n_heads), q.dtype(), device)? * alpha_val as f64)?;
+    let beta  = (Tensor::ones((batch, seq_len, state.n_heads), q.dtype(), device)? * beta_val as f64)?;
 
-        for t in 0..seq_len {
-            let q_t = q.i((.., t, ..))?;
-            let k_t = k.i((.., t, ..))?;
-            let v_t = v.i((.., t, ..))?;
-            let g_t = gate.i((.., t, ..))?;
+    let mut layer_manager = crate::gated_deltanet::GatedDeltaNetLayer {
+        config: crate::gated_deltanet::DeltaNetConfig {
+            n_heads: state.n_heads,
+            head_dim: state.d_k,
+            chunk_size: 512,
+            layer_idx,
+        },
+        states: vec![state.clone()],
+    };
 
-            let n_q  = q_t.dim(1)? / d_k;
-            let n_kv = k_t.dim(1)? / d_k;
-            let ratio = n_q / n_kv;
+    let ssm_out = layer_manager.process(&q, &k, &v, &alpha, &beta)?;
+    
+    // Sync state back
+    *state = layer_manager.states[0].clone();
 
-            let q_th = q_t.reshape((batch, n_q,  d_k))?;
-            let k_th = k_t.reshape((batch, n_kv, d_k))?;
-            let v_th = v_t.reshape((batch, n_kv, d_k))?;
-            let g_th = g_t.reshape((batch, n_q,  d_k))?;
-
-            // GQA repeat — expand [batch, n_kv, d_k] → [batch, n_q, d_k]
-            let k_th = if ratio > 1 {
-                k_th.unsqueeze(2)?.expand((batch, n_kv, ratio, d_k))?.reshape((batch, n_q, d_k))?
-            } else { k_th };
-            let v_th = if ratio > 1 {
-                v_th.unsqueeze(2)?.expand((batch, n_kv, ratio, d_k))?.reshape((batch, n_q, d_k))?
-            } else { v_th };
-
-            // δ = sigmoid(gate + beta + dt_bias)  — affine adds scalar bias
-            let bias_val = beta as f64 + dt_bias as f64;
-            let delta = crate::gated_deltanet::sigmoid_tensor(&g_th.affine(1.0, bias_val)?)?;
-            let ad = delta.affine(alpha as f64, 0.0)?;
-
-            // Persistent state update (batch=1 optimized)
-            let sk = s.matmul(&k_th.i(0)?.unsqueeze(2)?)?.squeeze(2)?;
-            let decay = sk.broadcast_mul(&ad.i(0)?)?;
-            let v_minus = v_th.i(0)?.sub(&decay)?;
-
-            let upd = v_minus.unsqueeze(2)?.matmul(&k_th.i(0)?.unsqueeze(1)?)?;
-            *s = s.add(&upd)?;
-
-            let o = s.matmul(&q_th.i(0)?.unsqueeze(2)?)?.squeeze(2)?;
-            let gated_o = o.mul(&crate::gated_deltanet::sigmoid_tensor(&g_th.i(0)?)?)?;
-            outputs.push(gated_o.unsqueeze(1)?);
-        }
-
-        let out = Tensor::cat(&outputs, 1)?;
-        return Ok(out);
-    }
-
-    // ── CPU fallback (AVX-512) ─────────────────────────────────────────────
-    let q_cpu    = q.to_device(&Device::Cpu)?.to_dtype(candle_core::DType::F32)?;
-    let k_cpu    = k.to_device(&Device::Cpu)?.to_dtype(candle_core::DType::F32)?;
-    let v_cpu    = v.to_device(&Device::Cpu)?.to_dtype(candle_core::DType::F32)?;
-    let gate_cpu = gate.to_device(&Device::Cpu)?.to_dtype(candle_core::DType::F32)?;
-
-    let q_data = q_cpu.flatten_all()?.to_vec1::<f32>()?;
-    let k_data = k_cpu.flatten_all()?.to_vec1::<f32>()?;
-    let v_data = v_cpu.flatten_all()?.to_vec1::<f32>()?;
-    let g_data = gate_cpu.flatten_all()?.to_vec1::<f32>()?;
-
-    let nh = state.n_heads;
-    let d  = state.d_k;
-    let mut out_data = vec![0.0f32; batch * seq_len * nh * d];
-
-    for t in 0..seq_len {
-        for h in 0..nh {
-            let offset = (t * nh + h) * d;
-            let h_q = &q_data[offset..offset + d];
-            let h_k = &k_data[offset..offset + d];
-            let h_v = &v_data[offset..offset + d];
-
-            let h_out = crate::gated_deltanet::delta_recurrence_step_fast(
-                state, h, h_q, h_k, h_v, alpha, beta,
-            );
-
-            for (i, &val) in h_out.iter().enumerate() {
-                out_data[offset + i] =
-                    val * crate::gated_deltanet::sigmoid(g_data[offset + i]);
-            }
-        }
-    }
-
-    Tensor::from_vec(out_data, (batch, seq_len, nh * d), &Device::Cpu)?
-        .to_device(device)
+    // ── 3. Final Gating (SiLU) ─────────────────────────────────────────
+    ssm_out.broadcast_mul(&crate::ops::silu(gate)?)
 }

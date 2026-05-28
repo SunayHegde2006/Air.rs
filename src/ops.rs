@@ -343,10 +343,10 @@ pub fn attention(
     {
         // Flash Attention only works on CUDA with F16/BF16 tensors.
         // Fall back to standard path on CPU or if dtype isn't supported.
-        let on_cuda = !q.device().is_cpu();
+        let is_cuda = matches!(q.device(), candle_core::Device::Cuda(_));
         let dtype_ok = matches!(q.dtype(), DType::F16 | DType::BF16);
         // Flash-attn currently doesn't support custom masks for tree verification.
-        if on_cuda && dtype_ok && custom_mask.is_none() {
+        if is_cuda && dtype_ok && custom_mask.is_none() {
             return flash_grouped_query_attention(q, k, v, n_heads, n_kv_heads, window_size);
         }
     }
@@ -374,9 +374,9 @@ pub fn gemma4_attention(
 ) -> Result<Tensor> {
     #[cfg(feature = "flash-attn")]
     {
-        let on_cuda = !q.device().is_cpu();
+        let is_cuda = matches!(q.device(), candle_core::Device::Cuda(_));
         let dtype_ok = matches!(q.dtype(), DType::F16 | DType::BF16);
-        if on_cuda && dtype_ok && custom_mask.is_none() {
+        if is_cuda && dtype_ok && custom_mask.is_none() {
             let head_dim = q.dim(D::Minus1)?;
             let softmax_scale = 1.0 / (head_dim as f32).sqrt();
 
@@ -457,11 +457,15 @@ pub fn gemma4_attention(
 /// Input shapes: [batch, seq, heads, dim]
 #[cfg(feature = "flash-attn")]
 pub fn flash_grouped_query_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
     n_heads: usize,
     n_kv_heads: usize,
     window_size: Option<usize>,
 ) -> Result<Tensor> {
-    let head_dim = q.dim(D::Minus1)?;
+    use candle_core::IndexOp;
+    let head_dim = q.dim(candle_core::D::Minus1)?;
     let softmax_scale = 1.0 / (head_dim as f32).sqrt();
 
     // Repeat K/V heads to match Q if GQA

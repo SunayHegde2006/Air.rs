@@ -125,17 +125,22 @@ pub struct Gemma4Block {
 impl crate::layer_pipeline::LayerUnit for Gemma4Block {
     fn execute(
         &self,
-        x: &Tensor,
-        _weights: &crate::model::QBlockWeights,
-        state: Option<&LayerCache>,
-        pos: usize,
-        _config: &crate::model::ModelConfig,
-        _rope_cache: Option<&crate::ops::RopeCache>,
-        _dual_cache: Option<&crate::dual_rope::DualRopeCache>,
-        _mask: Option<&Tensor>,
-        tp: Option<&crate::tensor_parallel::TensorParallelConfig>,
+        ctx: &crate::layer_pipeline::LayerExecutionContext,
     ) -> Result<(Tensor, LayerCache)> {
-        let (kv_k, kv_v) = match state {
+        let x = ctx.x;
+        let pos = ctx.pos;
+        let tp = ctx.tp;
+
+        // Correct tier derivation (Gemma 4 hybrid layout)
+        let is_last = self.layer_id == self.n_layers - 1;
+        let is_global = is_last || (self.layer_id > 0 && self.layer_id % self.global_every_n == self.global_every_n - 1);
+        let backend = if is_global {
+            crate::attention_backend::AttentionBackend::GlobalFull
+        } else {
+            crate::attention_backend::AttentionBackend::SlidingWindow { window: self.window_size }
+        };
+
+        let (kv_k, kv_v) = match ctx.state {
             Some(LayerCache::Attention { k, v }) => (Some(k.clone()), Some(v.clone())),
             _ => (None, None),
         };
