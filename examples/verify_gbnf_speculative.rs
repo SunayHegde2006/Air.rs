@@ -3,11 +3,7 @@
 //! Demonstrates how the transformer pipeleine uses tree attention masks
 //! to enforce GBNF grammar constraints during speculative decoding.
 
-use air_rs::dispatcher::{GenerateConfig, TokenChunk};
-use air_rs::tokenizer::Tokenizer;
-use air_rs::weight_streamer::WeightStreamer;
-use air_rs::generator::InferenceGenerator;
-use std::sync::Arc;
+use air_rs::dispatcher::GenerateConfig;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -30,7 +26,9 @@ async fn main() -> anyhow::Result<()> {
         draft_model: None, // We'll test standard first, then speculative logic
         gbnf: Some(grammar.to_string()),
     };
-
+    
+    println!("Target Model: {}", config.model);
+    println!("Prompt: {}", config.prompt);
     println!("Grammar: {}", grammar);
     println!("Note: This example verifies the architectural integration.");
     println!("Status: ✅ GBNF wired to Dispatcher Actor loop");

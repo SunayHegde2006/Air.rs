@@ -1,10 +1,10 @@
-use air_rs::pd_disagg::{KvBlock, KvTransferError};
+use air_rs::pd_disagg::KvBlock;
 use air_rs::warp_protocol::{WarpHeader, WarpFeature};
 use candle_core::{Device, DType};
 
 #[test]
 fn test_warp_p2p_int8_quant() -> Result<(), Box<dyn std::error::Error>> {
-    let device = Device::Cpu;
+    let _device = Device::Cpu;
     
     // 1. Create a dummy f16 block (bf16 bytes)
     let data = vec![0.5f32, -1.0, 2.0, 0.0];
