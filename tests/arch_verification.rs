@@ -194,9 +194,9 @@ fn swa_window_boundary_exact() -> candle_core::Result<()> {
         "k=0 is beyond window boundary, must be masked; got {}", flat[0]);
 
     // k=1..4 should be unmasked
-    for k in 1..=window {
-        assert_eq!(flat[k], 0.0_f32,
-            "k={k} is within window, must NOT be masked; got {}", flat[k]);
+    for (k, &val) in flat.iter().enumerate().take(window + 1).skip(1) {
+        assert_eq!(val, 0.0_f32,
+            "k={k} is within window, must NOT be masked; got {val}");
     }
     Ok(())
 }

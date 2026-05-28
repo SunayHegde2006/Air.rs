@@ -236,13 +236,13 @@ impl PyGbnfConstraint {
     pub(crate) fn build(&self, token_texts: Vec<String>) -> PyResult<GbnfConstraint> {
         match &self.grammar_src {
             GrammarSpec::Json       => Ok(GbnfConstraint::json_mode(token_texts)),
-            GrammarSpec::Integer    => GbnfConstraint::integer(token_texts).map_err(|e| PyValueError::new_err(e)),
-            GrammarSpec::Identifier => GbnfConstraint::identifier(token_texts).map_err(|e| PyValueError::new_err(e)),
+            GrammarSpec::Integer    => GbnfConstraint::integer(token_texts).map_err(PyValueError::new_err),
+            GrammarSpec::Identifier => GbnfConstraint::identifier(token_texts).map_err(PyValueError::new_err),
             GrammarSpec::Choice(opts) => {
                 let refs: Vec<&str> = opts.iter().map(|s| s.as_str()).collect();
-                GbnfConstraint::choice(&refs, token_texts).map_err(|e| PyValueError::new_err(e))
+                GbnfConstraint::choice(&refs, token_texts).map_err(PyValueError::new_err)
             }
-            GrammarSpec::Raw(src)   => GbnfConstraint::from_str(src, token_texts).map_err(|e| PyValueError::new_err(e)),
+            GrammarSpec::Raw(src)   => GbnfConstraint::from_str(src, token_texts).map_err(PyValueError::new_err),
         }
     }
 }

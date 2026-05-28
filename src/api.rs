@@ -392,7 +392,7 @@ async fn chat_completions(
             }
         }
 
-        let prompt_tokens = estimate_tokens(&req.messages.last().map(|m| m.content.as_str()).unwrap_or(""));
+        let prompt_tokens = estimate_tokens(req.messages.last().map(|m| m.content.as_str()).unwrap_or(""));
         
         let resp = ChatCompletionResponse {
             id,

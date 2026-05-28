@@ -590,7 +590,7 @@ mod tests {
         let bcp = sa.allocate(128, 64, owner).unwrap();
 
         // Write some data via the inner HAL.
-        let data = vec![0xFFu8; 128];
+        let data = [0xFFu8; 128];
         sa.inner.copy_to_vram(bcp.ptr(), data.as_ptr(), 128, 0).unwrap();
 
         // Secure free should zero then free.
@@ -666,7 +666,7 @@ mod tests {
 
         // Allocate + fill with pattern.
         let bcp = sa.allocate(512, 64, owner).unwrap();
-        let pattern = vec![0xDEu8; 512];
+        let pattern = [0xDEu8; 512];
         sa.inner.copy_to_vram(bcp.ptr(), pattern.as_ptr(), 512, 0).unwrap();
 
         // secure_free zeroes then frees.

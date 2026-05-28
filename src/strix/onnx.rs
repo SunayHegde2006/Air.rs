@@ -685,7 +685,7 @@ mod tests {
 
     /// Write a varint field.
     fn push_varint_field(buf: &mut Vec<u8>, field: u32, val: u64) {
-        push_varint(buf, ((field as u64) << 3) | 0); // tag (wire=varint)
+        push_varint(buf, (field as u64) << 3); // tag (wire=varint)
         push_varint(buf, val);
     }
 
@@ -874,7 +874,7 @@ mod tests {
     fn multi_tensor_model() {
         let mut graph = Vec::new();
         let raw16 = vec![0u8; 16];
-        let raw32 = vec![0u8; 32];
+        let raw32 = [0u8; 32];
         push_ld_field(&mut graph, 5, &build_tensor_proto("A", &[4], 1, &raw16));
         push_ld_field(&mut graph, 5, &build_tensor_proto("B", &[4], 10, &raw32[..8]));
 

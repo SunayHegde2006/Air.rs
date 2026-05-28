@@ -13,7 +13,7 @@ fn main() {
     println!("Detection Time:  {:?}", result.total_detection_time);
     println!("SLA Met:         {}", result.sla_met);
     println!("Total Wall Time: {:?}", duration);
-    println!("");
+    println!();
 
     println!("--- GPU Probes ---");
     for probe in result.gpu_probes {

@@ -180,8 +180,10 @@ impl MedusaHeads {
         let mut draft_tokens = Vec::with_capacity(self.config.n_heads);
         let mut draft_hiddens = Vec::with_capacity(self.config.n_heads);
 
-        let mut sampler_config = crate::sampler::SamplerConfig::default();
-        sampler_config.temperature = self.config.draft_temperature;
+        let sampler_config = crate::sampler::SamplerConfig {
+            temperature: self.config.draft_temperature,
+            ..Default::default()
+        };
         let mut sampler = crate::sampler::Sampler::new(sampler_config);
 
         for head in &self.heads {

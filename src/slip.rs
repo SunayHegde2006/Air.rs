@@ -69,7 +69,7 @@ impl SlipDispatcher {
                 scheduler.ensure_resident(&needed_expert_ids, |id| {
                     streamer.load_expert(layer_id, id, &self.device)
                         .map_err(|e| e.to_string())
-                }).map_err(|e| candle_core::Error::Msg(e))?;
+                }).map_err(candle_core::Error::Msg)?;
                 
                 let mut w_gate = Vec::with_capacity(self.config.moe_top_k);
                 let mut w_up = Vec::with_capacity(self.config.moe_top_k);
