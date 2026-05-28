@@ -467,6 +467,12 @@ struct PooledStagingBuffer {
     size: usize,
 }
 
+/// Metadata for an active Vulkan memory allocation.
+struct VulkanAllocation {
+    memory: VkDeviceMemory,
+    size: usize,
+}
+
 /// Interior-mutable state for `VulkanHal`.
 struct VulkanHalInner {
     /// Active allocations keyed by `VkDeviceMemory` address (as u64).
@@ -764,6 +770,33 @@ impl VulkanHal {
                 memory,
                 size: staging_size,
             });
+        }
+
+        // ── 10. Pre-allocate Command Resources (one per stream) ──────
+        let mut command_pools = Vec::with_capacity(4);
+        let mut command_buffers = Vec::with_capacity(4);
+        for _ in 0..4 {
+            let pool_ci = VkCommandPoolCreateInfo {
+                s_type: VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                p_next: ptr::null(),
+                flags: VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                queue_family_index: selected_qf,
+            };
+            let mut pool: VkCommandPool = ptr::null_mut();
+            unsafe { vk_check(vkCreateCommandPool(device, &pool_ci, ptr::null(), &mut pool))? };
+
+            let buf_ai = VkCommandBufferAllocateInfo {
+                s_type: VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                p_next: ptr::null(),
+                command_pool: pool,
+                level: VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                command_buffer_count: 1,
+            };
+            let mut buf_handle: VkCommandBuffer = ptr::null_mut();
+            unsafe { vk_check(vkAllocateCommandBuffers(device, &buf_ai, &mut buf_handle))? };
+
+            command_pools.push(pool);
+            command_buffers.push(buf_handle);
         }
 
         Ok(Self {
@@ -1100,9 +1133,13 @@ impl GpuHal for VulkanHal {
             
             // For simplicity, we use the stream index to pick a pool slot.
             // In a full implementation, we'd use a semaphore to avoid host-read races.
-            let pooled = &inner.staging_pool[stream_idx];
-            if size > pooled.size {
-                return Err(HalError::Unsupported(format!("pooled staging buffer too small ({} < {})", pooled.size, size)));
+            let (pooled_mem, pooled_buf, pooled_size) = {
+                let p = &inner.staging_pool[stream_idx];
+                (p.memory, p.buffer, p.size)
+            };
+
+            if size > pooled_size {
+                return Err(HalError::Unsupported(format!("pooled staging buffer too small ({} < {})", pooled_size, size)));
             }
 
             let alloc = inner.allocations.get(&dst.0).ok_or(HalError::DriverError { code: -1, message: "bad dst".into() })?;
@@ -1112,9 +1149,9 @@ impl GpuHal for VulkanHal {
             unsafe {
                 // Map pooled staging memory
                 let mut mapped: *mut u8 = ptr::null_mut();
-                vk_check(vkMapMemory(self.device, pooled.memory, 0, size as u64, 0, &mut mapped))?;
+                vk_check(vkMapMemory(self.device, pooled_mem, 0, size as u64, 0, &mut mapped))?;
                 ptr::copy_nonoverlapping(src, mapped, size);
-                vkUnmapMemory(self.device, pooled.memory);
+                vkUnmapMemory(self.device, pooled_mem);
 
                 // We need a VkBuffer wrapper for dst memory to use vkCmdCopyBuffer.
                 // This is a short-term allocation; production code would pool these too.
@@ -1142,7 +1179,7 @@ impl GpuHal for VulkanHal {
                 vk_check(vkBeginCommandBuffer(cb, &begin_info))?;
                 
                 let region = VkBufferCopy { src_offset: 0, dst_offset: 0, size: size as u64 };
-                vkCmdCopyBuffer(cb, pooled.buffer, dst_buffer, 1, &region);
+                vkCmdCopyBuffer(cb, pooled_buf, dst_buffer, 1, &region);
                 vk_check(vkEndCommandBuffer(cb))?;
 
                 let submit_info = VkSubmitInfo {

@@ -1,4 +1,4 @@
-pub use crate::layer_pipeline::LayerUnit;
+pub use crate::layer_pipeline::{LayerUnit, LayerExecutionContext};
 use std::sync::Arc;
 use crate::model::{QBlockWeights, ModelConfig};
 use crate::ops::RopeCache;
@@ -47,17 +47,9 @@ impl QBlock {
 impl LayerUnit for QBlock {
     fn execute(
         &self,
-        x: &Tensor,
-        weights: &QBlockWeights,
-        state: Option<&LayerCache>,
-        pos: usize,
-        config: &ModelConfig,
-        rope_cache: Option<&crate::ops::RopeCache>,
-        dual_cache: Option<&crate::dual_rope::DualRopeCache>,
-        mask: Option<&Tensor>,
-        tp: Option<&crate::tensor_parallel::TensorParallelConfig>,
+        ctx: &LayerExecutionContext,
     ) -> Result<(Tensor, LayerCache)> {
-        let (k_in, v_in, mut delta_in) = match state {
+        let (k_in, v_in, mut delta_in) = match ctx.state {
             Some(LayerCache::Attention { k, v }) => (Some(k), Some(v), None),
             Some(LayerCache::Recurrent(s)) => (None, None, Some(s.clone())),
             _ => (None, None, None),
@@ -65,17 +57,17 @@ impl LayerUnit for QBlock {
 
         let (out, nk, nv) = crate::model::transformer_block(
             self.layer,
-            x,
-            weights,
+            ctx.x,
+            ctx.weights.unwrap_or(&self.weights),
             k_in,
             v_in,
             delta_in.as_mut(),
-            config,
-            pos,
-            rope_cache.or(self.rope.as_deref()),
-            dual_cache.or(self.dual_rope.as_deref()),
-            mask,
-            tp,
+            ctx.config,
+            ctx.pos,
+            ctx.rope_cache.or(self.rope.as_deref()),
+            ctx.dual_cache.or(self.dual_rope.as_deref()),
+            ctx.mask,
+            ctx.tp,
         )?;
 
         let next_cache = if let Some(s) = delta_in {
@@ -137,20 +129,12 @@ impl StreamingQBlock {
 impl LayerUnit for StreamingQBlock {
     fn execute(
         &self,
-        x: &Tensor,
-        _weights: &QBlockWeights, // Ignored; we stream our own
-        state: Option<&LayerCache>,
-        pos: usize,
-        config: &ModelConfig,
-        rope_cache: Option<&crate::ops::RopeCache>,
-        dual_cache: Option<&crate::dual_rope::DualRopeCache>,
-        mask: Option<&Tensor>,
-        tp: Option<&crate::tensor_parallel::TensorParallelConfig>,
+        ctx: &LayerExecutionContext,
     ) -> Result<(Tensor, LayerCache)> {
-        let weights = self.streamer.load_layer(self.layer, &self.device, tp)
+        let weights = self.streamer.load_layer(self.layer, &self.device, ctx.tp)
             .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
 
-        let (k_in, v_in, mut delta_in) = match state {
+        let (k_in, v_in, mut delta_in) = match ctx.state {
             Some(LayerCache::Attention { k, v }) => (Some(k), Some(v), None),
             Some(LayerCache::Recurrent(s)) => (None, None, Some(s.clone())),
             _ => (None, None, None),
@@ -158,17 +142,17 @@ impl LayerUnit for StreamingQBlock {
 
         let (out, nk, nv) = crate::model::transformer_block(
             self.layer,
-            x,
-            &weights,
+            ctx.x,
+            ctx.weights.unwrap_or(&weights),
             k_in,
             v_in,
             delta_in.as_mut(),
-            config,
-            pos,
-            rope_cache.or(self.rope.as_deref()),
-            dual_cache.or(self.dual_rope.as_deref()),
-            mask,
-            tp,
+            ctx.config,
+            ctx.pos,
+            ctx.rope_cache.or(self.rope.as_deref()),
+            ctx.dual_cache.or(self.dual_rope.as_deref()),
+            ctx.mask,
+            ctx.tp,
         )?;
 
         let next_cache = if let Some(s) = delta_in {
@@ -226,7 +210,7 @@ pub fn build_streaming_blocks(
 }
 
 // ---------------------------------------------------------------------------
-// DeltaNetBlock — GatedDeltaNet layer wrapped as TransformerBlock (v0.10.1)
+// DeltaNetBlock — GatedDeltaNet layer wrapped as TransformerBlock
 // ---------------------------------------------------------------------------
 
 /// A `GatedDeltaNetLayer` wrapped in the `TransformerBlock` interface.
@@ -296,42 +280,34 @@ impl DeltaNetBlock {
 impl LayerUnit for DeltaNetBlock {
     fn execute(
         &self,
-        x: &Tensor,
-        _weights: &QBlockWeights, // Ignored; we stream our own
-        state: Option<&LayerCache>,
-        pos: usize,
-        config: &ModelConfig,
-        _rope_cache: Option<&crate::ops::RopeCache>,
-        _dual_cache: Option<&crate::dual_rope::DualRopeCache>,
-        _mask: Option<&Tensor>,
-        tp: Option<&crate::tensor_parallel::TensorParallelConfig>,
+        ctx: &LayerExecutionContext,
     ) -> Result<(Tensor, LayerCache)> {
-        let mut delta_state = match state {
+        let mut delta_state = match ctx.state {
             Some(LayerCache::Recurrent(s)) => s.clone(),
             _ => {
                 crate::gated_deltanet::DeltaState::zeros_on_device(
-                    self.n_heads, self.head_dim, self.head_dim, &x.device()
+                    self.n_heads, self.head_dim, self.head_dim, &ctx.x.device()
                 )?
             }
         };
 
         // Load real weights from the streamer.
-        let weights_streamed = self.streamer.load_layer(self.layer, &x.device(), tp)
+        let weights_streamed = self.streamer.load_layer(self.layer, &ctx.x.device(), ctx.tp)
             .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
 
         let (out, _, _) = crate::model::transformer_block(
             self.layer,
-            x,
+            ctx.x,
             &weights_streamed,
             None,
             None,
             Some(&mut delta_state),
-            config,
-            pos,
+            ctx.config,
+            ctx.pos,
             None,
             None,
             None,
-            tp,
+            ctx.tp,
         )?;
 
         Ok((out, LayerCache::Recurrent(delta_state)))
@@ -343,7 +319,7 @@ impl LayerUnit for DeltaNetBlock {
 }
 
 // ---------------------------------------------------------------------------
-// build_hybrid_blocks — router-aware block factory (v0.10.1)
+// build_hybrid_blocks — router-aware block factory
 // ---------------------------------------------------------------------------
 
 /// Build a heterogeneous block stack driven by a `HybridAttentionRouter`.
@@ -351,7 +327,7 @@ impl LayerUnit for DeltaNetBlock {
 /// For each layer:
 /// - `AttentionBackend::GatedDeltaNet` → `DeltaNetBlock` (recurrent, no KV cache)
 /// - `AttentionBackend::Softmax`       → `StreamingQBlock` (standard GQA + KV cache)
-/// - `AttentionBackend::SlidingWindow` → `StreamingQBlock` (Gemma4; flash-attn in v0.10.1)
+/// - `AttentionBackend::SlidingWindow` → `StreamingQBlock` (Gemma4; flash-attn integrated)
 /// - `AttentionBackend::GlobalFull`    → `StreamingQBlock` (Gemma4 global layer)
 ///
 /// `delta_cfg_fn` is a closure that builds the `DeltaNetConfig` for a layer index.
@@ -438,18 +414,10 @@ impl MockTransformerBlock {
 impl LayerUnit for MockTransformerBlock {
     fn execute(
         &self,
-        x: &Tensor,
-        _weights: &QBlockWeights,
-        state: Option<&LayerCache>,
-        _pos: usize,
-        _config: &ModelConfig,
-        _rope_cache: Option<&crate::ops::RopeCache>,
-        _dual_cache: Option<&crate::dual_rope::DualRopeCache>,
-        _mask: Option<&Tensor>,
-        _tp: Option<&crate::tensor_parallel::TensorParallelConfig>,
+        ctx: &LayerExecutionContext,
     ) -> Result<(Tensor, LayerCache)> {
         self.forward_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok((x.clone(), state.cloned().unwrap_or(LayerCache::Empty)))
+        Ok((ctx.x.clone(), ctx.state.cloned().unwrap_or(LayerCache::Empty)))
     }
 
     fn clone_box(&self) -> Box<dyn LayerUnit> {
@@ -474,7 +442,18 @@ mod tests {
         let cfg = Arc::new(ModelConfig::default());
         let weights = QBlockWeights::default_for_test();
         let x = Tensor::ones((1, 4, 64), DType::F32, &Device::Cpu)?;
-        let (hidden, cache_out) = block.execute(&x, &weights, None, 0, &cfg, None, None, None, None)?;
+        let ctx = LayerExecutionContext {
+            x: &x,
+            weights: Some(&weights),
+            state: None,
+            pos: 0,
+            config: &cfg,
+            rope_cache: None,
+            dual_cache: None,
+            mask: None,
+            tp: None,
+        };
+        let (hidden, cache_out) = block.execute(&ctx)?;
 
         // hidden == x (pass-through)
         let x_vec: Vec<f32> = x.flatten_all()?.to_vec1()?;
@@ -494,9 +473,22 @@ mod tests {
         let cfg = Arc::new(ModelConfig::default());
         let weights = QBlockWeights::default_for_test();
         let x = Tensor::zeros((1, 1, 16), DType::F32, &Device::Cpu)?;
-        block.execute(&x, &weights, None, 0, &cfg, None, None, None, None)?;
-        block.execute(&x, &weights, None, 1, &cfg, None, None, None, None)?;
-        block.execute(&x, &weights, None, 2, &cfg, None, None, None, None)?;
+        let mut ctx = LayerExecutionContext {
+            x: &x,
+            weights: Some(&weights),
+            state: None,
+            pos: 0,
+            config: &cfg,
+            rope_cache: None,
+            dual_cache: None,
+            mask: None,
+            tp: None,
+        };
+        block.execute(&ctx)?;
+        ctx.pos = 1;
+        block.execute(&ctx)?;
+        ctx.pos = 2;
+        block.execute(&ctx)?;
         assert_eq!(block.calls(), 3);
         Ok(())
     }

@@ -3,14 +3,13 @@
 //! Validates bit-identical or epsilon-equivalent output between
 //! CPU and GPU backends to satisfy the "Software Agnostic" requirement.
 
-use air_rs::strix::hal::{GpuHal, HalError};
+use air_rs::strix::hal::GpuHal;
 #[cfg(feature = "cuda")]
 use air_rs::strix::cuda_hal::CudaHal;
 #[cfg(feature = "vulkan")]
 use air_rs::strix::vulkan_hal::VulkanHal;
 #[cfg(feature = "metal")]
 use air_rs::strix::metal_hal::MetalHal;
-use air_rs::strix::types::GpuPtr;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Air.rs Numerical Identity Test ===");
