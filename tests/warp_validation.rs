@@ -7,7 +7,7 @@ fn test_warp_p2p_int8_quant() -> Result<(), Box<dyn std::error::Error>> {
     let _device = Device::Cpu;
     
     // 1. Create a dummy f16 block (bf16 bytes)
-    let data = vec![0.5f32, -1.0, 2.0, 0.0];
+    let data = [0.5f32, -1.0, 2.0, 0.0];
     let bf16_data: Vec<u8> = data.iter()
         .flat_map(|&v| half::bf16::from_f32(v).to_le_bytes())
         .collect();

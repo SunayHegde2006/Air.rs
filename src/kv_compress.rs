@@ -654,11 +654,11 @@ mod tests {
     #[test]
     fn test_value_constant() {
         // All same value — should still work.
-        let value: Vec<f32> = vec![3.14; 64];
+        let value: Vec<f32> = vec![std::f32::consts::PI; 64];
         let compressed = CompressedValue::compress(&value);
         let decompressed = compressed.decompress();
         for &v in &decompressed {
-            assert!((v - 3.14).abs() < 0.01);
+            assert!((v - std::f32::consts::PI).abs() < 0.01);
         }
     }
 
