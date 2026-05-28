@@ -12,7 +12,7 @@
 <p align="center">
   <a href="#project-status"><img src="https://img.shields.io/badge/status-stable-brightgreen?style=flat-square&maxAge=2592000" alt="Status: Stable"></a>
   <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/v/air-rs?style=flat-square&color=brightgreen&maxAge=2592000" alt="PyPI"></a>
-  <a href="https://pepy.tech/project/air-rs"><img src="https://img.shields.io/endpoint?url=https://api.pepy.tech/badge/air-rs&style=flat-square&color=blue&maxAge=2592000" alt="PyPI Downloads"></a>
+  <a href="https://pepy.tech/project/air-rs"><img src="https://img.shields.io/pepy/dm/air-rs?style=flat-square&color=blue&maxAge=2592000" alt="PyPI Downloads"></a>
   <a href="https://github.com/SunayHegde2006/Air.rs/releases"><img src="https://img.shields.io/github/downloads/SunayHegde2006/Air.rs/total?style=flat-square&color=blue&maxAge=2592000" alt="GitHub Releases"></a>
   <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/pyversions/air-rs?style=flat-square&maxAge=2592000" alt="Python 3.11+"></a>
   <a href="#build"><img src="https://img.shields.io/badge/Rust-1.75+-F74C00?logo=rust&style=flat-square&maxAge=2592000" alt="Rust 1.75+"></a>
