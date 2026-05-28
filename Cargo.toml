@@ -17,6 +17,7 @@ tokio = { version = "1.37", features = ["full", "tracing"] }
 memmap2 = "0.9"
 anyhow = "1.0"
 libc = "0.2"
+libloading = "0.8"
 
 # ML & CUDA
 # candle-core is always included for tensor operations (CPU fallback).

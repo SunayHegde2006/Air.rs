@@ -11,7 +11,7 @@ fn main() {
     #[cfg(all(target_os = "windows", target_env = "msvc"))]
     {
         windows_sdk_link_search();
-        create_stdc_stub();
+        create_msvc_stubs(&["stdc++", "amdhip64", "cufile"]);
     }
 
     // --- macOS --------------------------------------------------------------
@@ -76,31 +76,15 @@ fn main() {
 ///
 /// Strategy 1: Use MSVC `lib.exe` to create a proper empty .lib
 /// Strategy 2: Write a minimal COFF object file and archive it manually
+/// Create valid empty `.lib` files for MSVC so the linker doesn't fail on CI
+/// when GPU SDKs or Linux-originating libraries (stdc++) are missing.
 #[cfg(all(target_os = "windows", target_env = "msvc"))]
-fn create_stdc_stub() {
+fn create_msvc_stubs(libs: &[&str]) {
     let out_dir = std::env::var("OUT_DIR").unwrap();
-    let stub_path = std::path::Path::new(&out_dir).join("stdc++.lib");
-
-    // Always recreate (in case an old invalid stub exists)
-    if stub_path.exists() {
-        let _ = std::fs::remove_file(&stub_path);
-    }
-
-    // Strategy 1: Use lib.exe (always available when MSVC is installed)
-    let lib_result = std::process::Command::new("lib.exe")
-        .args(["/NOLOGO", "/MACHINE:X64", &format!("/OUT:{}", stub_path.display())])
-        .output();
-
-    if let Ok(output) = lib_result {
-        if output.status.success() && stub_path.exists() && stub_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-            println!("cargo:rustc-link-search=native={}", out_dir);
-            return;
-        }
-    }
-
-    // Strategy 2: Create a minimal COFF .obj and archive it with lib.exe
     let obj_path = std::path::Path::new(&out_dir).join("empty.obj");
-    // Minimal COFF object: header (20 bytes) with 0 sections, 0 symbols
+
+    // 1. Create a minimal COFF .obj file
+    // Minimal COFF header: Machine=AMD64, Sections=0, Symbols=0
     let mut coff: Vec<u8> = Vec::with_capacity(20);
     coff.extend_from_slice(&0x8664u16.to_le_bytes()); // Machine: AMD64
     coff.extend_from_slice(&0u16.to_le_bytes());       // NumberOfSections: 0
@@ -111,27 +95,22 @@ fn create_stdc_stub() {
     coff.extend_from_slice(&0u16.to_le_bytes());       // Characteristics
     std::fs::write(&obj_path, &coff).unwrap();
 
-    let lib_result = std::process::Command::new("lib.exe")
-        .args([
-            "/NOLOGO",
-            "/MACHINE:X64",
-            &format!("/OUT:{}", stub_path.display()),
-            &format!("{}", obj_path.display()),
-        ])
-        .output();
-
-    if let Ok(output) = lib_result {
-        if output.status.success() && stub_path.exists() {
-            let _ = std::fs::remove_file(&obj_path);
-            println!("cargo:rustc-link-search=native={}", out_dir);
-            return;
-        }
+    // 2. Archive it into each requested .lib
+    for lib_base in libs {
+        let stub_path = std::path::Path::new(&out_dir).join(format!("{}.lib", lib_base));
+        
+        // Use lib.exe (always available when MSVC is installed)
+        let _ = std::process::Command::new("lib.exe")
+            .args([
+                "/NOLOGO",
+                "/MACHINE:X64",
+                &format!("/OUT:{}", stub_path.display()),
+                &format!("{}", obj_path.display()),
+            ])
+            .output();
     }
 
-    // Strategy 3: Last resort — no lib.exe available at all.
-    // This should never happen on a properly configured MSVC system,
-    // but if it does, the linker will fail with a clear error about stdc++.lib.
-    eprintln!("cargo:warning=Could not create stdc++.lib stub. Build may fail if flash-attn is enabled.");
+    let _ = std::fs::remove_file(&obj_path);
     println!("cargo:rustc-link-search=native={}", out_dir);
 }
 
