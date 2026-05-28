@@ -50,9 +50,9 @@ impl Report {
     }
 
     fn print(&self) {
-        println!("\n{:─<65}", "");
-        println!("  {:<32} {:>12}  {:>12}  {}", "Benchmark", "Result", "Target", "Status");
-        println!("{:─<65}", "");
+        println!("\n{}", "─".repeat(65));
+        println!("  Benchmark                        Result        Target  Status");
+        println!("{}", "─".repeat(65));
         for r in &self.rows {
             let icon = if r.pass { "✅" } else { "❌" };
             println!(

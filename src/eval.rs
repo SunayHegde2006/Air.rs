@@ -278,7 +278,7 @@ impl Mmlu {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "csv") {
+            if path.extension().is_some_and(|e| e == "csv") {
                 let subject = path.file_stem().unwrap().to_string_lossy().into_owned();
                 let file = std::fs::File::open(&path)?;
                 let reader = std::io::BufReader::new(file);

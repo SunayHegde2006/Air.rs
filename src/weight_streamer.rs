@@ -232,7 +232,7 @@ impl WeightStreamer {
     pub fn load_embedding(&self, device: &Device) -> Result<Tensor> {
         let mut c = Cursor::new(&self.mmap[..]);
         // Always try to put on CUDA to save system RAM
-        let target = if device.is_cuda() { device } else { device };
+        let target = device;
         self.dequant(&mut c, "token_embd.weight", target)
     }
 

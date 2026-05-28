@@ -484,6 +484,13 @@ pub struct MockSessionKvCache {
 }
 
 #[cfg(test)]
+impl Default for MockSessionKvCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
 impl MockSessionKvCache {
     pub fn new() -> Self {
         Self { seq_count: 0, clear_count: 0, truncate_count: 0, last_truncate_pos: 0 }

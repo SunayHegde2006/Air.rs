@@ -238,7 +238,7 @@ impl InferenceGenerator {
             all_tokens.push(next_token);
 
             let decode_elapsed = decode_start.elapsed().as_secs_f64();
-            if decode_elapsed > 0.0 && generated_tokens.len() >= 1 {
+            if decode_elapsed > 0.0 && !generated_tokens.is_empty() {
                 let live_tps = generated_tokens.len() as f64 / decode_elapsed;
                 eprint!("\r  ⚡ {:.2} tok/s │ {} tokens │ {:.1}s", live_tps, generated_tokens.len(), decode_elapsed);
                 use std::io::Write;

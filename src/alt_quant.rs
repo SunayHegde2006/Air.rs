@@ -134,7 +134,7 @@ impl Exl2Layer {
         let q_groups_data: Vec<u32> = self.q_groups.to_dtype(DType::I64)?.flatten_all()?.to_vec1::<i64>()?.into_iter().map(|v| v as u32).collect();
         let q_weight_data: Vec<u32> = self.q_weight.to_dtype(DType::I64)?.flatten_all()?.to_vec1::<i64>()?.into_iter().map(|v| v as u32).collect();
         let q_scale_data: Vec<f32> = self.q_scale.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-        let scale_max: f32 = self.q_scale_max.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?.get(0).copied().unwrap_or(1.0);
+        let scale_max: f32 = self.q_scale_max.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?.first().copied().unwrap_or(1.0);
 
         let n_groups = q_groups_data.len() / 2;
         let k = n_groups * 32;
