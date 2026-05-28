@@ -120,6 +120,7 @@ mod iocp_backend {
 
     extern "system" {
         fn CreateIoCompletionPort(file: Handle, port: Handle, key: usize, threads: u32) -> Handle;
+        #[allow(clashing_extern_declarations)]
         fn ReadFile(file: Handle, buf: *mut u8, len: u32, read: *mut u32, overlapped: *mut Overlapped) -> i32;
         fn GetQueuedCompletionStatus(port: Handle, bytes: *mut u32, key: *mut usize, overlapped: *mut *mut Overlapped, timeout: u32) -> i32;
     }

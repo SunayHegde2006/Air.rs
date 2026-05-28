@@ -266,9 +266,10 @@ impl PinnedHostBuffer {
         {
             use std::os::windows::io::AsRawHandle;
 
+            #[allow(clashing_extern_declarations)]
             extern "system" {
                 fn ReadFile(
-                    h_file: isize,
+                    h_file: *mut std::ffi::c_void,
                     lp_buffer: *mut u8,
                     n_number_of_bytes: u32,
                     lp_number_of_bytes_read: *mut u32,
