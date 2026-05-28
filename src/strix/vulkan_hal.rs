@@ -289,6 +289,8 @@ struct VkSemaphoreSignalInfo {
 
 // ── Vulkan FFI ───────────────────────────────────────────────────────────
 
+#[cfg_attr(target_os = "windows", link(name = "vulkan-1"))]
+#[cfg_attr(not(target_os = "windows"), link(name = "vulkan"))]
 extern "C" {
     fn vkCreateInstance(
         create_info: *const VkInstanceCreateInfo,
