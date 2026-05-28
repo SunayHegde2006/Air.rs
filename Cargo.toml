@@ -23,7 +23,7 @@ libc = "0.2"
 # The "cuda" feature enables GPU acceleration via candle-core's cuda feature.
 candle-core = "0.8.0"
 # FIX: Explicitly pin cudarc with 12.8 compatibility to bypass 12.9 panics in build.rs
-cudarc = { version = "0.13.9", features = ["cuda-12080"] }
+cudarc = { version = "0.13.9", features = ["cuda-12080"], optional = true }
 candle-flash-attn = { version = "0.8.0", optional = true }
 half = { version = "2.4", features = ["num-traits"] }
 safetensors = "0.5.2"
@@ -65,7 +65,7 @@ tracing-subscriber = "0.3"
 
 [features]
 default = []
-cuda = ["candle-core/cuda"]
+cuda = ["candle-core/cuda", "dep:cudarc"]
 rocm = []
 vulkan = []
 metal = ["candle-core/metal"]
