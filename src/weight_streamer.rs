@@ -25,6 +25,7 @@ pub struct WeightStreamer {
     #[allow(dead_code)]
     arch: String,
     /// Raw file descriptor for posix_fadvise
+    #[cfg(unix)]
     raw_fd: std::os::unix::io::RawFd,
     /// Asymmetric Residency — Attention weights pinned in VRAM.
     pinned_attn: std::sync::Mutex<Vec<Option<crate::model::QBlockWeights>>>,
@@ -80,14 +81,18 @@ impl WeightStreamer {
         let arch_string = arch.to_string();
         let pinned_attn = std::sync::Mutex::new(vec![None; n_layers]);
 
-        use std::os::unix::io::AsRawFd;
-        let raw_fd = file.as_raw_fd();
+        #[cfg(unix)]
+        let raw_fd = {
+            use std::os::unix::io::AsRawFd;
+            file.as_raw_fd()
+        };
 
         Ok(Self {
             mmap: Arc::new(mmap),
             content,
             n_layers,
             arch: arch_string,
+            #[cfg(unix)]
             raw_fd,
             pinned_attn,
         })
