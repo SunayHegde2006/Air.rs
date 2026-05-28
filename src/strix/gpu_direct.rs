@@ -283,17 +283,17 @@ impl PinnedHostBuffer {
                 internal_high: usize,
                 offset_low: u32,
                 offset_high: u32,
-                h_event: isize,
+                h_event: *mut std::ffi::c_void,
             }
 
-            let handle = file.as_raw_handle() as isize;
+            let handle = file.as_raw_handle();
             let mut bytes_read: u32 = 0;
             let mut overlapped = Overlapped {
                 internal: 0,
                 internal_high: 0,
                 offset_low: offset as u32,
                 offset_high: (offset >> 32) as u32,
-                h_event: 0,
+                h_event: std::ptr::null_mut(),
             };
 
             let ok = unsafe {
