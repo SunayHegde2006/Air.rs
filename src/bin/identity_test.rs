@@ -38,6 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn test_hal<H: GpuHal>(hal: H) -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing Identity on {}", hal.info()?.name);
     
