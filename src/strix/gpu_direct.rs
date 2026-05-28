@@ -610,8 +610,9 @@ impl GdsStorageHal {
     }
 
     /// Submit via cuFile DMA (Path A).
-    #[cfg(all(feature = "cuda", feature = "gds"))]
+    #[cfg(all(unix, feature = "cuda", feature = "gds"))]
     fn submit_cufile(&mut self, transfer: &mut GdsTransfer) -> Result<(), HalError> {
+        #[cfg(unix)]
         use std::os::unix::io::AsRawFd;
 
         if !self.driver_initialized {
