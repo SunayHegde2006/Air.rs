@@ -131,6 +131,13 @@ mod iocp_backend {
         next_io_id: AtomicU32,
     }
 
+    // SAFETY: The Win32 IOCP port handle is explicitly designed for concurrent
+    // access across threads — it is the canonical Windows multi-threaded I/O
+    // primitive.  All mutable state (`completions`) is behind Arc<Mutex<...>>;
+    // the atomic counters are inherently thread-safe.
+    unsafe impl Send for IocpHal {}
+    unsafe impl Sync for IocpHal {}
+
     impl IocpHal {
         pub fn new() -> Self {
             let port = unsafe { CreateIoCompletionPort(-1isize as Handle, ptr::null_mut(), 0, 0) };
