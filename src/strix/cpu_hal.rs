@@ -284,7 +284,7 @@ mod tests {
         let hal = Arc::new(CpuHal::new(1024 * 1024));
         let ptr = hal.allocate_vram(64, 1).unwrap();
 
-        let src = vec![0xABu8; 64];
+        let src = [0xABu8; 64];
         hal.copy_to_vram(ptr, src.as_ptr(), 64, 0).unwrap();
 
         let handles: Vec<_> = (0..4)

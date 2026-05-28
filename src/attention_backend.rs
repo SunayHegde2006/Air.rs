@@ -200,6 +200,40 @@ impl HybridAttentionRouter {
 // Tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Qwen 3.6 Specific Components
+// ---------------------------------------------------------------------------
+
+/// Qwen 3.6 GQA layer forward pass (v0.10.0).
+///
+/// Qwen 3.6 uses standard GQA for every 4th layer, with a specialized
+/// RoPE theta (500,000). This helper abstracts the RoPE/Attention dispatch.
+pub fn qwen36_gqa_forward(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    n_heads: usize,
+    n_kv_heads: usize,
+    start_pos: usize,
+    head_dim: usize,
+    rope_cache: &crate::ops::RopeCache,
+) -> Result<Tensor> {
+    // Qwen 3.6 GQA layers use 500k theta
+    let qwen_theta = 500_000.0;
+    
+    // 1. Apply RoPE
+    let (q, k) = crate::ops::rope_cached(
+        q, k, start_pos, head_dim, qwen_theta, rope_cache
+    )?;
+
+    // 2. Standard Attention (no sliding window for Qwen global layers)
+    crate::ops::attention(&q, &k, v, n_heads, n_kv_heads, None, None)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,34 +335,4 @@ mod tests {
         assert_eq!(AttentionBackend::SlidingWindow { window: 1 }.name(), "sliding_window");
         assert_eq!(AttentionBackend::GlobalFull.name(), "global_full");
     }
-}
-
-// ---------------------------------------------------------------------------
-// Qwen 3.6 Specific Components
-// ---------------------------------------------------------------------------
-
-/// Qwen 3.6 GQA layer forward pass (v0.10.0).
-///
-/// Qwen 3.6 uses standard GQA for every 4th layer, with a specialized
-/// RoPE theta (500,000). This helper abstracts the RoPE/Attention dispatch.
-pub fn qwen36_gqa_forward(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    n_heads: usize,
-    n_kv_heads: usize,
-    start_pos: usize,
-    head_dim: usize,
-    rope_cache: &crate::ops::RopeCache,
-) -> Result<Tensor> {
-    // Qwen 3.6 GQA layers use 500k theta
-    let qwen_theta = 500_000.0;
-    
-    // 1. Apply RoPE
-    let (q, k) = crate::ops::rope_cached(
-        q, k, start_pos, head_dim, qwen_theta, rope_cache
-    )?;
-
-    // 2. Standard Attention (no sliding window for Qwen global layers)
-    crate::ops::attention(&q, &k, &v, n_heads, n_kv_heads, None, None)
 }

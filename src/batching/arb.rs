@@ -1431,8 +1431,7 @@ mod tests {
         sched.admit_waiting();
 
         let mut prefill_ticks = 0;
-        loop {
-            let Some(batch) = sched.build_micro_batch() else { break };
+        while let Some(batch) = sched.build_micro_batch() {
             let entry = &batch.entries[0];
             match entry.phase {
                 BatchEntryPhase::Prefill => {
@@ -1468,7 +1467,7 @@ mod tests {
 
         let mut all_tokens_seen: Vec<u32> = Vec::new();
         for tick in 0..3 {
-            let batch = sched.build_micro_batch().expect(&format!("batch tick {}", tick));
+            let batch = sched.build_micro_batch().unwrap_or_else(|| panic!("batch tick {}", tick));
             let entry = &batch.entries[0];
             assert_eq!(entry.phase, BatchEntryPhase::Prefill);
             all_tokens_seen.extend_from_slice(&entry.tokens);

@@ -50,7 +50,7 @@ impl TcpCommunicator {
 
         // 1. Start listener (Server)
         let listener = tokio::net::TcpListener::bind(&addresses[rank]).await
-            .map_err(|e| HalError::IoError(e))?;
+            .map_err(HalError::IoError)?;
 
         // 2. Connect to higher ranks, accept from lower ranks
         for i in 0..world_size {
@@ -60,7 +60,7 @@ impl TcpCommunicator {
             if i < rank {
                 // Accept connection from lower rank
                 let (stream, _) = listener.accept().await
-                    .map_err(|e| HalError::IoError(e))?;
+                    .map_err(HalError::IoError)?;
                 streams[i] = Some(tokio::sync::Mutex::new(stream));
             } else {
                 // Connect to higher rank
@@ -206,8 +206,7 @@ impl Communicator for TcpCommunicator {
             let len = u64::from_le_bytes(len_bytes) as usize;
             
             if len != data.len() {
-                return Err(HalError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other, 
+                return Err(HalError::IoError(std::io::Error::other(
                     format!("Distributed recv size mismatch: expected {}, got {}", data.len(), len)
                 )));
             }

@@ -779,18 +779,19 @@ cargo build --release --features cuda,flash-attn
 
 ### Feature Flags
 
-| Flag | What It Enables | Platforms |
-|---|---|---|
-| `cuda` | NVIDIA GPU via CUDA Runtime API (STRIX CudaHal) | Windows, Linux |
-| `rocm` | AMD GPU via ROCm/HIP (STRIX ROCmHal) | Linux |
-| `vulkan` | Vulkan 1.2 GPU compute (STRIX VulkanHal) | Windows, Linux |
-| `flash-attn` | Flash Attention 2 kernels | Windows, Linux |
-| `metal` | Apple Metal GPU compute (STRIX MetalHal) | macOS |
-| `python` | PyO3 Python bindings (`pip install air-rs`) | All |
-| `arb-heap` | O(log n) BinaryHeap priority queue for ARB (high-load) | All |
-| `arb-lockfree` | Lock-free enqueue via crossbeam (high-frequency HTTP) | All |
+| Flag | Description | Platforms |
+|:---|:---|:---|
+| `cuda` | Enables NVIDIA GPU acceleration via CUDA. Includes `cudarc` and `candle-core/cuda`. | Windows, Linux |
+| `rocm` | Enables AMD GPU acceleration via ROCm/HIP. | Linux |
+| `vulkan` | Enables cross-platform GPU acceleration via Vulkan 1.2+ compute shaders. | Windows, Linux |
+| `metal` | Enables Apple Silicon GPU acceleration via the Metal framework. | macOS |
+| `flash-attn` | Enables Flash Attention v2 kernels for significant speedups in long-context scenarios. | Windows, Linux |
+| `gds` | Enables NVIDIA GPUDirect Storage (cuFile) for zero-copy DMA transfers from NVMe directly to VRAM. | Linux |
+| `python` | Enables PyO3 bindings and GIL-free async streaming for the `air-rs` Python package. | All |
+| `arb-heap` | Enables a `BinaryHeap` priority queue for the Adaptive Request Batcher (recommended for large wait queues). | All |
+| `arb-lockfree` | Enables a lock-free enqueue path via `crossbeam-channel` for high-frequency, low-latency API requests. | All |
 
-> **Default:** `default = []` — all features are opt-in. OCS algorithms (SageAttention3, HERMES, ConceptMoE) are compiled unconditionally. Speculative decoding activates when a `--draft-model` is supplied at runtime.
+> **Default:** `default = []` — all feature flags are opt-in. Optional performance components like SageAttention3, HERMES, and ConceptMoE are compiled unconditionally. Speculative decoding is activated at runtime when a `--draft-model` is provided.
 
 ### Run
 

@@ -286,13 +286,13 @@ impl LayerUnit for DeltaNetBlock {
             Some(LayerCache::Recurrent(s)) => s.clone(),
             _ => {
                 crate::gated_deltanet::DeltaState::zeros_on_device(
-                    self.n_heads, self.head_dim, self.head_dim, &ctx.x.device()
+                    self.n_heads, self.head_dim, self.head_dim, ctx.x.device()
                 )?
             }
         };
 
         // Load real weights from the streamer.
-        let weights_streamed = self.streamer.load_layer(self.layer, &ctx.x.device(), ctx.tp)
+        let weights_streamed = self.streamer.load_layer(self.layer, ctx.x.device(), ctx.tp)
             .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
 
         let (out, _, _) = crate::model::transformer_block(
