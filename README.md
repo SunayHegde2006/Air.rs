@@ -12,7 +12,8 @@
 <p align="center">
   <a href="#project-status"><img src="https://img.shields.io/badge/status-stable-brightgreen?style=flat-square" alt="Status: Stable"></a>
   <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/v/air-rs?style=flat-square&color=brightgreen" alt="PyPI"></a>
-  <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/dm/air-rs?style=flat-square&color=blue" alt="PyPI Downloads"></a>
+  <a href="https://pepy.tech/project/air-rs"><img src="https://static.pepy.tech/badge/air-rs" alt="PyPI Downloads"></a>
+  <a href="https://github.com/SunayHegde2006/Air.rs/releases"><img src="https://img.shields.io/github/downloads/SunayHegde2006/Air.rs/total?style=flat-square&color=blue" alt="GitHub Releases"></a>
   <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/pyversions/air-rs?style=flat-square" alt="Python 3.11+"></a>
   <a href="#build"><img src="https://img.shields.io/badge/Rust-1.75+-F74C00?logo=rust&style=flat-square" alt="Rust 1.75+"></a>
   <a href="#build"><img src="https://img.shields.io/badge/platform-Windows%20|%20Linux%20|%20macOS-blue?style=flat-square" alt="Cross-Platform"></a>
