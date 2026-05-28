@@ -107,6 +107,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # NASM is required by the `ring` crate (transitive via jsonwebtoken)
+      # for x86/x86_64 assembly. windows-latest has it but it may not be in PATH.
+      - name: Install NASM
+        uses: ilammy/setup-nasm@v1
+
+      # Expose the real rustc error before maturin swallows it
+      - name: Cargo check (dry-run, reveals compile errors)
+        run: cargo check --features python
+        env:
+          CARGO_TERM_COLOR: always
+
       - uses: PyO3/maturin-action@v1
         with:
           target: x86_64
