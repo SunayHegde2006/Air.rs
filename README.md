@@ -143,7 +143,7 @@ Sources: ¹[llama.cpp](https://github.com/ggerganov/llama.cpp/discussions/4167) 
 ### Python (recommended)
 
 ```bash
-pip install air-rs          # v1.1.0 — abi3 wheel, Python ≥ 3.11, Windows/Linux/macOS
+pip install air-rs          # v1.1.1 — abi3 wheel, Python ≥ 3.11, Windows/Linux/macOS
 ```
 
 ```python
@@ -224,7 +224,7 @@ cargo run --release -- generate --model path/to/model.gguf --prompt "Hello!"
 ### Install
 
 ```bash
-pip install air-rs                          # v1.1.0 — PyPI (abi3, Python ≥ 3.11)
+pip install air-rs                          # v1.1.1 — PyPI (abi3, Python ≥ 3.11)
 
 # or build from source
 pip install maturin
@@ -486,8 +486,8 @@ src/
 
 ## Project Status
 
-> **Production/Stable (v1.1.0)** — All subsystems implemented and tested. 1,406 tests passing, 0 failures.
-> **Inference Consolidation**: Hardened LayerUnit pipeline with actor-based RequestOrchestrator (v1.1.0).
+> **Production/Stable (v1.1.1)** — All subsystems implemented and tested. 1,406 tests passing, 0 failures.
+> **Inference Consolidation**: Hardened LayerUnit pipeline with actor-based RequestOrchestrator (v1.1.1).
 > TTFT gate benchmarks validated on RTX 3060 12 GB: Qwen3.6-27B and Gemma4-31B at 10ms TTFT (Tier 3: ≤700ms).
 > **OIDC Verified**: Cryptographically secure RS256/ES256 OIDC verification now active.
 > Compiles on Windows, Linux, and macOS.
@@ -677,7 +677,7 @@ STRIX (**S**treamed **T**ensor **R**esidence & **I**ntelligent e**X**change) man
 - [x] **Dual p-RoPE** (`src/dual_rope.rs`) — local θ=10K / global θ=1M frequency cache for Gemma 4 sliding-window layers; 10 tests
 - [x] **Gemma 4 block** (`src/gemma4.rs`) — `GemmaRmsNorm` (residual weight), GeGLU FFN, sigmoid MoE top-K router; 11 tests
 
-### ✅ v1.1.0 — Production Hardening
+### ✅ v1.1.1 — Production Hardening
 
 > **Inference path finalized.** All architectural stubs removed.
 
@@ -697,7 +697,7 @@ STRIX (**S**treamed **T**ensor **R**esidence & **I**ntelligent e**X**change) man
 - [x] **Gate results**: Qwen3.6-27B 10ms ✅ · Gemma4-31B 10ms ✅ · Llama70B ~10ms ℹ️
 - [x] **1,406 tests passing, 0 failures**
 
-### ✅ v1.1.0 — General Availability (Current)
+### ✅ v1.1.1 — General Availability (Current)
 
 > **Shipped 2026-05-27.** Hardened production engine with fused attention and recurrent scans.
 
