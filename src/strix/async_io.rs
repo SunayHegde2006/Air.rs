@@ -144,9 +144,14 @@ mod iocp_backend {
             let completions = Arc::new(Mutex::new(HashMap::new()));
             
             // Spawn worker thread to poll for completions.
-            let port_copy = port;
+            // SAFETY: Cast Handle (*mut c_void) to usize so the closure is Send.
+            // Win32 HANDLE values are pointer-sized integers; casting to usize and
+            // back is safe. The IOCP port handle outlives the thread — it lives for
+            // the full lifetime of IocpHal which owns it.
+            let port_addr: usize = port as usize;
             let comp_copy = Arc::clone(&completions);
             std::thread::spawn(move || {
+                let port_copy = port_addr as Handle;
                 let mut bytes = 0u32;
                 let mut key = 0usize;
                 let mut overlapped: *mut Overlapped = ptr::null_mut();
