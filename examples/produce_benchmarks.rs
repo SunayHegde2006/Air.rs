@@ -27,7 +27,7 @@ use air_rs::strix::types::{DType, TensorClass, TensorId};
 use air_rs::strix::std_storage_hal::StdStorageHal;
 use air_rs::strix::hal::StorageHal;
 use air_rs::pd_disagg::KvBlock;
-use air_rs::sampler::{SamplerConfig, Sampler};
+use air_rs::sampler::Sampler;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
