@@ -737,13 +737,13 @@ cargo build --release
 # 1. Ensure scripts are executable (for our PIC wrappers on Linux)
 chmod +x scripts/*
 # 2. Build with features
-cargo build --release --features "cuda flash-attn"
+cargo build --release --features cuda,flash-attn
 ```
 
 For Python developers, we recommend using `maturin`:
 ```bash
 pip install maturin
-maturin build --release --features "cuda flash-attn python"
+maturin build --release --features cuda,flash-attn,python
 ```
 
 ### Manual Build
@@ -861,7 +861,7 @@ This occurs on Linux when building the shared library (`cdylib`) with CUDA kerne
 **Fix implemented in v1.1.1:**
 We now include transparent compiler wrappers in `scripts/` and a `.cargo/config.toml` that forces `-fPIC` for all dependencies.
 1. Ensure `scripts/nvcc` and `scripts/cc` are executable: `chmod +x scripts/*`
-2. Build normally: `cargo build --release --features "cuda flash-attn"`
+2. Build normally: `cargo build --release --features cuda,flash-attn`
 3. If still failing, clear the build cache: `cargo clean`
 </details>
 
@@ -927,11 +927,11 @@ Contributions welcome! Air.rs is a research-grade production system — please r
 cargo build --release
 
 # Accelerated build (CUDA + Flash Attention)
-cargo build --release --features "cuda flash-attn"
+cargo build --release --features cuda,flash-attn
 
 # Python extension build (requires maturin)
 pip install maturin
-maturin build --release --features "cuda flash-attn python"
+maturin build --release --features cuda,flash-attn,python
 ```
 
 ### 3. Run the Engine
