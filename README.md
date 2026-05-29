@@ -697,10 +697,7 @@ STRIX (**S**treamed **T**ensor **R**esidence & **I**ntelligent e**X**change) man
 - [x] **Gate results**: Qwen3.6-27B 10ms ✅ · Gemma4-31B 10ms ✅ · Llama70B ~10ms ℹ️
 - [x] **1,406 tests passing, 0 failures**
 
-### ✅ v1.1.1 — General Availability (Current)
-
-> **Shipped 2026-05-27.** Hardened production engine with fused attention and recurrent scans.
-
+- [x] **Production Hardening (v1.1.1)** — Fixed `fPIC` linker errors on Linux via transparent `nvcc` wrappers.
 - [x] **Flash-Attn 2 wiring for Gemma 4 SW layers** — `candle_flash_attn` fused kernel (softcap + window)
 - [x] **cuBLAS-fused DeltaNet S_t update** — Rank-1 matmul updates in $O(d^2)$ VRAM bandwidth
 - [x] **Rayon parallel AVX-512 chunk scan** — Multi-core temporal recurrence for prefill
@@ -724,29 +721,25 @@ STRIX (**S**treamed **T**ensor **R**esidence & **I**ntelligent e**X**change) man
 
 ---
 
-## Build
+### Build from Source (Command Line)
 
-### Build Scripts (Recommended)
-
-Air.rs ships platform-native build scripts that auto-detect hardware and configure cargo features.
-
-| Platform | Script | Shell |
-|---|---|---|
-| **Windows** | `build_air.ps1` | PowerShell |
-| **macOS / Linux** | `build_air.sh` | bash |
+If you prefer using `cargo` directly instead of the build scripts:
 
 ```bash
-# macOS / Linux
-chmod +x build_air.sh
-./build_air.sh               # interactive feature selection
-./build_air.sh --skip-prompt # auto-enable everything detected
-./build_air.sh --debug       # debug build
-./build_air.sh --features cuda,flash-attn
+# Standard build (CPU only)
+cargo build --release
 
-# Windows
-.\build_air.ps1
-.\build_air.ps1 -SkipPrompt
-.\build_air.ps1 -DebugBuild
+# Accelerated build (CUDA + Flash Attention)
+# 1. Ensure scripts are executable (for our PIC wrappers on Linux)
+chmod +x scripts/*
+# 2. Build with features
+cargo build --release --features "cuda flash-attn"
+```
+
+For Python developers, we recommend using `maturin`:
+```bash
+pip install maturin
+maturin build --release --features "cuda flash-attn python"
 ```
 
 ### Manual Build
@@ -857,6 +850,18 @@ cargo clean && cargo build --release --features cuda,flash-attn
 </details>
 
 <details>
+<summary><strong>Linking Error: relocation R_X86_64_32 cannot be used against symbol (-fPIC)</strong></summary>
+
+This occurs on Linux when building the shared library (`cdylib`) with CUDA kernels that weren't compiled as Position Independent Code.
+
+**Fix implemented in v1.1.1:**
+We now include transparent compiler wrappers in `scripts/` and a `.cargo/config.toml` that forces `-fPIC` for all dependencies.
+1. Ensure `scripts/nvcc` and `scripts/cc` are executable: `chmod +x scripts/*`
+2. Build normally: `cargo build --release --features "cuda flash-attn"`
+3. If still failing, clear the build cache: `cargo clean`
+</details>
+
+<details>
 <summary><strong>Metal not available (macOS)</strong></summary>
 
 Metal requires Apple Silicon (M1/M2/M3/M4). On Intel Mac, use CPU build:
@@ -904,15 +909,43 @@ Contributions welcome! Air.rs is a research-grade production system — please r
 4. **Feature flags** — GPU-specific code must be feature-gated; CPU builds must always compile
 5. **No unsafe without reason** — document every `unsafe` block with a safety comment
 
+## Building & Running from Source
+
+### 1. Requirements
+- **Rust** 1.75+
+- **CUDA Toolkit** 12.x (for GPU acceleration)
+- **C++ Compiler** (gcc/g++ 11+)
+- **Python** 3.11+ (for Python API)
+
+### 2. Build the Binaries
 ```bash
-# Fork → clone → setup
-./scripts/setup_env.sh
+# Standard build (CPU only)
+cargo build --release
 
-# Make changes, run tests
-./scripts/test_all.sh
+# Accelerated build (CUDA + Flash Attention)
+cargo build --release --features "cuda flash-attn"
 
-# Verify correctness against llama.cpp
-python3 scripts/validate_correctness.py --model path/to/model.gguf
+# Python extension build (requires maturin)
+pip install maturin
+maturin build --release --features "cuda flash-attn python"
+```
+
+### 3. Run the Engine
+```bash
+# Direct CLI inference
+./target/release/air-rs --model llama-3-70b.gguf --prompt "Explain quantum entanglement"
+
+# Start OpenAI-compatible API server
+./target/release/air-rs --model mistral-7b.gguf --server --port 8000
+```
+
+### 4. Running Benchmarks
+```bash
+# Internal throughput benchmark
+cargo run --release --example produce_benchmarks -- --model path/to/model.gguf
+
+# Tiered TTFT validation
+./scripts/tiered_ttft.sh --models-dir /your/model/path
 ```
 
 See [`docs/`](docs/) for architecture decision records (ADRs) and the benchmarking guide.
