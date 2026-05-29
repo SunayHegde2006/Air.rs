@@ -1,0 +1,48 @@
+#!/bin/bash
+# NVCC Wrapper for Air.rs
+#
+# This wrapper ensures that all CUDA kernels are compiled with Position
+# Independent Code (-fPIC) when building a shared library (.so) on Linux.
+#
+# This fixes the "relocation R_X86_64_32 cannot be used against symbol" error
+# common in some versions of candle-flash-attn.
+
+ARGS=()
+PIC_FLAG=0
+
+for arg in "$@"; do
+    ARGS+=("$arg")
+    if [[ "$arg" == "-fPIC" || "$arg" == "-fpic" || "$arg" == "-Xcompiler -fPIC" ]]; then
+        PIC_FLAG=1
+    fi
+done
+
+# Find the REAL nvcc (skipping this wrapper)
+REAL_NVCC=$(which -a nvcc | grep -v "Air.rs/scripts/nvcc" | head -n 1)
+
+# Fallback to common CUDA paths if not in PATH
+if [[ -z "$REAL_NVCC" ]]; then
+    if [[ -f "/usr/local/cuda/bin/nvcc" ]]; then
+        REAL_NVCC="/usr/local/cuda/bin/nvcc"
+    elif [[ -f "/usr/bin/nvcc" ]]; then
+        REAL_NVCC="/usr/bin/nvcc"
+    fi
+fi
+
+if [[ -z "$REAL_NVCC" ]]; then
+    echo "Error: nvcc not found in PATH or /usr/local/cuda/bin" >&2
+    exit 1
+fi
+
+# If we are on Linux and PIC flag is missing, add it.
+if [[ "$OSTYPE" == "linux-gnu"* && $PIC_FLAG -eq 0 ]]; then
+    # We add it via -Xcompiler to ensure nvcc passes it to the host compiler
+    ARGS+=("-Xcompiler" "-fPIC")
+fi
+
+# Ensure -O3 for production unless already specified
+if [[ ! " ${ARGS[@]} " =~ " -O" ]]; then
+    ARGS+=("-O3")
+fi
+
+exec "$REAL_NVCC" "${ARGS[@]}"

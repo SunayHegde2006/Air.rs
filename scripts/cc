@@ -1,0 +1,33 @@
+#!/bin/bash
+# CC Wrapper for Air.rs
+#
+# Ensures -fPIC is present for all C compilation when building shared libraries.
+
+ARGS=()
+PIC_FLAG=0
+
+for arg in "$@"; do
+    ARGS+=("$arg")
+    if [[ "$arg" == "-fPIC" || "$arg" == "-fpic" ]]; then
+        PIC_FLAG=1
+    fi
+done
+
+# Find the REAL cc (skipping this wrapper)
+REAL_CC=$(which -a cc | grep -v "Air.rs/scripts/cc" | head -n 1)
+
+if [[ -z "$REAL_CC" ]]; then
+    # Fallback to gcc or clang if cc not found
+    REAL_CC=$(which gcc || which clang)
+fi
+
+if [[ -z "$REAL_CC" ]]; then
+    echo "Error: cc not found" >&2
+    exit 1
+fi
+
+if [[ "$OSTYPE" == "linux-gnu"* && $PIC_FLAG -eq 0 ]]; then
+    ARGS+=("-fPIC")
+fi
+
+exec "$REAL_CC" "${ARGS[@]}"
