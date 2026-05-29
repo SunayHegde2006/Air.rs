@@ -1,3 +1,14 @@
 [env]
-LD_LIBRARY_PATH = { value = "/usr/lib/wsl/lib", relative = false }
-CUDA_VISIBLE_DEVICES = { value = "0", relative = false }
+# Force NVCC and CC to generate Position Independent Code (fPIC)
+# We prepend our 'scripts' directory to the PATH, which contains 
+# transparent wrappers for nvcc and cc that inject the -fPIC flag.
+PATH = { value = "scripts", relative = true, action = "prepend" }
+
+# Standard environment variables for build scripts that respect them
+CUDA_NVCC_FLAGS = "-Xcompiler -fPIC"
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "relocation-model=pic"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "relocation-model=pic"]
