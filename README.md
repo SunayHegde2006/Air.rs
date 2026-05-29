@@ -697,11 +697,11 @@ STRIX (**S**treamed **T**ensor **R**esidence & **I**ntelligent e**X**change) man
 - [x] **Gate results**: Qwen3.6-27B 10ms ✅ · Gemma4-31B 10ms ✅ · Llama70B ~10ms ℹ️
 - [x] **1,406 tests passing, 0 failures**
 
-### ✅ v1.1.1 — General Availability (Current)
+### ✅ v1.1.2 — Production Hardening (Current)
 
-> **Shipped 2026-05-27.** Hardened production engine with fused attention and recurrent scans.
+> **Shipped 2026-05-29.** Fixed critical linking issues and upgraded binary support.
 
-- [x] **Production Hardening (v1.1.1)** — Fixed `fPIC` linker errors on Linux via transparent `nvcc` wrappers.
+- [x] **Production Hardening (v1.1.2)** — Fixed `fPIC` linker errors on Linux via transparent `nvcc` wrappers.
 - [x] **Flash-Attn 2 wiring for Gemma 4 SW layers** — `candle_flash_attn` fused kernel (softcap + window)
 - [x] **cuBLAS-fused DeltaNet S_t update** — Rank-1 matmul updates in $O(d^2)$ VRAM bandwidth
 - [x] **Rayon parallel AVX-512 chunk scan** — Multi-core temporal recurrence for prefill
