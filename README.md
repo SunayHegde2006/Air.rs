@@ -698,11 +698,12 @@ STRIX (**S**treamed **T**ensor **R**esidence & **I**ntelligent e**X**change) man
 - [x] **Gate results**: Qwen3.6-27B 10ms ✅ · Gemma4-31B 10ms ✅ · Llama70B ~10ms ℹ️
 - [x] **1,406 tests passing, 0 failures**
 
-### ✅ v1.1.3 — CUDA 13.3 Integration (Current)
+### ✅ v1.1.4 — CUDA 13.3 Self-Healing Patch (Current)
 
-> **Shipped 2026-05-30.** Full Support for CUDA 13.3, CompileIQ, and Tile Programming.
+> **Shipped 2026-05-30.** Transparent workaround for `cudarc` panic on CUDA 13.3.
 
-- [x] **CUDA 13.3 Integration (v1.1.3)** — Upgraded to `cudarc 0.19.7` with `cuda-version-from-build-system` for native toolchain detection.
+- [x] **CUDA 13.3 Self-Healing (v1.1.4)** — Injects `CUDARC_CUDA_VERSION=13000` automatically when CUDA 13.x detected; no manual env vars needed.
+- [x] **CUDA 13.3 Integration (v1.1.3)** — Upgraded to `cudarc 0.19.7` with `cuda-version-from-build-system`.
 - [x] **Production Hardening (v1.1.2)** — Fixed `fPIC` linker errors on Linux via transparent `nvcc` wrappers.
 - [x] **Flash-Attn 2 wiring for Gemma 4 SW layers** — `candle_flash_attn` fused kernel (softcap + window)
 - [x] **cuBLAS-fused DeltaNet S_t update** — Rank-1 matmul updates in $O(d^2)$ VRAM bandwidth

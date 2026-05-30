@@ -35,7 +35,7 @@ function Write-Err   { param([string]$msg) Write-Host "  [X] $msg" -ForegroundCo
 
 Write-Host ""
 Write-Host "  ======================================================" -ForegroundColor Magenta
-Write-Host "       Air.rs Build System — v1.1.3 (Stable)            " -ForegroundColor Magenta
+Write-Host "       Air.rs Build System — v1.1.4 (Stable)            " -ForegroundColor Magenta
 Write-Host "  ======================================================" -ForegroundColor Magenta
 Write-Host ""
 
@@ -294,6 +294,14 @@ Write-Host ""
 Write-Host "  --- Step 5: Building Air.rs ($profileName) ---" -ForegroundColor White
 Write-Host ""
 
+# CUDA 13.3+ Self-Healing Logic
+# cudarc v0.19.7 doesn't yet recognise '13030' explicitly.
+# Inject CUDARC_CUDA_VERSION=13000 to select stable CUDA 13 bindings.
+if ($cudaVersion -like "13.*") {
+    $env:CUDARC_CUDA_VERSION = "13000"
+    Write-Info "Detected CUDA 13.3+; injecting CUDARC_CUDA_VERSION=13000 for compatibility"
+}
+
 $cmd = "cargo build $buildProfile $featureArg"
 Write-Info "Running: $cmd"
 Write-Host ""
@@ -309,6 +317,7 @@ Write-Host "  [+] Parallel Prefix-Scan (Rayon)       (recurrence, gated_deltanet
 Write-Host "  [+] STRIX Vulkan Buffer Pooling        (Managed pool, vulkan_hal.rs)" -ForegroundColor Green
 Write-Host "  [+] Evaluation Gates (CI Guard)        (HellaSwag/MMLU, eval.rs)" -ForegroundColor Green
 Write-Host "  [+] Whisper Production Pipeline        (Beam Search, whisper.rs)" -ForegroundColor Green
+Write-Host "  [+] Self-Healing CUDA 13 Logic         (Transparent bindings, v1.1.4)" -ForegroundColor Green
 Write-Host ""
 
 # Execute build
