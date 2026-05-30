@@ -14,11 +14,12 @@
   <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/v/air-rs?style=flat-square&color=brightgreen" alt="PyPI"></a>
   <a href="https://pepy.tech/project/air-rs"><img src="https://static.pepy.tech/badge/air-rs" alt="PyPI Downloads"></a>
   <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/pyversions/air-rs?style=flat-square&maxAge=2592000" alt="Python 3.11+"></a>
+  <a href="#build"><img src="https://img.shields.io/badge/Rust-1.75+-F74C00?logo=rust&style=flat-square&maxAge=2592000" alt="Rust 1.75+"></a>
   <a href="#build"><img src="https://img.shields.io/badge/CUDA-11.x%20|%2012.x%20|%2013.x-76B900?logo=nvidia&style=flat-square&maxAge=2592000" alt="CUDA 11-13"></a>
   <a href="#build"><img src="https://img.shields.io/badge/platform-Windows%20|%20Linux%20|%20macOS-blue?style=flat-square&maxAge=2592000" alt="Cross-Platform"></a>
   <a href="https://github.com/SunayHegde2006/Air.rs/actions"><img src="https://img.shields.io/github/actions/workflow/status/SunayHegde2006/Air.rs/ci.yml?branch=main&style=flat-square&label=CI&maxAge=2592000" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&maxAge=2592000" alt="License: MIT"></a>
-  <a href="https://github.com/SunayHegde2006/Air.rs/stargazers"><img src="https://img.shields.io/github/stars/SunayHegde2006/Air.rs?style=flat-square&color=yellow&maxAge=2592000" alt="Stars"></a>
+  <a href="https://github.com/SunayHegde2006/Air.rs/stargazers"><img src="https://img.shields.io/github/stars/SunayHegde2006/Air.rs?style=flat-square&color=yellow" alt="Stars"></a>
 </p>
 
 ---
