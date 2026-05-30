@@ -14,7 +14,7 @@
   <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/v/air-rs?style=flat-square&color=brightgreen" alt="PyPI"></a>
   <a href="https://pepy.tech/project/air-rs"><img src="https://static.pepy.tech/badge/air-rs" alt="PyPI Downloads"></a>
   <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/pyversions/air-rs?style=flat-square&maxAge=2592000" alt="Python 3.11+"></a>
-  <a href="#build"><img src="https://img.shields.io/badge/Rust-1.75+-F74C00?logo=rust&style=flat-square&maxAge=2592000" alt="Rust 1.75+"></a>
+  <a href="#build"><img src="https://img.shields.io/badge/CUDA-11.x%20|%2012.x%20|%2013.x-76B900?logo=nvidia&style=flat-square&maxAge=2592000" alt="CUDA 11-13"></a>
   <a href="#build"><img src="https://img.shields.io/badge/platform-Windows%20|%20Linux%20|%20macOS-blue?style=flat-square&maxAge=2592000" alt="Cross-Platform"></a>
   <a href="https://github.com/SunayHegde2006/Air.rs/actions"><img src="https://img.shields.io/github/actions/workflow/status/SunayHegde2006/Air.rs/ci.yml?branch=main&style=flat-square&label=CI&maxAge=2592000" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&maxAge=2592000" alt="License: MIT"></a>
@@ -697,10 +697,11 @@ STRIX (**S**treamed **T**ensor **R**esidence & **I**ntelligent e**X**change) man
 - [x] **Gate results**: Qwen3.6-27B 10ms ✅ · Gemma4-31B 10ms ✅ · Llama70B ~10ms ℹ️
 - [x] **1,406 tests passing, 0 failures**
 
-### ✅ v1.1.2 — Production Hardening (Current)
+### ✅ v1.1.3 — CUDA 13.3 Integration (Current)
 
-> **Shipped 2026-05-29.** Fixed critical linking issues and upgraded binary support.
+> **Shipped 2026-05-30.** Full Support for CUDA 13.3, CompileIQ, and Tile Programming.
 
+- [x] **CUDA 13.3 Integration (v1.1.3)** — Upgraded to `cudarc 0.19.7` with `cuda-version-from-build-system` for native toolchain detection.
 - [x] **Production Hardening (v1.1.2)** — Fixed `fPIC` linker errors on Linux via transparent `nvcc` wrappers.
 - [x] **Flash-Attn 2 wiring for Gemma 4 SW layers** — `candle_flash_attn` fused kernel (softcap + window)
 - [x] **cuBLAS-fused DeltaNet S_t update** — Rank-1 matmul updates in $O(d^2)$ VRAM bandwidth
@@ -917,9 +918,9 @@ Contributions welcome! Air.rs is a research-grade production system — please r
 
 ### 1. Requirements
 - **Rust** 1.75+
-- **CUDA Toolkit** 12.x (for GPU acceleration)
-- **C++ Compiler** (gcc/g++ 11+)
-- **Python** 3.11+ (for Python API)
+- **CUDA Toolkit** 13.3 (Recommended) or 11.x/12.x
+- **C++ Compiler** (gcc/g++ 12+ or MSVC 2022)
+- **Python** 3.11+
 
 ### 2. Build the Binaries
 ```bash
