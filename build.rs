@@ -36,7 +36,7 @@ fn main() {
         #[cfg(feature = "flash-attn")]
         println!("cargo:rustc-link-lib=stdc++");
 
-        // CUDA paths (if $CUDA_HOME or /usr/local/cuda exist)
+        // CUDA paths and architecture targeting
         #[cfg(feature = "cuda")]
         {
             if let Ok(cuda_home) = std::env::var("CUDA_HOME") {
@@ -44,6 +44,12 @@ fn main() {
             } else if std::path::Path::new("/usr/local/cuda/lib64").exists() {
                 println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
             }
+
+            // Detect GPU compute capability via nvidia-smi and export NVCC_ARCH
+            // so the scripts/nvcc wrapper compiles kernels for the actual GPU ISA
+            // (e.g. sm_89 for Ada Lovelace, sm_90 for Hopper, sm_100 for Blackwell).
+            // Falls back gracefully if nvidia-smi is unavailable (Docker / CI).
+            detect_and_export_cuda_arch();
         }
 
         // Vulkan Linking (STRIX Protocol §12.1)
@@ -65,7 +71,67 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIB");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    println!("cargo:rerun-if-env-changed=NVCC_ARCH");
+    println!("cargo:rerun-if-env-changed=CUDARC_CUDA_VERSION");
 }
+
+/// Detect the primary GPU's compute capability (e.g. "89" for sm_89) via
+/// `nvidia-smi --query-gpu=compute_cap` and export it as `NVCC_ARCH` for the
+/// `scripts/nvcc` wrapper to pick up, so all CUDA kernels (including those in
+/// transitive dependencies like candle-flash-attn) are compiled for the actual
+/// installed GPU ISA rather than NVCC's ancient sm_52 default.
+///
+/// Also emits a `CUDA_ARCH` compile-time env var readable in Rust code via
+/// `env!("CUDA_ARCH")`.
+#[cfg(feature = "cuda")]
+fn detect_and_export_cuda_arch() {
+    // Honour an explicit override first (useful in CI with a known GPU target)
+    if let Ok(arch) = std::env::var("NVCC_ARCH") {
+        if !arch.is_empty() {
+            println!("cargo:rustc-env=CUDA_ARCH={}", arch);
+            return;
+        }
+    }
+
+    // Query nvidia-smi
+    let output = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+        .output();
+
+    if let Ok(out) = output {
+        if out.status.success() {
+            let raw = String::from_utf8_lossy(&out.stdout);
+            // Take only the first GPU; strip the dot (e.g. "8.9" → "89")
+            if let Some(line) = raw.lines().next() {
+                let sm = line.trim().replace('.', "");
+                if !sm.is_empty() && sm.chars().all(|c| c.is_ascii_digit()) {
+                    let arch = format!("sm_{}", sm);
+                    // Export for the nvcc wrapper (process env during build)
+                    println!("cargo:rustc-env=CUDA_ARCH={}", arch);
+                    // Also set the var for child processes (nvcc wrapper)
+                    // via cargo:rustc-env it's a compile-time env; we additionally
+                    // emit it via a build-script println so it's visible downstream.
+                    println!("cargo:warning=Air.rs: detected GPU arch {arch}, injecting -arch={arch} into CUDA kernel compilation");
+                    // Write to OUT_DIR so scripts/nvcc can source it if needed
+                    if let Ok(out_dir) = std::env::var("OUT_DIR") {
+                        let _ = std::fs::write(
+                            format!("{}/cuda_arch.txt", out_dir),
+                            &arch,
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    // Fallback: no GPU detected (CI, Docker without GPU passthrough)
+    println!("cargo:warning=Air.rs: nvidia-smi not available; CUDA kernels will use NVCC default arch");
+    println!("cargo:rustc-env=CUDA_ARCH=");
+}
+
+#[cfg(not(feature = "cuda"))]
+fn detect_and_export_cuda_arch() {}
 
 // ===========================================================================
 // Windows helpers

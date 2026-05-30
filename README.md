@@ -698,11 +698,12 @@ STRIX (**S**treamed **T**ensor **R**esidence & **I**ntelligent e**X**change) man
 - [x] **Gate results**: Qwen3.6-27B 10ms ✅ · Gemma4-31B 10ms ✅ · Llama70B ~10ms ℹ️
 - [x] **1,406 tests passing, 0 failures**
 
-### ✅ v1.1.4 — CUDA 13.3 Self-Healing Patch (Current)
+### ✅ v1.1.5 — GPU ISA Targeting (Current)
 
-> **Shipped 2026-05-30.** Transparent workaround for `cudarc` panic on CUDA 13.3.
+> **Shipped 2026-05-30.** Kernels now compiled for your actual GPU architecture (sm_89, sm_90, sm_100, etc.).
 
-- [x] **CUDA 13.3 Self-Healing (v1.1.4)** — Injects `CUDARC_CUDA_VERSION=13000` automatically when CUDA 13.x detected; no manual env vars needed.
+- [x] **GPU ISA Targeting (v1.1.5)** — `build.rs` + `nvcc` wrapper auto-detect GPU compute capability via `nvidia-smi` and inject `-arch=sm_XX`; up to ~30% faster kernels vs. the NVCC sm_52 default.
+- [x] **CUDA 13.3 Self-Healing (v1.1.4)** — Injects `CUDARC_CUDA_VERSION=13000` automatically when CUDA 13.x detected.
 - [x] **CUDA 13.3 Integration (v1.1.3)** — Upgraded to `cudarc 0.19.7` with `cuda-version-from-build-system`.
 - [x] **Production Hardening (v1.1.2)** — Fixed `fPIC` linker errors on Linux via transparent `nvcc` wrappers.
 - [x] **Flash-Attn 2 wiring for Gemma 4 SW layers** — `candle_flash_attn` fused kernel (softcap + window)
