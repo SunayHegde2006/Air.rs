@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "air-rs"
-version = "1.1.4"
+version = "1.1.5"
 description = "High-performance, memory-fluid LLM inference engine — Rust speed, Python convenience."
 readme = "README.md"
 license = { file = "LICENSE" }

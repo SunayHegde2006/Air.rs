@@ -54,7 +54,7 @@ done
 # ── Banner ───────────────────────────────────────────────────────────────────
 echo ""
 echo "${MAGENTA}  ======================================================${RESET}"
-echo "${MAGENTA}       Air.rs Build System — v1.1.4 (Stable)            ${RESET}"
+echo "${MAGENTA}       Air.rs Build System — v1.1.5 (Stable)            ${RESET}"
 echo "${MAGENTA}  ======================================================${RESET}"
 echo ""
 
@@ -81,6 +81,17 @@ if command -v nvidia-smi &>/dev/null; then
 fi
 if ! $HAS_GPU; then
     info "No NVIDIA GPU detected (CPU/Metal builds will work)"
+fi
+
+# ── GPU Architecture ──────────────────────────────────────────────────────────
+GPU_ARCH=""
+if $HAS_GPU && command -v nvidia-smi &>/dev/null; then
+    COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d '.')
+    if [[ -n "$COMPUTE_CAP" && "$COMPUTE_CAP" =~ ^[0-9]+$ ]]; then
+        GPU_ARCH="sm_${COMPUTE_CAP}"
+        export NVCC_ARCH="sm_${COMPUTE_CAP}"
+        step "GPU arch: ${GPU_ARCH} (kernels will be compiled for this ISA)"
+    fi
 fi
 
 # ── CUDA Toolkit ──────────────────────────────────────────────────────────────
@@ -321,6 +332,11 @@ if [[ $CUDA_VERSION == 13.* ]]; then
     info "Detected CUDA 13.3+; injecting CUDARC_CUDA_VERSION=13000 for compatibility"
 fi
 
+# Propagate arch to child processes if detected
+if [[ -n "${NVCC_ARCH:-}" ]]; then
+    info "GPU arch targeting: ${NVCC_ARCH} (injected into all CUDA kernel builds)"
+fi
+
 CMD="cargo build $PROFILE_FLAG $FEATURE_ARG"
 info "Running: $CMD"
 echo ""
@@ -337,6 +353,7 @@ echo "${GREEN}  [✓] STRIX Vulkan Buffer Pooling        ${RESET}(Managed pool, 
 echo "${GREEN}  [✓] Evaluation Gates (CI Guard)        ${RESET}(HellaSwag/MMLU, eval.rs)"
 echo "${GREEN}  [✓] Whisper Production Pipeline        ${RESET}(Beam Search, whisper.rs)"
 echo "${GREEN}  [✓] Self-Healing CUDA 13 Logic         ${RESET}(Transparent bindings, v1.1.4)"
+echo "${GREEN}  [✓] GPU ISA Targeting (sm_XX)           ${RESET}(Arch-optimised kernels, v1.1.5)"
 echo ""
 
 BUILD_START=$(date +%s)

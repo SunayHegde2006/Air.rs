@@ -35,7 +35,7 @@ function Write-Err   { param([string]$msg) Write-Host "  [X] $msg" -ForegroundCo
 
 Write-Host ""
 Write-Host "  ======================================================" -ForegroundColor Magenta
-Write-Host "       Air.rs Build System — v1.1.4 (Stable)            " -ForegroundColor Magenta
+Write-Host "       Air.rs Build System — v1.1.5 (Stable)            " -ForegroundColor Magenta
 Write-Host "  ======================================================" -ForegroundColor Magenta
 Write-Host ""
 
@@ -60,6 +60,19 @@ try {
     }
 } catch {
     Write-Info "No NVIDIA GPU detected (CPU-only builds will work)"
+}
+
+# GPU Architecture Detection
+$gpuArch = ""
+try {
+    $computeCap = (nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>&1 | Select-Object -First 1).Trim() -replace '\.', ''
+    if ($computeCap -match '^\d+$') {
+        $gpuArch = "sm_$computeCap"
+        $env:NVCC_ARCH = $gpuArch
+        Write-Step "GPU arch: $gpuArch (kernels will be compiled for this ISA)"
+    }
+} catch {
+    Write-Info "GPU arch detection unavailable; NVCC will use default"
 }
 
 # CUDA check
@@ -301,6 +314,9 @@ if ($cudaVersion -like "13.*") {
     $env:CUDARC_CUDA_VERSION = "13000"
     Write-Info "Detected CUDA 13.3+; injecting CUDARC_CUDA_VERSION=13000 for compatibility"
 }
+if ($gpuArch -ne "") {
+    Write-Info "GPU arch targeting: $gpuArch (injected into all CUDA kernel builds)"
+}
 
 $cmd = "cargo build $buildProfile $featureArg"
 Write-Info "Running: $cmd"
@@ -318,6 +334,7 @@ Write-Host "  [+] STRIX Vulkan Buffer Pooling        (Managed pool, vulkan_hal.r
 Write-Host "  [+] Evaluation Gates (CI Guard)        (HellaSwag/MMLU, eval.rs)" -ForegroundColor Green
 Write-Host "  [+] Whisper Production Pipeline        (Beam Search, whisper.rs)" -ForegroundColor Green
 Write-Host "  [+] Self-Healing CUDA 13 Logic         (Transparent bindings, v1.1.4)" -ForegroundColor Green
+Write-Host "  [+] GPU ISA Targeting (sm_XX)           (Arch-optimised kernels, v1.1.5)" -ForegroundColor Green
 Write-Host ""
 
 # Execute build
