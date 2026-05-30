@@ -12,9 +12,9 @@
 #   ./scripts/run_benchmarks.sh --model ~/models/... --json-only
 #   ./scripts/run_benchmarks.sh --version
 #
-# Air.rs build flags for best performance (v0.8.0):
+# Air.rs build flags for best performance (v1.1.3):
 #   cargo build --release --features cuda,flash-attn
-#   (YaRN, chunked-attn, Whisper, OCS algos are always compiled-in)
+#   (YaRN, chunked-attn, Whisper, OCS algos are always compiled-in, CUDA 13.3 optimized)
 # =============================================================================
 
 BENCH_VERSION="1.2.0  # v0.8.0 feature set"

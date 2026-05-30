@@ -40,9 +40,12 @@ if [[ "$OSTYPE" == "linux-gnu"* && $PIC_FLAG -eq 0 ]]; then
     ARGS+=("-Xcompiler" "-fPIC")
 fi
 
-# Ensure -O3 for production unless already specified
+# Ensure -O3 and --use_fast_math for production unless already specified
 if [[ ! " ${ARGS[@]} " =~ " -O" ]]; then
     ARGS+=("-O3")
+fi
+if [[ ! " ${ARGS[@]} " =~ " --use_fast_math " ]]; then
+    ARGS+=("--use_fast_math")
 fi
 
 exec "$REAL_NVCC" "${ARGS[@]}"

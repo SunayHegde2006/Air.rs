@@ -35,7 +35,7 @@ function Write-Err   { param([string]$msg) Write-Host "  [X] $msg" -ForegroundCo
 
 Write-Host ""
 Write-Host "  ======================================================" -ForegroundColor Magenta
-Write-Host "       Air.rs Build System — v1.1.0 (Stable)            " -ForegroundColor Magenta
+Write-Host "       Air.rs Build System — v1.1.3 (Stable)            " -ForegroundColor Magenta
 Write-Host "  ======================================================" -ForegroundColor Magenta
 Write-Host ""
 
@@ -70,7 +70,11 @@ try {
     if ($nvccOut) {
         $hasCuda = $true
         $cudaVersion = ($nvccOut -replace '.*release ', '' -replace ',.*', '')
-        Write-Step "CUDA Toolkit: $cudaVersion"
+        if ($cudaVersion -like "13.*") {
+            Write-Step "CUDA Toolkit: $cudaVersion (High-Performance CUDA 13 Mode)"
+        } else {
+            Write-Step "CUDA Toolkit: $cudaVersion"
+        }
     }
 } catch {
     if ($hasGpu) { Write-Warn "NVIDIA GPU found but CUDA Toolkit not in PATH" }
@@ -211,6 +215,9 @@ if ($SkipPrompt) {
     # CUDA
     if ($hasCuda) {
         Write-Host "    [1] cuda         - NVIDIA GPU acceleration (CUDA $cudaVersion detected)" -ForegroundColor Green
+        if ($cudaVersion -like "13.*") {
+            Write-Host "                         -> ⚡ CUDA 13.3+ Optimizations Active (CompileIQ, TileProg)" -ForegroundColor Cyan
+        }
     } else {
         Write-Host "    [1] cuda         - NVIDIA GPU (not available - no CUDA)" -ForegroundColor DarkGray
     }

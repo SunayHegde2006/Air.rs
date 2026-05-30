@@ -54,7 +54,7 @@ done
 # ── Banner ───────────────────────────────────────────────────────────────────
 echo ""
 echo "${MAGENTA}  ======================================================${RESET}"
-echo "${MAGENTA}       Air.rs Build System — v1.1.0 (Stable)            ${RESET}"
+echo "${MAGENTA}       Air.rs Build System — v1.1.3 (Stable)            ${RESET}"
 echo "${MAGENTA}  ======================================================${RESET}"
 echo ""
 
@@ -90,7 +90,12 @@ if command -v nvcc &>/dev/null; then
     if NVCC_OUT=$(nvcc --version 2>&1 | grep "release"); then
         HAS_CUDA=true
         CUDA_VERSION=$(echo "$NVCC_OUT" | sed 's/.*release //' | sed 's/,.*//')
-        step "CUDA Toolkit: $CUDA_VERSION"
+        # CUDA 13.3+ Support Logic
+        if [[ $CUDA_VERSION == 13.* ]]; then
+            step "CUDA Toolkit: $CUDA_VERSION (High-Performance CUDA 13 Mode)"
+        else
+            step "CUDA Toolkit: $CUDA_VERSION"
+        fi
     fi
 elif [ -n "${CUDA_HOME:-}" ] && [ -x "$CUDA_HOME/bin/nvcc" ]; then
     HAS_CUDA=true
@@ -213,6 +218,9 @@ else
 
     if $HAS_CUDA; then
         echo "${GREEN}    [1] cuda         - NVIDIA GPU acceleration (CUDA $CUDA_VERSION)${RESET}"
+        if [[ $CUDA_VERSION == 13.* ]]; then
+            echo "${CYAN}                         -> ⚡ CUDA 13.3+ Optimizations Active (CompileIQ, TileProg)${RESET}"
+        fi
         echo "${GREEN}    [2] flash-attn   - Flash Attention 2 (requires cuda)${RESET}"
     else
         echo "${BOLD}    [1] cuda         - NVIDIA GPU (not available — CUDA not detected)${RESET}"
