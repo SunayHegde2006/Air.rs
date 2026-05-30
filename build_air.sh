@@ -54,7 +54,7 @@ done
 # ── Banner ───────────────────────────────────────────────────────────────────
 echo ""
 echo "${MAGENTA}  ======================================================${RESET}"
-echo "${MAGENTA}       Air.rs Build System — v1.1.3 (Stable)            ${RESET}"
+echo "${MAGENTA}       Air.rs Build System — v1.1.4 (Stable)            ${RESET}"
 echo "${MAGENTA}  ======================================================${RESET}"
 echo ""
 
@@ -313,6 +313,14 @@ echo ""
 echo "${BOLD}  --- Step 5: Building Air.rs ($PROFILE_NAME) ---${RESET}"
 echo ""
 
+# ── CUDA 13.3+ Self-Healing Logic ─────────────────────────────────────────────
+if [[ $CUDA_VERSION == 13.* ]]; then
+    # cudarc v0.19.7 does not yet support '13030' (CUDA 13.3) explicitly.
+    # We inject CUDARC_CUDA_VERSION=13000 to use stable CUDA 13 bindings.
+    export CUDARC_CUDA_VERSION="13000"
+    info "Detected CUDA 13.3+; injecting CUDARC_CUDA_VERSION=13000 for compatibility"
+fi
+
 CMD="cargo build $PROFILE_FLAG $FEATURE_ARG"
 info "Running: $CMD"
 echo ""
@@ -328,6 +336,7 @@ echo "${GREEN}  [✓] Parallel Prefix-Scan (Rayon)       ${RESET}(recurrence, ga
 echo "${GREEN}  [✓] STRIX Vulkan Buffer Pooling        ${RESET}(Managed pool, vulkan_hal.rs)"
 echo "${GREEN}  [✓] Evaluation Gates (CI Guard)        ${RESET}(HellaSwag/MMLU, eval.rs)"
 echo "${GREEN}  [✓] Whisper Production Pipeline        ${RESET}(Beam Search, whisper.rs)"
+echo "${GREEN}  [✓] Self-Healing CUDA 13 Logic         ${RESET}(Transparent bindings, v1.1.4)"
 echo ""
 
 BUILD_START=$(date +%s)
