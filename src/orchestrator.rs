@@ -2,7 +2,7 @@
 
 use crate::manifest::LayerChunk;
 use crate::uploader::VramBuffer;
-use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+use cudarc::driver::DevicePtr;
 use candle_core::{DType, Device, Shape, Tensor};
 
 pub struct LayerGuard<'a> {
@@ -77,7 +77,10 @@ impl KernelOrchestrator {
         let mut tensor_names = Vec::new();
 
         // The base VRAM pointer from the uploaded buffer
-        let base_vram_ptr = *buffer.slice.device_ptr() as u64;
+        let base_vram_ptr = {
+            let (ptr, _guard) = buffer.slice.device_ptr(buffer.slice.stream());
+            ptr
+        };
 
         for record in &chunk.tensors {
             // "Pointer Offset (The Magic Trick)"

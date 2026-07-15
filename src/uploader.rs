@@ -1,13 +1,13 @@
 #![cfg(feature = "cuda")]
 
 use crate::manifest::Manifest;
-use candle_core::cuda_backend::cudarc::driver::CudaSlice;
+use cudarc::driver::CudaSlice;
 use memmap2::Mmap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-// In cudarc 0.13, the device type is `CudaDevice` (not CudaStream/CudaContext).
-type CudarCudaDevice = candle_core::cuda_backend::cudarc::driver::CudaDevice;
+// In cudarc 0.19, the device type is `CudaContext`.
+type CudarCudaDevice = cudarc::driver::CudaContext;
 
 #[cfg(unix)]
 fn prefetch_page_cache(mmap: &Mmap, offset: usize, len: usize) {
@@ -46,10 +46,12 @@ impl TransferEngine {
                 // Background async prefetch of the next chunk into OS page cache
                 prefetch_page_cache(&mmap_clone, offset, len);
 
-                // Copy host slice to VRAM via synchronous copy (cudarc 0.13 API)
+                // Copy host slice to VRAM via cudarc 0.19 clone_htod API and synchronize
                 let host_slice = &mmap_clone[offset..offset + len];
-                let vram_buffer = device_clone.htod_sync_copy(host_slice)
+                let stream = device_clone.default_stream();
+                let vram_buffer = stream.clone_htod(host_slice)
                     .expect("Failed to copy to VRAM buffer");
+                stream.synchronize().expect("Failed to sync stream");
 
                 let completed_buffer = VramBuffer {
                     chunk_id: chunk.id,

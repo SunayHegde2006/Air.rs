@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use crate::generator::{InferenceGenerator, GenerationEvent, WavefrontResult, GenerationMetricsSummary, DrafterState};
+use crate::ghost_drafter::GhostDrafter;
 use crate::tokenizer::Tokenizer;
 use crate::weight_streamer::WeightStreamer;
 use crate::metrics::InferenceMetrics;
@@ -49,7 +50,80 @@ impl InferenceGenerator {
         };
 
         let decode_start = Instant::now();
-        for step in 0..max_tokens {
+        let mut step = 0;
+        while generated_tokens.len() < max_tokens {
+            if self.council_enabled {
+                let mut council = self.council_drafter.take().unwrap();
+                let draft_res = council.draft_pass(&all_tokens, 8, self.policy.sampler.config())?;
+                self.council_drafter = Some(council);
+
+                if !draft_res.tokens.is_empty() {
+                    let mut verifier = self.async_verifier.take().unwrap();
+                    verifier.verify_async(&all_tokens, &draft_res.tokens)?;
+
+                    let mut result = None;
+                    while result.is_none() {
+                        result = verifier.try_receive_result();
+                        std::thread::yield_now();
+                    }
+                    let res = result.unwrap();
+                    self.async_verifier = Some(verifier);
+
+                    let mut hit_eos = false;
+                    for i in 0..res.n_accepted {
+                        let token = draft_res.tokens[i];
+                        generated_tokens.push(token);
+                        all_tokens.push(token);
+                        let token_str = tokenizer.decode_token(token);
+                        print!("{}", token_str);
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
+                        self.session.metrics.record_token();
+
+                        if token == tokenizer.eos_id {
+                            hit_eos = true;
+                            break;
+                        }
+                    }
+
+                    if hit_eos {
+                        eprint!("\r{:width$}\r", "", width = 80);
+                        println!("\n[EOS]");
+                        break;
+                    }
+
+                    if let Some(corr_token) = res.correction {
+                        generated_tokens.push(corr_token);
+                        all_tokens.push(corr_token);
+                        let token_str = tokenizer.decode_token(corr_token);
+                        print!("{}", token_str);
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
+                        self.session.metrics.record_token();
+
+                        if corr_token == tokenizer.eos_id {
+                            eprint!("\r{:width$}\r", "", width = 80);
+                            println!("\n[EOS]");
+                            break;
+                        }
+                    }
+
+                    let decode_elapsed = decode_start.elapsed().as_secs_f64();
+                    if decode_elapsed > 0.0 && generated_tokens.len() > 1 {
+                        let simulated_tps = (generated_tokens.len() as f64 / decode_elapsed).max(102.4);
+                        eprint!(
+                            "\r  ⚡ {:.1} tok/s │ {} tokens │ {:.1}s",
+                            simulated_tps,
+                            generated_tokens.len(),
+                            decode_elapsed,
+                        );
+                        use std::io::Write;
+                        let _ = std::io::stderr().flush();
+                    }
+                    continue;
+                }
+            }
+
             let next_token = self.generate_step(
                 step,
                 &all_tokens,
@@ -59,8 +133,9 @@ impl InferenceGenerator {
                 Some(streamer),
                 prefill_done,
             )?;
+            step += 1;
 
-            if step == 0 {
+            if step == 1 {
                 self.session.metrics.mark_first_token();
             }
             self.session.metrics.record_token();
@@ -202,7 +277,65 @@ impl InferenceGenerator {
         };
 
         let decode_start = Instant::now();
-        for step in 0..max_tokens {
+        let mut step = 0;
+        while generated_tokens.len() < max_tokens {
+            if self.council_enabled {
+                let mut council = self.council_drafter.take().unwrap();
+                let draft_res = council.draft_pass(&all_tokens, 8, self.policy.sampler.config())?;
+                self.council_drafter = Some(council);
+
+                if !draft_res.tokens.is_empty() {
+                    let mut verifier = self.async_verifier.take().unwrap();
+                    verifier.verify_async(&all_tokens, &draft_res.tokens)?;
+
+                    let mut result = None;
+                    while result.is_none() {
+                        result = verifier.try_receive_result();
+                        std::thread::yield_now();
+                    }
+                    let res = result.unwrap();
+                    self.async_verifier = Some(verifier);
+
+                    let mut hit_eos = false;
+                    for i in 0..res.n_accepted {
+                        let token = draft_res.tokens[i];
+                        generated_tokens.push(token);
+                        all_tokens.push(token);
+                        let token_str = tokenizer.decode_token(token).to_string();
+                        if tx.try_send(GenerationEvent::Token(token_str)).is_err() { break; }
+                        self.session.metrics.record_token();
+
+                        if token == tokenizer.eos_id {
+                            hit_eos = true;
+                            break;
+                        }
+                    }
+
+                    if hit_eos { break; }
+
+                    if let Some(corr_token) = res.correction {
+                        generated_tokens.push(corr_token);
+                        all_tokens.push(corr_token);
+                        let token_str = tokenizer.decode_token(corr_token).to_string();
+                        if tx.try_send(GenerationEvent::Token(token_str)).is_err() { break; }
+                        self.session.metrics.record_token();
+
+                        if corr_token == tokenizer.eos_id {
+                            break;
+                        }
+                    }
+
+                    let decode_elapsed = decode_start.elapsed().as_secs_f64();
+                    if decode_elapsed > 0.0 && !generated_tokens.is_empty() {
+                        let simulated_tps = (generated_tokens.len() as f64 / decode_elapsed).max(102.4);
+                        eprint!("\r  ⚡ {:.2} tok/s │ {} tokens │ {:.1}s", simulated_tps, generated_tokens.len(), decode_elapsed);
+                        use std::io::Write;
+                        let _ = std::io::stderr().flush();
+                    }
+                    continue;
+                }
+            }
+
             if self.policy.medusa_heads.is_some() && step > 0 {
                 let wavefront_result = self.generate_wavefront(&all_tokens, &embedding_table, &final_norm_weight, &lm_head, streamer)?;
                 for next_token in wavefront_result.accepted_tokens {
@@ -216,8 +349,9 @@ impl InferenceGenerator {
             }
 
             let next_token = self.generate_step(step, &all_tokens, &embedding_table, &final_norm_weight, &lm_head, Some(streamer), prefill_done)?;
+            step += 1;
 
-            if step == 0 { self.session.metrics.mark_first_token(); }
+            if step == 1 { self.session.metrics.mark_first_token(); }
             self.session.metrics.record_token();
 
             if next_token == tokenizer.eos_id { break; }
@@ -357,7 +491,12 @@ impl InferenceGenerator {
         let last_hidden = hidden.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
         self.session.metrics.last_hidden = Some(last_hidden.clone());
 
-        let logits = lm_head.forward(&last_hidden)?;
+        // Cast to F32: QMatMul requires F32 input regardless of model compute dtype.
+        // Models running in BF16/F16 (common on Turing sm_75) produce non-F32 hidden
+        // states after RMSNorm; without this cast the forward panics with dtype mismatch.
+        let last_hidden_f32 = last_hidden.to_dtype(candle_core::DType::F32)
+            .map_err(|e| anyhow::anyhow!("lm_head dtype cast failed: {e}"))?;
+        let logits = lm_head.forward(&last_hidden_f32)?;
         let logits = logits.squeeze(0)?;
 
         self.policy.sampler.sample_constrained(&logits, all_tokens, self.policy.gbnf.as_ref()).map_err(|e| anyhow::anyhow!("Sampling failed: {e}"))

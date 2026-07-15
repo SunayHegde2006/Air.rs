@@ -61,19 +61,44 @@ gate_for() {
 
 # ── Run bench and extract Mean TPS ────────────────────────────────────────────
 # Returns TTFT_ms (integer) via stdout.
+#
+# IMPORTANT: This measures TTFT latency proxy (1000ms / single-token TPS),
+# NOT sustained decode throughput. Actual decode TPS is ~10-50× lower when
+# S.L.I.P. is streaming weights from NVMe on every decode step.
+#
+# --ctx-size 2048: caps VRAM budget check for GPUs with < 16 GB VRAM.
+# Without this, models with 128K native context fail the VRAM guard on
+# RTX 3060/3070/2080 Ti before a single token is generated.
 bench_ttft() {
     local model="$1"
-    local raw
-    raw=$("$BIN" bench --model "$model" --n-tokens 1 --runs "$RUNS" 2>&1)
+    local raw exit_code=0
+
+    # Capture both stdout and stderr; detect non-zero exit explicitly
+    raw=$("$BIN" bench \
+            --model "$model" \
+            --n-tokens 1 \
+            --runs "$RUNS" \
+            --ctx-size 2048 \
+            2>&1) || exit_code=$?
+
+    if [ "$exit_code" -ne 0 ]; then
+        warn "  bench failed (exit $exit_code) for $(basename "$model")"
+        warn "    → $(echo "$raw" | grep -i 'error\|Error' | head -2 || echo 'see bench output above')"
+        echo "9999"
+        return
+    fi
+
     local tps
     tps=$(echo "$raw" | grep -oP 'Mean TPS:\s*\K[0-9]+(\.[0-9]+)?')
     if [ -z "$tps" ] || [ "$tps" = "0" ]; then
+        warn "  bench ran but 'Mean TPS' not found in output for $(basename "$model")"
         echo "9999"
         return
     fi
     # TTFT = 1000 ms / TPS  (rounded to integer)
     echo "scale=0; 1000 / $tps" | bc
 }
+
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 echo ""

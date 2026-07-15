@@ -243,10 +243,17 @@ impl WeightStreamer {
     }
 
     /// Load the LM-head weight (quantized).
+    ///
+    /// Search order:
+    /// 1. `output.weight`   — standard llama.cpp / GGUF name
+    /// 2. `lm_head.weight`  — HuggingFace-style name
+    /// 3. `token_embd.weight` — tied-embedding fallback (Llama/Mistral models
+    ///    that share the vocab projection with the input embedding table)
     pub fn load_lm_head(&self, device: &Device) -> Result<QMatMul> {
         let mut c = Cursor::new(&self.mmap[..]);
         self.qmatmul(&mut c, "output.weight", device)
             .or_else(|_| self.qmatmul(&mut c, "lm_head.weight", device))
+            .or_else(|_| self.qmatmul(&mut c, "token_embd.weight", device))
     }
 
     pub fn load_output(&self, device: &Device) -> Result<(Tensor, QMatMul)> {

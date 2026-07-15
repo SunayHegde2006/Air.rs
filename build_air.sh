@@ -16,9 +16,14 @@ set -euo pipefail
 
 # ── Color helpers ────────────────────────────────────────────────────────────
 if [ -t 1 ] && command -v tput &>/dev/null && tput colors &>/dev/null; then
-    RED=$(tput setaf 1);   GREEN=$(tput setaf 2);  YELLOW=$(tput setaf 3)
-    BLUE=$(tput setaf 4);  CYAN=$(tput setaf 6);   BOLD=$(tput bold)
-    RESET=$(tput sgr0);    MAGENTA=$(tput setaf 5)
+    RED=$(tput setaf 1 2>/dev/null || echo "")
+    GREEN=$(tput setaf 2 2>/dev/null || echo "")
+    YELLOW=$(tput setaf 3 2>/dev/null || echo "")
+    BLUE=$(tput setaf 4 2>/dev/null || echo "")
+    CYAN=$(tput setaf 6 2>/dev/null || echo "")
+    BOLD=$(tput bold 2>/dev/null || echo "")
+    RESET=$(tput sgr0 2>/dev/null || echo "")
+    MAGENTA=$(tput setaf 5 2>/dev/null || echo "")
 else
     RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; BOLD=''; RESET=''; MAGENTA=''
 fi
@@ -86,11 +91,19 @@ fi
 # ── GPU Architecture ──────────────────────────────────────────────────────────
 GPU_ARCH=""
 if $HAS_GPU && command -v nvidia-smi &>/dev/null; then
-    COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d '.')
-    if [[ -n "$COMPUTE_CAP" && "$COMPUTE_CAP" =~ ^[0-9]+$ ]]; then
-        GPU_ARCH="sm_${COMPUTE_CAP}"
-        export NVCC_ARCH="sm_${COMPUTE_CAP}"
-        step "GPU arch: ${GPU_ARCH} (kernels will be compiled for this ISA)"
+    # Query all GPU compute capabilities, strip dots, sort, and deduplicate
+    if COMPUTE_CAPS=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d '.' | sort -u); then
+        CAPS_ARR=()
+        for cap in $COMPUTE_CAPS; do
+            if [[ "$cap" =~ ^[0-9]+$ ]]; then
+                CAPS_ARR+=("sm_${cap}")
+            fi
+        done
+        if [ ${#CAPS_ARR[@]} -gt 0 ]; then
+            GPU_ARCH=$(IFS=','; echo "${CAPS_ARR[*]}")
+            export NVCC_ARCH="${NVCC_ARCH:-$GPU_ARCH}"
+            step "GPU arch targeting: ${NVCC_ARCH} (override via NVCC_ARCH=all or list)"
+        fi
     fi
 fi
 
@@ -216,8 +229,24 @@ if [ -n "$EXPLICIT_FEATURES" ]; then
     info "Explicit features: ${FEATURES[*]}"
 
 elif $SKIP_PROMPT; then
-    # Auto-select everything available
-    $HAS_CUDA   && { FEATURES+=("cuda"); FEATURES+=("flash-attn"); }
+    # Auto-select everything available, but guard flash-attn on WSL low-memory systems.
+    # candle-flash-attn spawns ~40 large cicc CUDA kernel compilations (~2.3 GB each).
+    # On WSL2 with ≤16 GB RAM this OOM-kills the compiler mid-build.
+    FLASH_ATTN_OK=true
+    if grep -qi microsoft /proc/version 2>/dev/null && [ -f /proc/meminfo ]; then
+        WSL_MEM_GB=$(( $(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024 / 1024 ))
+        if [ "$WSL_MEM_GB" -lt 16 ]; then
+            FLASH_ATTN_OK=false
+            warn "WSL RAM is ${WSL_MEM_GB} GB (< 16 GB): skipping flash-attn to prevent OOM crashes."
+            warn "To enable flash-attn: set WSL memory to 24GB+ in %USERPROFILE%\\.wslconfig, then wsl --shutdown."
+        fi
+    fi
+    if $HAS_CUDA; then
+        FEATURES+=("cuda")
+        if $FLASH_ATTN_OK; then
+            FEATURES+=("flash-attn")
+        fi
+    fi
     $HAS_METAL  && FEATURES+=("metal")
     $HAS_ROCM   && FEATURES+=("rocm")
     $HAS_VULKAN && FEATURES+=("vulkan")
@@ -317,6 +346,33 @@ if [ ${#FEATURES[@]} -gt 0 ]; then
     FEATURE_ARG="--features $FEATURE_STR"
 fi
 
+# Fail-Fast Multi-Vendor Guard
+HAS_FEATURE_CUDA=false
+HAS_FEATURE_ROCM=false
+for f in "${FEATURES[@]}"; do
+    if [[ "$f" == "cuda" ]]; then
+        HAS_FEATURE_CUDA=true
+    fi
+    if [[ "$f" == "rocm" ]]; then
+        HAS_FEATURE_ROCM=true
+    fi
+done
+
+if $HAS_FEATURE_CUDA && $HAS_FEATURE_ROCM; then
+    info "Multi-vendor build requested (CUDA + ROCm); verifying compiler toolchains..."
+    if ! command -v nvcc &>/dev/null; then
+        err "Multi-vendor build failure: 'nvcc' not found in PATH."
+        err "For hybrid NVIDIA + AMD compilation, please install CUDA Toolkit and add nvcc to PATH."
+        exit 1
+    fi
+    if ! command -v hipcc &>/dev/null; then
+        err "Multi-vendor build failure: 'hipcc' not found in PATH."
+        err "For hybrid NVIDIA + AMD compilation, please install ROCm/HIP Toolkit and add hipcc to PATH."
+        exit 1
+    fi
+    ok "Both nvcc and hipcc compilers found."
+fi
+
 # =============================================================================
 # STEP 5: BUILD
 # =============================================================================
@@ -332,12 +388,41 @@ if [[ $CUDA_VERSION == 13.* ]]; then
     info "Detected CUDA 13.3+; injecting CUDARC_CUDA_VERSION=13000 for compatibility"
 fi
 
+if [[ -n "${FEATURE_ARG}" && "${FEATURE_ARG}" == *"cuda"* ]]; then
+    info "Refreshing cudarc lock entry..."
+    cargo update cudarc 2>/dev/null || true
+fi
+
+# ── WSL Memory Exhaustion Protection ──────────────────────────────────────────
+JOBS_ARG=""
+if grep -qi microsoft /proc/version 2>/dev/null; then
+    if [ -f /proc/meminfo ]; then
+        MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        MEM_GB=$((MEM_KB / 1024 / 1024))
+        CPU_CORES=$(nproc 2>/dev/null || echo 1)
+        
+        # Cap jobs using memory-safe formula (allocate ~4GB per job)
+        CALCULATED_SAFE_JOBS=$((MEM_GB / 4))
+        if [ "$CALCULATED_SAFE_JOBS" -lt 1 ]; then
+            CALCULATED_SAFE_JOBS=1
+        elif [ "$CALCULATED_SAFE_JOBS" -gt 4 ]; then
+            # Cap at 4 to be conservative on memory pressure configurations
+            CALCULATED_SAFE_JOBS=4
+        fi
+        
+        if [ "$CALCULATED_SAFE_JOBS" -lt "$CPU_CORES" ]; then
+            JOBS_ARG="-j $CALCULATED_SAFE_JOBS"
+            warn "WSL Environment detected: Cap parallel jobs to $CALCULATED_SAFE_JOBS (out of $CPU_CORES CPUs) to prevent OOM system crashes."
+        fi
+    fi
+fi
+
 # Propagate arch to child processes if detected
 if [[ -n "${NVCC_ARCH:-}" ]]; then
     info "GPU arch targeting: ${NVCC_ARCH} (injected into all CUDA kernel builds)"
 fi
 
-CMD="cargo build $PROFILE_FLAG $FEATURE_ARG"
+CMD="cargo build $PROFILE_FLAG $FEATURE_ARG $JOBS_ARG"
 info "Running: $CMD"
 echo ""
 

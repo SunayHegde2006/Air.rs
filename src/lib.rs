@@ -101,7 +101,8 @@ pub mod session_context;
 pub mod execution_policy;
 pub mod inference_step;
 pub mod layer_pipeline;
-
+pub mod speculative_council;
+pub mod async_verifier;
 #[cfg(feature = "cuda")]
 pub mod uploader;
 

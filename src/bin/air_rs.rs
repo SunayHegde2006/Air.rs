@@ -31,16 +31,28 @@ enum Command {
         temperature: f32,
         top_p: f32,
         stream: bool,
+        /// Override model's native context length for VRAM budget (e.g. 4096 on sm_75)
+        ctx_size: Option<usize>,
+        resident: bool,
+        tp: usize,
+        council: bool,
+        epsilon: f32,
     },
     Serve {
         model: PathBuf,
         port: u16,
         host: String,
+        ctx_size: Option<usize>,
+        resident: bool,
+        tp: usize,
     },
     Bench {
         model: PathBuf,
         n_tokens: usize,
         n_runs: usize,
+        ctx_size: Option<usize>,
+        resident: bool,
+        tp: usize,
     },
     Info {
         model: PathBuf,
@@ -79,6 +91,17 @@ fn parse_generate(args: &[String]) -> Result<Command, String> {
         .map(|s| s.parse::<f32>().map_err(|_| "invalid --top-p".to_string()))
         .unwrap_or(Ok(0.9))?;
     let stream = args.iter().any(|a| a == "--stream" || a == "-s");
+    let ctx_size = opt_arg(args, "--ctx-size", "")
+        .map(|s| s.parse::<usize>().map_err(|_| "invalid --ctx-size".to_string()))
+        .transpose()?;
+    let resident = args.iter().any(|a| a == "--resident");
+    let tp = opt_arg(args, "--tp", "")
+        .map(|s| s.parse::<usize>().map_err(|_| "invalid --tp".to_string()))
+        .unwrap_or(Ok(1))?;
+    let council = args.iter().any(|a| a == "--council");
+    let epsilon = opt_arg(args, "--epsilon", "")
+        .map(|s| s.parse::<f32>().map_err(|_| "invalid --epsilon".to_string()))
+        .unwrap_or(Ok(0.15))?;
     Ok(Command::Generate {
         model: PathBuf::from(model),
         prompt,
@@ -86,6 +109,11 @@ fn parse_generate(args: &[String]) -> Result<Command, String> {
         temperature,
         top_p,
         stream,
+        ctx_size,
+        resident,
+        tp,
+        council,
+        epsilon,
     })
 }
 
@@ -96,7 +124,21 @@ fn parse_serve(args: &[String]) -> Result<Command, String> {
         .unwrap_or(Ok(8080))?;
     let host = opt_arg(args, "--host", "-H")
         .unwrap_or_else(|| "127.0.0.1".to_string());
-    Ok(Command::Serve { model: PathBuf::from(model), port, host })
+    let ctx_size = opt_arg(args, "--ctx-size", "")
+        .map(|s| s.parse::<usize>().map_err(|_| "invalid --ctx-size".to_string()))
+        .transpose()?;
+    let resident = args.iter().any(|a| a == "--resident");
+    let tp = opt_arg(args, "--tp", "")
+        .map(|s| s.parse::<usize>().map_err(|_| "invalid --tp".to_string()))
+        .unwrap_or(Ok(1))?;
+    Ok(Command::Serve {
+        model: PathBuf::from(model),
+        port,
+        host,
+        ctx_size,
+        resident,
+        tp,
+    })
 }
 
 fn parse_bench(args: &[String]) -> Result<Command, String> {
@@ -107,7 +149,21 @@ fn parse_bench(args: &[String]) -> Result<Command, String> {
     let n_runs = opt_arg(args, "--runs", "-r")
         .map(|s| s.parse::<usize>().map_err(|_| "invalid --runs".to_string()))
         .unwrap_or(Ok(3))?;
-    Ok(Command::Bench { model: PathBuf::from(model), n_tokens, n_runs })
+    let ctx_size = opt_arg(args, "--ctx-size", "")
+        .map(|s| s.parse::<usize>().map_err(|_| "invalid --ctx-size".to_string()))
+        .transpose()?;
+    let resident = args.iter().any(|a| a == "--resident");
+    let tp = opt_arg(args, "--tp", "")
+        .map(|s| s.parse::<usize>().map_err(|_| "invalid --tp".to_string()))
+        .unwrap_or(Ok(1))?;
+    Ok(Command::Bench {
+        model: PathBuf::from(model),
+        n_tokens,
+        n_runs,
+        ctx_size,
+        resident,
+        tp,
+    })
 }
 
 fn parse_info(args: &[String]) -> Result<Command, String> {
@@ -150,16 +206,33 @@ GENERATE OPTIONS:
   -t, --temperature <f>      Sampling temperature (default: 0.7)
       --top-p <f>            Nucleus sampling threshold (default: 0.9)
   -s, --stream               Stream tokens to stdout as generated
+      --ctx-size <n>         Override context length for VRAM budget (e.g. 4096)
+                             Useful on cards with <16 GB VRAM (e.g. 2×RTX 2080 Ti)
+      --resident             Resident VRAM mode (pin weights in device memory)
+      --tp <n>               Tensor Parallelism GPUs (default: 1)
+      --council              Enable Consensus-Driven Speculative Council (CDSC)
+      --epsilon <f>          Jensen-Shannon Divergence threshold (default: 0.15)
 
 SERVE OPTIONS:
   -m, --model <path>         Path to GGUF model file
   -P, --port <port>          Listen port (default: 8080)
   -H, --host <host>          Listen host (default: 127.0.0.1)
+      --ctx-size <n>         Override context length for VRAM budget
+      --resident             Resident VRAM mode (pin weights in device memory)
+      --tp <n>               Tensor Parallelism GPUs (default: 1)
+
+BENCH OPTIONS:
+  -m, --model <path>         Path to GGUF model file
+  -n, --n-tokens <n>         Tokens to generate (default: 512)
+  -r, --runs <r>             Runs (default: 3)
+      --ctx-size <n>         Override context length for VRAM budget
+      --resident             Resident VRAM mode (pin weights in device memory)
+      --tp <n>               Tensor Parallelism GPUs (default: 1)
 
 EXAMPLES:
-  air-rs generate --model llama-3.2-3b.gguf --prompt \"Hello, world!\" --stream
-  air-rs serve    --model llama-3.2-3b.gguf --port 8080
-  air-rs bench    --model llama-3.2-3b.gguf --n-tokens 256 --runs 5
+  air-rs generate --model llama-3.2-3b.gguf --prompt \"Hello, world!\" --stream --resident
+  air-rs serve    --model llama-3.2-3b.gguf --port 8080 --resident
+  air-rs bench    --model llama-3.2-3b.gguf --n-tokens 256 --runs 5 --resident
   air-rs info     --model llama-3.2-3b.gguf
 ",
         ver = env!("CARGO_PKG_VERSION")
@@ -168,6 +241,7 @@ EXAMPLES:
 
 // ── Subcommand implementations ─────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn run_generate(
     model: &std::path::Path,
     prompt: &str,
@@ -175,15 +249,28 @@ fn run_generate(
     temperature: f32,
     top_p: f32,
     _stream: bool,
+    ctx_size: Option<usize>,
+    resident: bool,
+    tp: usize,
+    council: bool,
+    epsilon: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Loading model: {}", model.display());
     let start = Instant::now();
 
-    let streamer = WeightStreamer::open(model)?;
+    let streamer = Arc::new(WeightStreamer::open(model)?);
     let content = streamer.content();
     let metadata = GgufLoader::extract_metadata(content);
-    let config = ModelConfig::from_gguf_metadata(&metadata);
+    let mut config = ModelConfig::from_gguf_metadata(&metadata);
     let tokenizer = GgufLoader::extract_tokenizer(content, &metadata);
+
+    // --ctx-size override: cap the VRAM budget check to a smaller context window.
+    // Critical for GPUs with < 16 GB VRAM (e.g. 2× RTX 2080 Ti @ 11 GB each) when
+    // the model's native context length is 128K+ and would fail the VRAM guard.
+    if let Some(ctx) = ctx_size {
+        eprintln!("  ctx-size override: {} tokens (model default: {})", ctx, config.context_length);
+        config.context_length = ctx;
+    }
 
     let sampler_config = SamplerConfig {
         temperature,
@@ -192,9 +279,22 @@ fn run_generate(
         repetition_penalty: 1.1,
     };
 
-    let mut generator = InferenceGenerator::new(config, sampler_config)?;
+    let mut generator = InferenceGenerator::with_streamer(
+        config, sampler_config, candle_core::Device::new_cuda(0)
+            .unwrap_or(candle_core::Device::Cpu),
+        Arc::clone(&streamer), None, None,
+        resident,
+        tp,
+    )?;
+
+    if council {
+        generator.enable_council(epsilon, Some(model.to_string_lossy().to_string()));
+    }
 
     eprintln!("Engine ready in {:.2}s", start.elapsed().as_secs_f64());
+    if council {
+        eprintln!("Consensus-Driven Speculative Council (CDSC) enabled (epsilon={})", epsilon);
+    }
     eprintln!("Generating up to {max_tokens} tokens (temp={temperature}, top_p={top_p})…\n");
 
     let _ = generator.generate(&tokenizer, prompt, max_tokens, &streamer)?;
@@ -206,6 +306,9 @@ fn run_serve(
     model: &std::path::Path,
     port: u16,
     host: &str,
+    ctx_size: Option<usize>,
+    resident: bool,
+    tp: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Loading model metadata for server: {}", model.display());
     eprintln!("Endpoints:");
@@ -221,10 +324,21 @@ fn run_serve(
 
     let model_name = model.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let streamer = Arc::new(WeightStreamer::open(model)?);
-    let tokenizer = GgufLoader::extract_tokenizer(streamer.content(), &GgufLoader::extract_metadata(streamer.content()));
-    let config = ModelConfig::from_gguf_metadata(&GgufLoader::extract_metadata(streamer.content()));
-    let generator = InferenceGenerator::new(config, SamplerConfig::default())?;
-    
+    let meta = GgufLoader::extract_metadata(streamer.content());
+    let tokenizer = GgufLoader::extract_tokenizer(streamer.content(), &meta);
+    let mut config = ModelConfig::from_gguf_metadata(&meta);
+    if let Some(ctx) = ctx_size {
+        eprintln!("  ctx-size override: {} tokens (model default: {})", ctx, config.context_length);
+        config.context_length = ctx;
+    }
+    let device = candle_core::Device::new_cuda(0).unwrap_or(candle_core::Device::Cpu);
+    let generator = InferenceGenerator::with_streamer(
+        config, SamplerConfig::default(), device,
+        Arc::clone(&streamer), None, None,
+        resident,
+        tp,
+    )?;
+
     let dispatcher = Arc::new(RequestOrchestrator::new(
         model_name.clone(),
         generator,
@@ -248,14 +362,26 @@ fn run_bench(
     model_path: &std::path::Path,
     n_tokens: usize,
     n_runs: usize,
+    ctx_size: Option<usize>,
+    resident: bool,
+    tp: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Loading model: {}", model_path.display());
-    
-    let streamer = WeightStreamer::open(model_path)?;
-    let loader = air_rs::loader::GgufLoader::new(model_path)?; // Fix 1: loader::new
-    let config = loader.model_config.clone(); // Access field
+
+    let streamer = Arc::new(WeightStreamer::open(model_path)?);
+    let loader = air_rs::loader::GgufLoader::new(model_path)?;
+    let mut config = loader.model_config.clone();
+    if let Some(ctx) = ctx_size {
+        eprintln!("  ctx-size override: {} tokens (model default: {})", ctx, config.context_length);
+        config.context_length = ctx;
+    }
     let sampler = air_rs::sampler::SamplerConfig::default();
-    let mut generator = air_rs::generator::InferenceGenerator::new(config, sampler)?;
+    let device = candle_core::Device::new_cuda(0).unwrap_or(candle_core::Device::Cpu);
+    let mut generator = air_rs::generator::InferenceGenerator::with_streamer(
+        config, sampler, device, Arc::clone(&streamer), None, None,
+        resident,
+        tp,
+    )?;
     
     // Auto-enable W.C.P.S.R. for Qwen 3.6
     generator.enable_wavefront(8, false, &streamer).ok();
@@ -323,11 +449,15 @@ fn main() {
         }
         Ok(cmd) => {
             let result = match cmd {
-                Command::Generate { model, prompt, max_tokens, temperature, top_p, stream } => {
-                    run_generate(&model, &prompt, max_tokens, temperature, top_p, stream)
+                Command::Generate { model, prompt, max_tokens, temperature, top_p, stream, ctx_size, resident, tp, council, epsilon } => {
+                    run_generate(&model, &prompt, max_tokens, temperature, top_p, stream, ctx_size, resident, tp, council, epsilon)
                 }
-                Command::Serve { model, port, host } => run_serve(&model, port, &host),
-                Command::Bench { model, n_tokens, n_runs } => run_bench(&model, n_tokens, n_runs),
+                Command::Serve { model, port, host, ctx_size, resident, tp } => {
+                    run_serve(&model, port, &host, ctx_size, resident, tp)
+                }
+                Command::Bench { model, n_tokens, n_runs, ctx_size, resident, tp } => {
+                    run_bench(&model, n_tokens, n_runs, ctx_size, resident, tp)
+                }
                 Command::Info { model } => run_info(&model),
             };
             if let Err(e) = result {

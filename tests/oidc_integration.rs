@@ -15,7 +15,7 @@ fn test_oidc_fetch_jwks_from_mock_server() {
                 "kid": "test-key-1",
                 "use": "sig",
                 "alg": "RS256",
-                "n": "v7_Vp-K...placeholder",
+                "n": "qflgXqk2lp3dEFFcPb3GZf3YDhy0jYVQX8LC2Fs8ku5uk2GrFRqxqcm9VVLEsLiATQ5jDBSI5c3LgQHMNjFDoiqb358nvlB9zpMhRiC-HH_2GGTTNNSxqzg_sl3a2cvCa0oy8AJdvdFQB4U_r44kNCTNLsNs67slcTLt4XUB4cr-2C3JKVlp4TdvcpI5JWaaWoVpw60KhIvgnbG6Z_XLWhGVnrlTNyh2_m1Dq3Y9fWg_jCuwI9OKR3RysZ3OxeZf7_LOFQ4eo34QHrDyugeh1cXe6mnCEp44479N2ciDT3E6WDWXcnzsoRiAjCf6qFjbnl3eB1g5sO49FNUT0JhYqw",
                 "e": "AQAB"
             }
         ]
