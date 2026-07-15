@@ -83,6 +83,7 @@ fn main() {
 ///
 /// Also emits a `CUDA_ARCH` compile-time env var readable in Rust code via
 /// `env!("CUDA_ARCH")`.
+#[allow(dead_code)]
 #[cfg(feature = "cuda")]
 fn detect_and_export_cuda_arch() {
     // Honour an explicit override first (useful in CI with a known GPU target)
@@ -133,7 +134,7 @@ fn detect_and_export_cuda_arch() {
             let _ = std::fs::write(
                 format!("{}/cuda_arch.txt", out_dir),
                 &arch,
-            );
+                );
         }
     } else {
         // Fallback: no GPU detected (CI, Docker without GPU passthrough)
@@ -142,6 +143,7 @@ fn detect_and_export_cuda_arch() {
     }
 }
 
+#[allow(dead_code)]
 #[cfg(not(feature = "cuda"))]
 fn detect_and_export_cuda_arch() {}
 
