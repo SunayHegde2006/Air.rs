@@ -114,7 +114,7 @@ impl GhostDrafter for SpeculativeCouncilDrafter {
             // Simulate hidden states from the 2-bit VRAM base model
             let mut hidden = vec![0.0f32; 2048];
             for i in 0..2048 {
-                hidden[i] = (((base_seed + step as u64 + i as u64) as f32).sin() * 0.1) as f32;
+                hidden[i] = ((base_seed + step as u64 + i as u64) as f32).sin() * 0.1;
             }
 
             // Run three voter LoRA branches.
