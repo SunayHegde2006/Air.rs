@@ -831,5 +831,16 @@ pub fn forward_deltanet(
     *state = layer_manager.states[0].clone();
 
     // ── 3. Final Gating (SiLU) ─────────────────────────────────────────
-    ssm_out.broadcast_mul(&crate::ops::silu(gate)?)
+    // gate shape is [batch, seq, hidden_dim] but ssm_out is [batch, seq, n_heads * head_dim].
+    // These can differ (e.g. Qwen 3.6: hidden=4096, but n_heads*head_dim may be smaller).
+    // Narrow the gate to exactly match ssm_out's last dimension so broadcast_mul succeeds.
+    let ssm_dim = ssm_out.dim(candle_core::D::Minus1)?;
+    let gate_silu = crate::ops::silu(gate)?;
+    let gate_dim = gate_silu.dim(candle_core::D::Minus1)?;
+    let gate_aligned = if gate_dim != ssm_dim {
+        gate_silu.narrow(candle_core::D::Minus1, 0, ssm_dim)?
+    } else {
+        gate_silu
+    };
+    ssm_out.broadcast_mul(&gate_aligned)
 }

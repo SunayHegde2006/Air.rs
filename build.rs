@@ -86,48 +86,60 @@ fn main() {
 #[cfg(feature = "cuda")]
 fn detect_and_export_cuda_arch() {
     // Honour an explicit override first (useful in CI with a known GPU target)
-    if let Ok(arch) = std::env::var("NVCC_ARCH") {
+    let arch_arg = if let Ok(arch) = std::env::var("NVCC_ARCH") {
         if !arch.is_empty() {
-            println!("cargo:rustc-env=CUDA_ARCH={}", arch);
-            return;
+            Some(arch)
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
-    // Query nvidia-smi
-    let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
-        .output();
-
-    if let Ok(out) = output {
-        if out.status.success() {
-            let raw = String::from_utf8_lossy(&out.stdout);
-            // Take only the first GPU; strip the dot (e.g. "8.9" → "89")
-            if let Some(line) = raw.lines().next() {
-                let sm = line.trim().replace('.', "");
-                if !sm.is_empty() && sm.chars().all(|c| c.is_ascii_digit()) {
-                    let arch = format!("sm_{}", sm);
-                    // Export for the nvcc wrapper (process env during build)
-                    println!("cargo:rustc-env=CUDA_ARCH={}", arch);
-                    // Also set the var for child processes (nvcc wrapper)
-                    // via cargo:rustc-env it's a compile-time env; we additionally
-                    // emit it via a build-script println so it's visible downstream.
-                    println!("cargo:warning=Air.rs: detected GPU arch {arch}, injecting -arch={arch} into CUDA kernel compilation");
-                    // Write to OUT_DIR so scripts/nvcc can source it if needed
-                    if let Ok(out_dir) = std::env::var("OUT_DIR") {
-                        let _ = std::fs::write(
-                            format!("{}/cuda_arch.txt", out_dir),
-                            &arch,
-                        );
+    let arch = match arch_arg {
+        Some(explicit) => explicit,
+        None => {
+            // Query nvidia-smi for all GPUs
+            let mut detected_arches = Vec::new();
+            if let Ok(output) = std::process::Command::new("nvidia-smi")
+                .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+                .output()
+            {
+                if output.status.success() {
+                    let raw = String::from_utf8_lossy(&output.stdout);
+                    for line in raw.lines() {
+                        let sm = line.trim().replace('.', "");
+                        if !sm.is_empty() && sm.chars().all(|c| c.is_ascii_digit()) {
+                            detected_arches.push(format!("sm_{}", sm));
+                        }
                     }
-                    return;
                 }
             }
+            if !detected_arches.is_empty() {
+                detected_arches.sort();
+                detected_arches.dedup();
+                detected_arches.join(",")
+            } else {
+                "".to_string()
+            }
         }
-    }
+    };
 
-    // Fallback: no GPU detected (CI, Docker without GPU passthrough)
-    println!("cargo:warning=Air.rs: nvidia-smi not available; CUDA kernels will use NVCC default arch");
-    println!("cargo:rustc-env=CUDA_ARCH=");
+    if !arch.is_empty() {
+        println!("cargo:rustc-env=CUDA_ARCH={}", arch);
+        println!("cargo:warning=Air.rs: target GPU arch(es) detected/set: {arch}, injecting corresponding compiler flags via nvcc wrapper");
+        // Write to OUT_DIR so scripts/nvcc can source it if needed
+        if let Ok(out_dir) = std::env::var("OUT_DIR") {
+            let _ = std::fs::write(
+                format!("{}/cuda_arch.txt", out_dir),
+                &arch,
+            );
+        }
+    } else {
+        // Fallback: no GPU detected (CI, Docker without GPU passthrough)
+        println!("cargo:warning=Air.rs: nvidia-smi not available and NVCC_ARCH not set; CUDA builds will default");
+        println!("cargo:rustc-env=CUDA_ARCH=");
+    }
 }
 
 #[cfg(not(feature = "cuda"))]

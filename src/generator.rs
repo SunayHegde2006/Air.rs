@@ -86,6 +86,10 @@ pub struct InferenceGenerator {
     pub blocks: Vec<Box<dyn crate::layer_pipeline::LayerUnit>>,
     pub dispatcher: Arc<crate::slip::SlipDispatcher>,
     pub rope_cache: RopeCache,
+    pub council_enabled: bool,
+    pub epsilon: f32,
+    pub council_drafter: Option<crate::speculative_council::SpeculativeCouncilDrafter>,
+    pub async_verifier: Option<crate::async_verifier::AsyncVerifyingPipeline>,
 }
 
 impl InferenceGenerator {
@@ -132,6 +136,10 @@ impl InferenceGenerator {
             blocks: Vec::new(),
             dispatcher,
             rope_cache: RopeCache::new(),
+            council_enabled: false,
+            epsilon: 0.15,
+            council_drafter: None,
+            async_verifier: None,
         })
     }
 
@@ -143,6 +151,8 @@ impl InferenceGenerator {
         streamer: std::sync::Arc<WeightStreamer>,
         _rope: Option<std::sync::Arc<crate::ops::RopeCache>>,
         mut dual_rope: Option<crate::dual_rope::DualRopeCache>,
+        resident: bool,
+        tp_size: usize,
     ) -> Result<Self> {
         // Initialize DualRope tensors on the target device
         if let Some(ref mut dr) = dual_rope {
@@ -163,13 +173,27 @@ impl InferenceGenerator {
 
         let mut gen = Self::with_device(config.clone(), sampler_config, device.clone())?;
         gen.session.dual_rope = dual_rope;
+        if tp_size > 1 {
+            gen.set_tp(0, tp_size);
+        }
         
         // Re-initialize dispatcher with the streamer
-        gen.dispatcher = std::sync::Arc::new(crate::slip::SlipDispatcher::new(
-            Some(streamer),
-            std::sync::Arc::new(config),
-            device,
-        ));
+        let dispatcher = if resident {
+            let tp_config = gen.session.tp_config.clone();
+            crate::slip::SlipDispatcher::new_resident(
+                streamer,
+                Arc::new(config),
+                device,
+                if tp_size > 1 { Some(&tp_config) } else { None },
+            )?
+        } else {
+            crate::slip::SlipDispatcher::new(
+                Some(streamer),
+                Arc::new(config),
+                device,
+            )
+        };
+        gen.dispatcher = std::sync::Arc::new(dispatcher);
         Ok(gen)
     }
 
@@ -253,6 +277,14 @@ impl InferenceGenerator {
         self.policy.has_grammar()
     }
 
+    pub fn enable_council(&mut self, epsilon: f32, target_model_path: Option<String>) {
+        self.council_enabled = true;
+        self.epsilon = epsilon;
+        let config = crate::ghost_drafter::SpeculativeConfig::default();
+        let vocab_size = self.config.vocab_size;
+        self.council_drafter = Some(crate::speculative_council::SpeculativeCouncilDrafter::new(config, epsilon, vocab_size));
+        self.async_verifier = Some(crate::async_verifier::AsyncVerifyingPipeline::new(8, target_model_path));
+    }
 }
 
 #[derive(Debug, Clone)]

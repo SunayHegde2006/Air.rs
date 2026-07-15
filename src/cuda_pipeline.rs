@@ -108,11 +108,11 @@ pub struct CudaStreamPool {
 /// Opaque inner state, gated behind runtime CUDA availability.
 struct CudaPoolInner {
     #[cfg(feature = "cuda")]
-    device: Arc<candle_core::cuda_backend::cudarc::driver::CudaDevice>,
+    device: Arc<cudarc::driver::CudaContext>,
     #[cfg(feature = "cuda")]
-    compute_stream: candle_core::cuda_backend::cudarc::driver::CudaStream,
+    compute_stream: Arc<cudarc::driver::CudaStream>,
     #[cfg(feature = "cuda")]
-    dma_stream: candle_core::cuda_backend::cudarc::driver::CudaStream,
+    dma_stream: Arc<cudarc::driver::CudaStream>,
     // On non-CUDA builds, the struct still exists but carries no state.
     #[cfg(not(feature = "cuda"))]
     _phantom: std::marker::PhantomData<()>,
@@ -145,11 +145,10 @@ impl CudaStreamPool {
 
     #[cfg(feature = "cuda")]
     fn build_cuda(n_streams: usize, device_idx: usize) -> Result<Self> {
-        use candle_core::cuda_backend::cudarc::driver::CudaDevice;
-        let device = CudaDevice::new(device_idx)?;
-        // device is already Arc<CudaDevice> from CudaDevice::new
-        let compute_stream = device.fork_default_stream()?;
-        let dma_stream = device.fork_default_stream()?;
+        use cudarc::driver::CudaContext;
+        let device = CudaContext::new(device_idx)?;
+        let compute_stream = device.new_stream()?;
+        let dma_stream = device.new_stream()?;
         let inner = CudaPoolInner { device, compute_stream, dma_stream };
         Ok(Self {
             n_streams,

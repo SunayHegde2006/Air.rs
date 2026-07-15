@@ -275,6 +275,7 @@ impl GpuHal for CudaHal {
         unsafe { cuda_check(cudaFree(ptr.0 as *mut u8)) }
     }
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn copy_to_vram(
         &self,
         dst: GpuPtr,
@@ -294,6 +295,7 @@ impl GpuHal for CudaHal {
         }
     }
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn copy_from_vram(
         &self,
         dst: *mut u8,
@@ -363,7 +365,7 @@ impl GpuHal for CudaHal {
 
     fn signal_timeline(&self, semaphore: u64, value: u64) -> Result<(), HalError> {
         let mut sem_map = self.semaphores.lock().unwrap();
-        let events = sem_map.entry(semaphore).or_insert_with(Vec::new);
+        let events = sem_map.entry(semaphore).or_default();
         
         let mut event = ptr::null_mut();
         unsafe {

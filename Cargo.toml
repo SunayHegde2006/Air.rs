@@ -1,6 +1,6 @@
 [package]
 name = "air-rs"
-version = "1.1.5"
+version = "1.1.6"
 edition = "2021"
 authors = ["Sunay Hegde"]
 description = "A high-performance, memory-fluid LLM inference engine."
@@ -23,7 +23,7 @@ libc = "0.2"
 # The "cuda" feature enables GPU acceleration via candle-core's cuda feature.
 candle-core = "0.10.2"
 # Full CUDA 13.3 support via cudarc 0.19.x and build-system detection
-cudarc = { version = "0.19.7", features = ["cuda-version-from-build-system"], optional = true }
+cudarc = { version = "0.19.8", features = ["cuda-version-from-build-system"], optional = true }
 candle-flash-attn = { version = "0.10.2", optional = true }
 half = { version = "2.4", features = ["num-traits"] }
 safetensors = "0.5.2"

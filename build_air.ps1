@@ -65,11 +65,23 @@ try {
 # GPU Architecture Detection
 $gpuArch = ""
 try {
-    $computeCap = (nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>&1 | Select-Object -First 1).Trim() -replace '\.', ''
-    if ($computeCap -match '^\d+$') {
-        $gpuArch = "sm_$computeCap"
-        $env:NVCC_ARCH = $gpuArch
-        Write-Step "GPU arch: $gpuArch (kernels will be compiled for this ISA)"
+    $caps = nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $capList = @()
+        foreach ($cap in $caps) {
+            $capClean = $cap.Trim() -replace '\.', ''
+            if ($capClean -match '^\d+$') {
+                $capList += "sm_$capClean"
+            }
+        }
+        if ($capList.Count -gt 0) {
+            $capList = $capList | Select-Object -Unique | Sort-Object
+            $gpuArch = $capList -join ','
+            if (-not $env:NVCC_ARCH) {
+                $env:NVCC_ARCH = $gpuArch
+            }
+            Write-Step "GPU arch targeting: $env:NVCC_ARCH (override via env:NVCC_ARCH='all' or list)"
+        }
     }
 } catch {
     Write-Info "GPU arch detection unavailable; NVCC will use default"
@@ -300,6 +312,40 @@ if ($features.Count -gt 0) {
     $featureArg = "--features $featureStr"
 }
 
+# Fail-Fast Multi-Vendor Guard
+$hasFeatureCuda = $false
+$hasFeatureRocm = $false
+foreach ($f in $features) {
+    if ($f -eq 'cuda') { $hasFeatureCuda = $true }
+    if ($f -eq 'rocm') { $hasFeatureRocm = $true }
+}
+
+if ($hasFeatureCuda -and $hasFeatureRocm) {
+    Write-Info "Multi-vendor build requested (CUDA + ROCm); verifying compiler toolchains..."
+    $hasNvcc = $false
+    $hasHipcc = $false
+    try {
+        $null = Get-Command nvcc -ErrorAction SilentlyContinue
+        $hasNvcc = $true
+    } catch {}
+    try {
+        $null = Get-Command hipcc -ErrorAction SilentlyContinue
+        $hasHipcc = $true
+    } catch {}
+
+    if (-not $hasNvcc) {
+        Write-Err "Multi-vendor build failure: 'nvcc' not found in PATH."
+        Write-Err "For hybrid NVIDIA + AMD compilation, please install CUDA Toolkit and add nvcc to PATH."
+        exit 1
+    }
+    if (-not $hasHipcc) {
+        Write-Err "Multi-vendor build failure: 'hipcc' not found in PATH."
+        Write-Err "For hybrid NVIDIA + AMD compilation, please install ROCm/HIP Toolkit and add hipcc to PATH."
+        exit 1
+    }
+    Write-Step "Both nvcc and hipcc compilers found."
+}
+
 # ============================================================================
 # STEP 5: BUILD
 # ============================================================================
@@ -313,6 +359,11 @@ Write-Host ""
 if ($cudaVersion -like "13.*") {
     $env:CUDARC_CUDA_VERSION = "13000"
     Write-Info "Detected CUDA 13.3+; injecting CUDARC_CUDA_VERSION=13000 for compatibility"
+}
+
+if ($featureArg -match "cuda") {
+    Write-Info "Refreshing cudarc lock entry..."
+    cargo update cudarc 2>&1 | Out-Null
 }
 if ($gpuArch -ne "") {
     Write-Info "GPU arch targeting: $gpuArch (injected into all CUDA kernel builds)"

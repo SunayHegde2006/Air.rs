@@ -64,19 +64,77 @@ fi
 # (Hopper), or sm_100 (Blackwell) instead of the NVCC default (sm_52) gives
 # access to newer ISA features, better register alloc, and HW-specific paths.
 if [[ $HAS_ARCH -eq 0 ]]; then
-    # Strategy 1: honour env override (set by build_air.sh/ps1 or CI)
+    # 1. Detect NVCC version limits
+    CUDA_VER=$("$REAL_NVCC" --version 2>&1 | grep "release" | sed 's/.*release //' | sed 's/,.*//' || echo "")
+    CUDA_MAJOR=0
+    CUDA_MINOR=0
+    if [[ "$CUDA_VER" =~ ^([0-9]+)\.([0-9]+) ]]; then
+        CUDA_MAJOR="${BASH_REMATCH[1]}"
+        CUDA_MINOR="${BASH_REMATCH[2]}"
+    fi
+
+    # Determine maximum compiler capability
+    MAX_CAPABILITY=75
+    if (( CUDA_MAJOR > 12 )) || { [[ "$CUDA_MAJOR" -eq 12 ]] && (( CUDA_MINOR >= 8 )); }; then
+        MAX_CAPABILITY=100
+    elif [[ "$CUDA_MAJOR" -eq 12 ]]; then
+        MAX_CAPABILITY=90
+    elif [[ "$CUDA_MAJOR" -eq 11 ]] && (( CUDA_MINOR >= 8 )); then
+        MAX_CAPABILITY=90
+    elif [[ "$CUDA_MAJOR" -eq 11 ]] && (( CUDA_MINOR >= 1 )); then
+        MAX_CAPABILITY=86
+    elif [[ "$CUDA_MAJOR" -eq 11 ]]; then
+        MAX_CAPABILITY=80
+    fi
+
+    # 2. Get targets representation
+    TARGETS=""
     if [[ -n "${NVCC_ARCH:-}" ]]; then
-        ARGS+=("-arch=${NVCC_ARCH}")
+        TARGETS="${NVCC_ARCH}"
     else
-        # Strategy 2: query nvidia-smi for the first GPU's compute capability
-        if COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap \
-                         --format=csv,noheader 2>/dev/null | head -1 | tr -d '.'); then
-            if [[ -n "$COMPUTE_CAP" && "$COMPUTE_CAP" =~ ^[0-9]+$ ]]; then
-                ARGS+=("-arch=sm_${COMPUTE_CAP}")
-            fi
+        # Auto-detect all host GPUs
+        if DETECTED_CAPS=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d '.' | paste -sd, -); then
+            TARGETS="$DETECTED_CAPS"
         fi
-        # If nvidia-smi failed (CI/Docker without GPU), skip — let NVCC
-        # decide; the build will still succeed, just without ISA optimizations.
+    fi
+
+    # 3. Parse targets into capabilities
+    ARCH_STRS=()
+    if [[ "$TARGETS" == "all" ]]; then
+        ALL_ARCHS=(70 75 80 86 89 90 100)
+        for cur in "${ALL_ARCHS[@]}"; do
+            if (( cur <= MAX_CAPABILITY )); then
+                ARCH_STRS+=("$cur")
+            fi
+        done
+    elif [[ -n "$TARGETS" ]]; then
+        IFS=',' read -ra ADDR <<< "${TARGETS// /}"
+        for arch in "${ADDR[@]}"; do
+            digits=$(echo "$arch" | tr -cd '0-9')
+            if [[ -n "$digits" ]]; then
+                if (( digits <= MAX_CAPABILITY )); then
+                    ARCH_STRS+=("$digits")
+                fi
+            fi
+        done
+    fi
+
+    # Fallback to compiler's max capability if list resolved empty
+    if [ ${#ARCH_STRS[@]} -eq 0 ]; then
+        ARCH_STRS+=("$MAX_CAPABILITY")
+    fi
+
+    # 4. Generate -gencode arguments
+    HIGHEST_ARCH=0
+    for arch in "${ARCH_STRS[@]}"; do
+        ARGS+=("-gencode" "arch=compute_${arch},code=sm_${arch}")
+        if (( arch > HIGHEST_ARCH )); then
+            HIGHEST_ARCH="$arch"
+        fi
+    done
+    # Add virtual assembly target for forward compatibility (highest capability only)
+    if (( HIGHEST_ARCH > 0 )); then
+        ARGS+=("-gencode" "arch=compute_${HIGHEST_ARCH},code=compute_${HIGHEST_ARCH}")
     fi
 fi
 

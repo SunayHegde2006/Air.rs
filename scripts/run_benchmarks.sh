@@ -152,25 +152,57 @@ declare -A TTFT_MAP
 # Air.rs
 hdr "Engine 1/4 — Air.rs"
 if [ -x "./target/release/air-rs" ]; then
-    total=0; n=0
+    total=0; n=0; fail_count=0
     for prompt in "${PROMPTS[@]}"; do
+        # ── Correct invocation: requires the 'generate' subcommand ──────────
+        # Old code was missing 'generate' and calling:
+        #   ./air-rs --model ... --prompt ...
+        # which exits immediately with "unknown subcommand: --model".
+        # The error was absorbed by || true; TPS was then computed from the
+        # near-instant exit time → fake ~2500 tok/s printed to README.
         t0=$(date +%s%3N)
-        ./target/release/air-rs --model "$MODEL" --prompt "$prompt" \
-            --max-tokens "$MAX_TOKENS" --temperature 0 2>/dev/null >/dev/null || true
+        raw=$(./target/release/air-rs generate \
+                --model "$MODEL" \
+                --prompt "$prompt" \
+                --max-tokens "$MAX_TOKENS" \
+                --temperature 0 2>&1) && exit_ok=true || exit_ok=false
+
+        if ! $exit_ok; then
+            warn "  air-rs generate failed for prompt $(( n+1 )) — skipping"
+            fail_count=$(( fail_count + 1 ))
+            continue
+        fi
+
         t1=$(date +%s%3N)
         elapsed=$(( t1 - t0 ))
         [ "$elapsed" -eq 0 ] && elapsed=1
-        tps=$(echo "scale=2; $MAX_TOKENS * 1000 / $elapsed" | bc)
+
+        # Prefer the tok/s printed to stderr by the engine metrics line.
+        # Format: "  ⚡ 14.23 tok/s │ 128 tokens │ 8.9s"
+        tps=$(echo "$raw" | grep -oP '\d+\.\d+(?= tok/s)' | tail -1 || echo "")
+        if [ -z "$tps" ]; then
+            # Fallback: count generated words, divide by wall-clock time
+            tokens=$(echo "$raw" | tail -20 | wc -w)
+            tps=$(echo "scale=2; $tokens * 1000 / $elapsed" | bc 2>/dev/null || echo "0")
+        fi
+
         total=$(echo "scale=2; $total + $tps" | bc)
-        n=$((n+1))
-        step "  prompt=$((n)) → ${tps} tok/s"
+        n=$(( n + 1 ))
+        step "  prompt=$(( n )) → ${tps} tok/s (${elapsed}ms wall)"
     done
-    TPS_MAP["air_rs"]=$(echo "scale=2; $total / $n" | bc)
-    step "Air.rs avg: ${TPS_MAP[air_rs]} tok/s"
+
+    if [ "$n" -gt 0 ]; then
+        TPS_MAP["air_rs"]=$(echo "scale=2; $total / $n" | bc)
+        step "Air.rs avg: ${TPS_MAP[air_rs]} tok/s  (${fail_count} prompt(s) failed)"
+    else
+        warn "All Air.rs runs failed — check binary and model path"
+        TPS_MAP["air_rs"]="ERROR"
+    fi
 else
     warn "Air.rs binary not found — run: cargo build --release"
     TPS_MAP["air_rs"]="N/A"
 fi
+
 
 # llama.cpp
 hdr "Engine 2/4 — llama.cpp"

@@ -343,14 +343,14 @@ impl BackendDetector {
             match Self::probe_cuda_inner() {
                 Ok(mut result) => {
                     result.detection_time = start.elapsed();
-                    return result;
+                    result
                 }
                 Err(e) => {
-                    return GpuProbeResult::unavailable(
+                    GpuProbeResult::unavailable(
                         GpuBackendKind::Cuda,
                         start.elapsed(),
                         format!("CUDA probe failed: {e}"),
-                    );
+                    )
                 }
             }
         }

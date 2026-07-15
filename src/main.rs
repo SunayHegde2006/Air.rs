@@ -92,6 +92,8 @@ fn main() -> Result<()> {
         streamer_arc,
         None, // use per-step RoPE if no cache provided
         loader.dual_rope_cache,
+        false, // resident
+        1,     // tp_size
     )?;
 
     // 4b. Enable Gemma 4 Speculative Decoding Warp-up

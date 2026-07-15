@@ -60,6 +60,10 @@ impl Sampler {
         }
     }
 
+    pub fn config(&self) -> &SamplerConfig {
+        &self.config
+    }
+
     /// Given logits [vocab_size], return the sampled token ID.
     ///
     /// Equivalent to `sample_constrained(logits, past_tokens, None)`.
