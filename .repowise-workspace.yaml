@@ -4,5 +4,5 @@ repos:
 - path: .
   alias: air.rs
   is_primary: true
-  indexed_at: '2026-07-23T07:15:18.075514+00:00'
-  last_commit_at_index: 5818bb084a4f79d9f7a2a0a7b9cdb069b2ff3915
+  indexed_at: '2026-07-23T12:52:54.904481+00:00'
+  last_commit_at_index: cfbc556cbd8cf69596e575a9eeb6f040daa76a54
