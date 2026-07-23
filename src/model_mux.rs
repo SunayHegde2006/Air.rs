@@ -255,7 +255,7 @@ impl MuxSlot {
         if self.state.is_some() {
             bail!("slot '{}' is busy — submit rejected", self.model_id);
         }
-        self.generator.reset_kv_cache();
+        self.generator.reset();
         self.state = Some(ActiveRequest {
             all_tokens: prompt_tokens,
             max_tokens,

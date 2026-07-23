@@ -31,10 +31,13 @@ impl WarpHeader {
     /// Serialise to Little-Endian bytes (Decision Q18).
     pub fn serialise(&self) -> [u8; 18] {
         let mut buf = [0u8; 18];
-        buf[0..4].copy_from_slice(&WARP_MAGIC);
-        buf[4..6].copy_from_slice(&WARP_VERSION.to_le_bytes());
-        buf[6..14].copy_from_slice(&self.features.to_le_bytes());
-        buf[14..18].copy_from_slice(&self.body_len.to_le_bytes());
+        let (magic, rest) = buf.split_at_mut(4);
+        let (ver, rest) = rest.split_at_mut(2);
+        let (feat, len) = rest.split_at_mut(8);
+        magic.copy_from_slice(&WARP_MAGIC);
+        ver.copy_from_slice(&WARP_VERSION.to_le_bytes());
+        feat.copy_from_slice(&self.features.to_le_bytes());
+        len.copy_from_slice(&self.body_len.to_le_bytes());
         buf
     }
 

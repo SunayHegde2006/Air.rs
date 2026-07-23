@@ -29,7 +29,7 @@ impl SessionContext {
     }
 
     pub fn reset(&mut self) {
-        self.metrics = InferenceMetrics::new();
+        self.metrics = InferenceMetrics::default();
         self.wavefront_session = WavefrontSession::default();
         self.kv_cache.clear();
     }

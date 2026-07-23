@@ -23,24 +23,29 @@ pub enum AttentionBackend {
     /// Gated Delta Network — linear recurrence kernel.
     ///
     /// Used by: Qwen3.6 (48/64 layers per 27B layout).
-    ///
-    /// Research: Yang et al., "Gated Linear Attention Transformers with
-    /// Hardware-Efficient Training", NeurIPS 2024.
-    ///
-    /// Status: Production implementation in `gated_deltanet.rs`.
     GatedDeltaNet,
 
     /// Local sliding-window attention.
     ///
     /// Used by: Mistral (window=4096), Gemma4 local layers.
-    ///
-    /// `window` — number of tokens in each side of the local window.
     SlidingWindow { window: usize },
 
     /// Full global attention with unified KV and p-RoPE.
     ///
     /// Used by: Gemma4 global layers (every Nth layer; final layer always global).
     GlobalFull,
+
+    /// Multi-head Latent Attention (MLA) — DeepSeek V2/V3/R1.
+    ///
+    /// Compresses the KV cache via low-rank projection:
+    /// `c_kv = W_kv_a × x  ∈ ℝ^{kv_lora_rank}`  (stored)
+    /// `K, V  = W_kv_b × norm(c_kv)`              (on-the-fly)
+    ///
+    /// Memory reduction: ~6.4× vs standard GQA KV cache.
+    /// Wired into `mla_forward()` in `src/mla.rs`.
+    ///
+    /// Research: DeepSeek-V2 (Chen et al., 2024).
+    Mla,
 }
 
 impl AttentionBackend {
@@ -53,11 +58,15 @@ impl AttentionBackend {
         matches!(self, Self::GatedDeltaNet)
     }
 
+    /// Returns `true` if this backend uses MLA compressed KV cache.
+    pub fn is_mla(self) -> bool {
+        matches!(self, Self::Mla)
+    }
+
     /// Returns `true` if this backend supports KV-cache paging.
-    ///
-    /// Recurrent backends are not pageable — their state is a dense matrix.
+    /// Both recurrent and MLA backends bypass the standard paged KV allocator.
     pub fn is_kv_cacheable(self) -> bool {
-        !self.is_recurrent()
+        !self.is_recurrent() && !self.is_mla()
     }
 
     /// Human-readable name for metrics and logging.
@@ -67,6 +76,7 @@ impl AttentionBackend {
             Self::GatedDeltaNet        => "gated_delta_net",
             Self::SlidingWindow { .. } => "sliding_window",
             Self::GlobalFull           => "global_full",
+            Self::Mla                  => "mla",
         }
     }
 }
@@ -78,6 +88,7 @@ impl std::fmt::Display for AttentionBackend {
             Self::GatedDeltaNet              => write!(f, "GatedDeltaNet"),
             Self::SlidingWindow { window }   => write!(f, "SlidingWindow(w={window})"),
             Self::GlobalFull                 => write!(f, "GlobalFull"),
+            Self::Mla                        => write!(f, "MLA"),
         }
     }
 }
@@ -194,6 +205,18 @@ impl HybridAttentionRouter {
     pub fn gemma4_26b_a4b(n_layers: usize, sliding_window: usize, global_every_n: usize) -> Self {
         Self::gemma4_e4b(n_layers, sliding_window, global_every_n) // same logic, different params
     }
+
+    // -----------------------------------------------------------------------
+    // DeepSeek MLA layout constructors
+    // -----------------------------------------------------------------------
+
+    /// DeepSeek-V2 / V3 / R1 — all layers are Multi-Head Latent Attention (MLA).
+    ///
+    /// MLA compresses KV cache via low-rank projection `c_kv ∈ ℝ^{kv_lora_rank}`,
+    /// reducing memory ~6.4× versus standard GQA at 128 KV heads × 128 head_dim.
+    pub fn deepseek_v2(n_layers: usize) -> Self {
+        Self::uniform(n_layers, AttentionBackend::Mla)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +319,9 @@ mod tests {
         assert!(!AttentionBackend::GatedDeltaNet.is_kv_cacheable());
         assert!(AttentionBackend::Softmax.is_kv_cacheable());
         assert!(AttentionBackend::GlobalFull.is_kv_cacheable());
+        // MLA uses its own compressed KV path — not standard paged blocks
+        assert!(!AttentionBackend::Mla.is_kv_cacheable());
+        assert!(AttentionBackend::SlidingWindow { window: 2048 }.is_kv_cacheable());
     }
 
     #[test]
@@ -304,6 +330,7 @@ mod tests {
         assert_eq!(format!("{}", AttentionBackend::GatedDeltaNet), "GatedDeltaNet");
         assert_eq!(format!("{}", AttentionBackend::SlidingWindow { window: 4096 }), "SlidingWindow(w=4096)");
         assert_eq!(format!("{}", AttentionBackend::GlobalFull), "GlobalFull");
+        assert_eq!(format!("{}", AttentionBackend::Mla), "MLA");
     }
 
     #[test]
@@ -334,5 +361,35 @@ mod tests {
         assert_eq!(AttentionBackend::GatedDeltaNet.name(), "gated_delta_net");
         assert_eq!(AttentionBackend::SlidingWindow { window: 1 }.name(), "sliding_window");
         assert_eq!(AttentionBackend::GlobalFull.name(), "global_full");
+        assert_eq!(AttentionBackend::Mla.name(), "mla");
+    }
+
+    #[test]
+    fn test_mla_is_mla() {
+        assert!(AttentionBackend::Mla.is_mla());
+        assert!(!AttentionBackend::Softmax.is_mla());
+        assert!(!AttentionBackend::GatedDeltaNet.is_mla());
+        assert!(!AttentionBackend::GlobalFull.is_mla());
+    }
+
+    #[test]
+    fn test_deepseek_v2_router_all_mla() {
+        let r = HybridAttentionRouter::deepseek_v2(60);
+        assert_eq!(r.n_layers(), 60);
+        assert_eq!(r.count(AttentionBackend::Mla), 60);
+        for i in 0..60 {
+            assert_eq!(r.backend_for_layer(i), AttentionBackend::Mla);
+        }
+    }
+
+    #[test]
+    fn test_deepseek_v2_layout() {
+        let v2 = HybridAttentionRouter::deepseek_v2(28);
+        assert_eq!(v2.layout().len(), 28);
+    }
+
+    #[test]
+    fn test_mla_not_recurrent() {
+        assert!(!AttentionBackend::Mla.is_recurrent());
     }
 }

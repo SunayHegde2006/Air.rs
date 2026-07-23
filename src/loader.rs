@@ -71,38 +71,111 @@ impl GgufLoader {
         let mut file = File::open(path.as_ref())
             .with_context(|| format!("Failed to open GGUF file: {:?}", path.as_ref()))?;
 
-        // Use Candle's built-in GGUF parser to extract metadata
-        let content = gguf_file::Content::read(&mut file)
-            .context("Failed to parse GGUF metadata")?;
+        let (metadata, tensors, tokenizer) = match gguf_file::Content::read(&mut file) {
+            Ok(content) => {
+                // ─── Extract Tensor Offsets ───────────────────────────────────
+                let mut tensors = HashMap::new();
+                for (name, info) in content.tensor_infos.iter() {
+                    let shape_vec = info.shape.dims().to_vec();
+                    let elem_count = info.shape.elem_count();
+                    let block_size = info.ggml_dtype.block_size();
+                    let type_size = info.ggml_dtype.type_size();
+                    let size_in_bytes = (elem_count / block_size) * type_size;
+                    let absolute_offset = content.tensor_data_offset + info.offset;
 
-        // ─── Extract Tensor Offsets ───────────────────────────────────
-        let mut tensors = HashMap::new();
-        for (name, info) in content.tensor_infos.iter() {
-            let shape_vec = info.shape.dims().to_vec();
-            let elem_count = info.shape.elem_count();
-            let block_size = info.ggml_dtype.block_size();
-            let type_size = info.ggml_dtype.type_size();
-            let size_in_bytes = (elem_count / block_size) * type_size;
-            let absolute_offset = content.tensor_data_offset + info.offset;
+                    tensors.insert(
+                        name.clone(),
+                        TensorRecord {
+                            name: name.clone(),
+                            shape: shape_vec,
+                            ggml_dtype: info.ggml_dtype,
+                            absolute_offset,
+                            size_in_bytes: size_in_bytes as u64,
+                        },
+                    );
+                }
+                let metadata = Self::extract_metadata(&content);
+                let tokenizer = Self::extract_tokenizer(&content, &metadata);
+                (metadata, tensors, tokenizer)
+            }
+            Err(candle_err) => {
+                eprintln!("[GgufLoader] candle reader failed ({candle_err}), trying PrismML fallback");
+                let mmap = unsafe { memmap2::Mmap::map(&file)? };
+                let model = crate::strix::compat::parse_gguf_model(&mmap[..])
+                    .map_err(|e| anyhow::anyhow!("strix GGUF parse failed: {e}"))?;
 
-            tensors.insert(
-                name.clone(),
-                TensorRecord {
-                    name: name.clone(),
-                    shape: shape_vec,
-                    ggml_dtype: info.ggml_dtype,
-                    absolute_offset,
-                    size_in_bytes: size_in_bytes as u64,
-                },
-            );
-        }
+                let mut metadata = HashMap::new();
+                for (k, v) in model.metadata.iter() {
+                    let mv = match v {
+                        crate::strix::compat::MetadataValue::String(s) => MetadataValue::String(s.clone()),
+                        crate::strix::compat::MetadataValue::U32(v) => MetadataValue::U32(*v),
+                        crate::strix::compat::MetadataValue::I32(v) => MetadataValue::U32(*v as u32),
+                        crate::strix::compat::MetadataValue::U64(v) => MetadataValue::U64(*v),
+                        crate::strix::compat::MetadataValue::F32(v) => MetadataValue::F32(*v),
+                        crate::strix::compat::MetadataValue::Bool(v) => MetadataValue::Bool(*v),
+                        crate::strix::compat::MetadataValue::Array(arr) => MetadataValue::ArrayLen(arr.len()),
+                    };
+                    metadata.insert(k.clone(), mv);
+                }
 
-        // ─── Extract Model Metadata ──────────────────────────────────
-        let metadata = Self::extract_metadata(&content);
+                let mut tensors = HashMap::new();
+                for info in model.tensors.iter() {
+                    let shape_vec = info.shape.clone();
+                    let absolute_offset = (model.data_offset + info.offset as usize) as u64;
+                    tensors.insert(
+                        info.name.clone(),
+                        TensorRecord {
+                            name: info.name.clone(),
+                            shape: shape_vec,
+                            ggml_dtype: candle_core::quantized::GgmlDType::F16, // dummy mapping
+                            absolute_offset,
+                            size_in_bytes: info.size_bytes as u64,
+                        },
+                    );
+                }
+
+                let tokens = model.metadata.get("tokenizer.ggml.tokens")
+                    .and_then(|v| match v {
+                        crate::strix::compat::MetadataValue::Array(arr) => {
+                            let strings: Vec<String> = arr.iter().filter_map(|item| match item {
+                                crate::strix::compat::MetadataValue::String(s) => Some(s.clone()),
+                                _ => None,
+                            }).collect();
+                            Some(strings)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+
+                let merges = model.metadata.get("tokenizer.ggml.merges")
+                    .and_then(|v| match v {
+                        crate::strix::compat::MetadataValue::Array(arr) => {
+                            let strings: Vec<String> = arr.iter().filter_map(|item| match item {
+                                crate::strix::compat::MetadataValue::String(s) => Some(s.clone()),
+                                _ => None,
+                            }).collect();
+                            Some(strings)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+
+                let bos_id = metadata.get("tokenizer.ggml.bos_token_id")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1) as u32;
+
+                let eos_id = metadata.get("tokenizer.ggml.eos_token_id")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(2) as u32;
+
+                println!("Tokenizer (PrismML): {} tokens, {} merges, BOS={}, EOS={}", tokens.len(), merges.len(), bos_id, eos_id);
+                let tokenizer = Tokenizer::new(tokens, merges, bos_id, eos_id);
+
+                (metadata, tensors, tokenizer)
+            }
+        };
+
         let model_config = ModelConfig::from_gguf_metadata(&metadata);
-
-        // ─── Extract Tokenizer ───────────────────────────────────────
-        let tokenizer = Self::extract_tokenizer(&content, &metadata);
 
         // ─── Detect MTP draft head (Qwen3.6 NEXTN) ──────────────────
         let tensor_names: Vec<&str> = tensors.keys().map(|s| s.as_str()).collect();

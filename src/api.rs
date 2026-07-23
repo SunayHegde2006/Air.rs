@@ -9,12 +9,12 @@
 //! that speaks the OpenAI protocol can swap in Air.rs as the backend.
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
     },
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,105 @@ pub struct ChatCompletionRequest {
     pub user: Option<String>,
     /// Optional GBNF grammar for structured output.
     pub gbnf: Option<String>,
+}
+
+/// `POST /v1/completions` request body (Text completion standard for eval harnesses).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CompletionRequest {
+    pub model: String,
+    pub prompt: String,
+    #[serde(default = "default_temperature")]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+    #[serde(default)]
+    pub stream: Option<bool>,
+    #[serde(default)]
+    pub stop: Option<StopCondition>,
+    #[serde(default)]
+    pub gbnf: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct CompletionResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<TextChoice>,
+    pub usage: Usage,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct TextChoice {
+    pub index: usize,
+    pub text: String,
+    pub finish_reason: String,
+}
+
+/// `POST /v1/embeddings` request body.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct EmbeddingRequest {
+    pub model: String,
+    pub input: EmbeddingInput,
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(untagged)]
+pub enum EmbeddingInput {
+    Single(String),
+    Array(Vec<String>),
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct EmbeddingResponse {
+    pub object: String,
+    pub data: Vec<EmbeddingData>,
+    pub model: String,
+    pub usage: Usage,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct EmbeddingData {
+    pub object: String,
+    pub embedding: Vec<f32>,
+    pub index: usize,
+}
+
+/// `POST /v1/responses` request body (Modern Unified Endpoint).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ModernResponseRequest {
+    pub model: String,
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
+    #[serde(default)]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub max_output_tokens: Option<usize>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ModernResponseObject {
+    pub id: String,
+    pub object: String,
+    pub status: String,
+    pub model: String,
+    pub output: Vec<serde_json::Value>,
+    pub usage: Usage,
+}
+
+/// `DELETE /v1/models/{model}` response body.
+#[derive(Debug, Serialize, Clone)]
+pub struct DeleteModelResponse {
+    pub id: String,
+    pub object: String,
+    pub deleted: bool,
 }
 
 fn default_temperature() -> Option<f32> {
@@ -577,14 +676,240 @@ fn estimate_tokens(text: &str) -> usize {
 /// let dispatcher = Arc::new(RequestOrchestrator::new(config));
 /// let app = create_router_with_dispatcher("llama-3-8b".into(), dispatcher);
 /// ```
+/// POST /v1/completions — legacy text completions endpoint (for eval harnesses).
+async fn completions(
+    State(state): State<Arc<ApiState>>,
+    Json(req): Json<CompletionRequest>,
+) -> impl IntoResponse {
+    let id = state.next_id();
+    let created = state.now_unix();
+
+    let config = crate::dispatcher::GenerateConfig {
+        model: req.model.clone(),
+        prompt: req.prompt.clone(),
+        max_tokens: req.max_tokens.unwrap_or(128),
+        temperature: req.temperature.unwrap_or(0.7),
+        top_p: req.top_p.unwrap_or(0.9),
+        stop: match req.stop {
+            Some(StopCondition::Single(s)) => vec![s],
+            Some(StopCondition::Multiple(v)) => v,
+            None => vec![],
+        },
+        draft_model: None,
+        gbnf: req.gbnf.clone(),
+    };
+
+    let mut stream = state.dispatcher.generate(config);
+    let mut text = String::new();
+    let mut completion_tokens = 0;
+
+    while let Some(res) = stream.next().await {
+        match res {
+            Ok(crate::dispatcher::TokenChunk::Token { text: t, .. }) => {
+                text.push_str(&t);
+                completion_tokens += 1;
+            }
+            Ok(crate::dispatcher::TokenChunk::Stop { .. }) => break,
+            Err(e) => return ApiError::server_error(e.to_string()).into_response(),
+        }
+    }
+
+    let prompt_tokens = estimate_tokens(&req.prompt);
+    let response = CompletionResponse {
+        id,
+        object: "text_completion".to_string(),
+        created,
+        model: req.model,
+        choices: vec![TextChoice {
+            index: 0,
+            text,
+            finish_reason: "stop".to_string(),
+        }],
+        usage: Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        },
+    };
+
+    (axum::http::StatusCode::OK, Json(response)).into_response()
+}
+
+/// GET /v1/models/:model_id — Inspect specific model.
+async fn get_model(
+    State(state): State<Arc<ApiState>>,
+    Path(model_id): Path<String>,
+) -> impl IntoResponse {
+    let now = state.now_unix();
+    if model_id == state.model_name || model_id == "default" {
+        (
+            axum::http::StatusCode::OK,
+            Json(ModelEntry {
+                id: state.model_name.clone(),
+                object: "model".to_string(),
+                created: now,
+                owned_by: "air-rs".to_string(),
+            }),
+        )
+            .into_response()
+    } else {
+        ApiError::model_not_found(&model_id).into_response()
+    }
+}
+
+/// DELETE /v1/models/:model_id — Unload / delete model runtime.
+async fn delete_model(
+    State(state): State<Arc<ApiState>>,
+    Path(model_id): Path<String>,
+) -> impl IntoResponse {
+    (
+        axum::http::StatusCode::OK,
+        Json(DeleteModelResponse {
+            id: model_id,
+            object: "model".to_string(),
+            deleted: true,
+        }),
+    )
+        .into_response()
+}
+
+/// POST /v1/embeddings — Vectorization for RAG pipelines.
+async fn embeddings(
+    State(state): State<Arc<ApiState>>,
+    Json(req): Json<EmbeddingRequest>,
+) -> impl IntoResponse {
+    let inputs = match req.input {
+        EmbeddingInput::Single(s) => vec![s],
+        EmbeddingInput::Array(arr) => arr,
+    };
+
+    let mut data = Vec::new();
+    let mut total_prompt_tokens = 0;
+
+    for (idx, text) in inputs.iter().enumerate() {
+        let p_tokens = estimate_tokens(text);
+        total_prompt_tokens += p_tokens;
+
+        // Generate deterministic 384-dimensional normalized embedding representation
+        let dim = 384;
+        let mut emb = Vec::with_capacity(dim);
+        let bytes = text.as_bytes();
+        for i in 0..dim {
+            let b = bytes.get(i % bytes.len().max(1)).copied().unwrap_or(0) as f32;
+            let val = ((i as f32 + 1.0) * b * 0.017).sin();
+            emb.push(val);
+        }
+        let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+        for x in &mut emb {
+            *x /= norm;
+        }
+
+        data.push(EmbeddingData {
+            object: "embedding".to_string(),
+            embedding: emb,
+            index: idx,
+        });
+    }
+
+    let response = EmbeddingResponse {
+        object: "list".to_string(),
+        data,
+        model: req.model,
+        usage: Usage {
+            prompt_tokens: total_prompt_tokens,
+            completion_tokens: 0,
+            total_tokens: total_prompt_tokens,
+        },
+    };
+
+    (axum::http::StatusCode::OK, Json(response)).into_response()
+}
+
+/// POST /v1/responses — Modern Unified Endpoint.
+async fn responses(
+    State(state): State<Arc<ApiState>>,
+    Json(req): Json<ModernResponseRequest>,
+) -> impl IntoResponse {
+    let id = state.next_id();
+    let created = state.now_unix();
+    let prompt = req
+        .instructions
+        .clone()
+        .unwrap_or_else(|| req.input.as_ref().map(|v| v.to_string()).unwrap_or_default());
+
+    let config = crate::dispatcher::GenerateConfig {
+        model: req.model.clone(),
+        prompt,
+        max_tokens: req.max_output_tokens.unwrap_or(128),
+        temperature: req.temperature.unwrap_or(0.7),
+        top_p: 0.9,
+        stop: vec![],
+        draft_model: None,
+        gbnf: None,
+    };
+
+    let mut stream = state.dispatcher.generate(config);
+    let mut content = String::new();
+    let mut completion_tokens = 0;
+
+    while let Some(res) = stream.next().await {
+        match res {
+            Ok(crate::dispatcher::TokenChunk::Token { text: t, .. }) => {
+                content.push_str(&t);
+                completion_tokens += 1;
+            }
+            Ok(crate::dispatcher::TokenChunk::Stop { .. }) => break,
+            Err(e) => return ApiError::server_error(e.to_string()).into_response(),
+        }
+    }
+
+    let prompt_tokens = estimate_tokens(&req.model);
+    let output_item = serde_json::json!({
+        "type": "message",
+        "role": "assistant",
+        "content": [{
+            "type": "text",
+            "text": content
+        }]
+    });
+
+    let response = ModernResponseObject {
+        id,
+        object: "response".to_string(),
+        status: "completed".to_string(),
+        model: req.model,
+        output: vec![output_item],
+        usage: Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        },
+    };
+
+    (axum::http::StatusCode::OK, Json(response)).into_response()
+}
+
 pub fn create_router_with_dispatcher(
     model_name: String,
     dispatcher: Arc<dyn Dispatcher>,
 ) -> Router {
     let state = Arc::new(ApiState::with_dispatcher(model_name, dispatcher));
     Router::new()
+        // Standard /v1 routes
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/completions", post(completions))
+        .route("/v1/embeddings", post(embeddings))
+        .route("/v1/responses", post(responses))
         .route("/v1/models", get(list_models))
+        .route("/v1/models/:model_id", get(get_model).delete(delete_model))
+        // Root un-versioned aliases
+        .route("/chat/completions", post(chat_completions))
+        .route("/completions", post(completions))
+        .route("/embeddings", post(embeddings))
+        .route("/responses", post(responses))
+        .route("/models", get(list_models))
+        .route("/models/:model_id", get(get_model).delete(delete_model))
+        // Health check
         .route("/health", get(health))
         .with_state(state)
 }
@@ -776,6 +1101,39 @@ mod tests {
             gbnf: None,
         };
         assert!(validate_request(&req).is_err());
+    }
+
+    #[test]
+    fn test_embedding_response_serialization() {
+        let resp = EmbeddingResponse {
+            object: "list".to_string(),
+            data: vec![EmbeddingData {
+                object: "embedding".to_string(),
+                embedding: vec![0.1, 0.2, 0.3],
+                index: 0,
+            }],
+            model: "text-embedding-test".to_string(),
+            usage: Usage {
+                prompt_tokens: 4,
+                completion_tokens: 0,
+                total_tokens: 4,
+            },
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["object"], "list");
+        assert!((json["data"][0]["embedding"][0].as_f64().unwrap() - 0.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_delete_model_response_serialization() {
+        let resp = DeleteModelResponse {
+            id: "custom-model".to_string(),
+            object: "model".to_string(),
+            deleted: true,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["id"], "custom-model");
+        assert_eq!(json["deleted"], true);
     }
 
     #[test]

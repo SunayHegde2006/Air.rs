@@ -291,62 +291,34 @@ impl DriveInquisitor {
 /// Default layer size in MB (LLaMA 70B Q4_K_M).
 pub const DEFAULT_LAYER_SIZE_MB: f64 = 531.0;
 
-/// Compute backend classification for protocol decisions.
-///
-/// Determines per-token kernel time, Ghost Model TTFT, and CPU-only
-/// special path routing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ComputeBackend {
-    /// Discrete NVIDIA GPU (CUDA).
-    CudaGpu,
-    /// Discrete AMD GPU (ROCm).
-    RocmGpu,
-    /// Apple Silicon (Metal, UMA).
-    MetalGpu,
-    /// Intel Arc (Vulkan).
-    VulkanGpu,
-    /// CPU-only (no discrete GPU).
-    CpuOnly,
-}
+use crate::shared_buffer::ComputeBackend;
 
 impl ComputeBackend {
-    /// Whether this is CPU-only inference.
-    pub fn is_cpu_only(&self) -> bool {
-        matches!(self, Self::CpuOnly)
-    }
-
     /// Typical per-token kernel time in ms for LLaMA 70B.
     pub fn t_kernel_ms(&self) -> f64 {
         match self {
-            Self::CudaGpu  => 70.0,
-            Self::RocmGpu  => 80.0,
-            Self::MetalGpu => 50.0,
-            Self::VulkanGpu => 90.0,
-            Self::CpuOnly  => 1_000.0,
+            Self::Cuda(_)  => 70.0,
+            Self::Rocm(_)  => 80.0,
+            Self::Metal    => 50.0,
+            Self::Vulkan | Self::Sycl(_) | Self::Mojo(_) => 90.0,
+            Self::Cpu      => 1_000.0,
         }
     }
 
     /// Ghost Model TTFT in ms (None if N/A — CPU IS the ghost).
     pub fn ghost_ttft_ms(&self) -> Option<f64> {
         match self {
-            Self::CudaGpu  => Some(80.0),
-            Self::RocmGpu  => Some(100.0),
-            Self::MetalGpu => Some(60.0),
-            Self::VulkanGpu => Some(110.0),
-            Self::CpuOnly  => None,
+            Self::Cuda(_)  => Some(80.0),
+            Self::Rocm(_)  => Some(100.0),
+            Self::Metal    => Some(60.0),
+            Self::Vulkan | Self::Sycl(_) | Self::Mojo(_) => Some(110.0),
+            Self::Cpu      => None,
         }
     }
-}
 
-impl fmt::Display for ComputeBackend {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::CudaGpu  => write!(f, "CUDA (NVIDIA GPU)"),
-            Self::RocmGpu  => write!(f, "ROCm (AMD GPU)"),
-            Self::MetalGpu => write!(f, "Metal (Apple Silicon)"),
-            Self::VulkanGpu => write!(f, "Vulkan (Intel Arc)"),
-            Self::CpuOnly  => write!(f, "CPU-only"),
-        }
+    /// Whether this is CPU-only inference.
+    pub fn is_cpu_only(&self) -> bool {
+        matches!(self, Self::Cpu)
     }
 }
 
@@ -537,7 +509,7 @@ fn decide_cpu_only(
             let rho = t_kernel_ms / t_io_ms.max(0.001);
             ProtocolDecision {
                 protocol: StreamingProtocol::SlipNvme,
-                backend: ComputeBackend::CpuOnly,
+                backend: ComputeBackend::Cpu,
                 measured_speed_mbps,
                 d_opt: 2, b_opt: 0, t_io_ms, t_kernel_ms,
                 ghost_drafting: false, // CPU IS the ghost
@@ -555,7 +527,7 @@ fn decide_cpu_only(
 
             ProtocolDecision {
                 protocol: StreamingProtocol::Mist,
-                backend: ComputeBackend::CpuOnly,
+                backend: ComputeBackend::Cpu,
                 measured_speed_mbps,
                 d_opt: 0, b_opt, t_io_ms, t_kernel_ms,
                 ghost_drafting: ghost_active,
@@ -732,7 +704,7 @@ mod tests {
     #[test]
     fn test_decision_gpu_nvme() {
         // Spec: >= 3,000 MB/s → S.L.I.P. v3, self-speculative active
-        let d = decide_protocol(7_000.0, ComputeBackend::CudaGpu, DEFAULT_LAYER_SIZE_MB);
+        let d = decide_protocol(7_000.0, ComputeBackend::Cuda(0), DEFAULT_LAYER_SIZE_MB);
         assert_eq!(d.protocol, StreamingProtocol::SlipNvme);
         assert!(d.self_speculative);
         assert!(!d.ghost_drafting);
@@ -746,7 +718,7 @@ mod tests {
     #[test]
     fn test_decision_gpu_sata() {
         // Spec: >= 400 MB/s → S.L.I.P. v3 SATA, D=2, Ghost Drafting active
-        let d = decide_protocol(500.0, ComputeBackend::CudaGpu, DEFAULT_LAYER_SIZE_MB);
+        let d = decide_protocol(500.0, ComputeBackend::Cuda(0), DEFAULT_LAYER_SIZE_MB);
         assert_eq!(d.protocol, StreamingProtocol::SlipSata);
         assert_eq!(d.d_opt, 2);
         assert!(d.ghost_drafting);
@@ -759,7 +731,7 @@ mod tests {
     fn test_decision_gpu_hdd_5400() {
         // Spec: 110 MB/s (5400 RPM) → M.I.S.T., Ghost primary
         // B_opt = ceil(4827 / 70) = 69
-        let d = decide_protocol(110.0, ComputeBackend::CudaGpu, DEFAULT_LAYER_SIZE_MB);
+        let d = decide_protocol(110.0, ComputeBackend::Cuda(0), DEFAULT_LAYER_SIZE_MB);
         assert_eq!(d.protocol, StreamingProtocol::Mist);
         assert!(d.ghost_drafting);
         assert_eq!(d.b_opt, 69, "B_opt for 5400 RPM + GPU: {}", d.b_opt);
@@ -770,7 +742,7 @@ mod tests {
     fn test_decision_gpu_hdd_7200() {
         // Spec: 160 MB/s (7200 RPM) → M.I.S.T.
         // B_opt = ceil(3319 / 70) = 48
-        let d = decide_protocol(160.0, ComputeBackend::CudaGpu, DEFAULT_LAYER_SIZE_MB);
+        let d = decide_protocol(160.0, ComputeBackend::Cuda(0), DEFAULT_LAYER_SIZE_MB);
         assert_eq!(d.protocol, StreamingProtocol::Mist);
         assert_eq!(d.b_opt, 48, "B_opt for 7200 RPM + GPU: {}", d.b_opt);
     }
@@ -780,7 +752,7 @@ mod tests {
     #[test]
     fn test_decision_gpu_degraded() {
         // Spec: < 50 MB/s → M.I.S.T. degraded, user warned
-        let d = decide_protocol(30.0, ComputeBackend::CudaGpu, DEFAULT_LAYER_SIZE_MB);
+        let d = decide_protocol(30.0, ComputeBackend::Cuda(0), DEFAULT_LAYER_SIZE_MB);
         assert_eq!(d.protocol, StreamingProtocol::MistDegraded);
         assert!(d.warning.is_some());
         assert!(d.ghost_drafting);
@@ -792,7 +764,7 @@ mod tests {
     fn test_decision_cpu_nvme() {
         // Spec: CPU + NVMe → S.L.I.P. D=2, ρ > 1 (CPU bottleneck),
         //       Ghost NOT applicable (CPU IS the ghost), no batch padding.
-        let d = decide_protocol(5_000.0, ComputeBackend::CpuOnly, DEFAULT_LAYER_SIZE_MB);
+        let d = decide_protocol(5_000.0, ComputeBackend::Cpu, DEFAULT_LAYER_SIZE_MB);
         assert_eq!(d.protocol, StreamingProtocol::SlipNvme);
         assert_eq!(d.d_opt, 2);
         assert!(!d.ghost_drafting, "CPU IS the ghost — no drafting");
@@ -808,7 +780,7 @@ mod tests {
     #[test]
     fn test_decision_cpu_sata() {
         // CPU + SATA → uses NVMe path (D=2, no Ghost)
-        let d = decide_protocol(500.0, ComputeBackend::CpuOnly, DEFAULT_LAYER_SIZE_MB);
+        let d = decide_protocol(500.0, ComputeBackend::Cpu, DEFAULT_LAYER_SIZE_MB);
         assert_eq!(d.protocol, StreamingProtocol::SlipNvme);
         assert_eq!(d.d_opt, 2);
         assert!(!d.ghost_drafting);
@@ -821,7 +793,7 @@ mod tests {
         // Spec: CPU + 5400 HDD → M.I.S.T., B_opt=5
         // T_io = 531/110 * 1000 = 4827ms, T_kernel = 1000ms
         // B_opt = ceil(4827/1000) = 5
-        let d = decide_protocol(110.0, ComputeBackend::CpuOnly, DEFAULT_LAYER_SIZE_MB);
+        let d = decide_protocol(110.0, ComputeBackend::Cpu, DEFAULT_LAYER_SIZE_MB);
         assert_eq!(d.protocol, StreamingProtocol::Mist);
         assert_eq!(d.b_opt, 5, "CPU B_opt for 5400 RPM: {}", d.b_opt);
         assert!(d.ghost_drafting, "CPU Ghost on same threads");
@@ -833,7 +805,7 @@ mod tests {
         // Spec: CPU + 7200 HDD → B_opt=4
         // T_io = 531/160 * 1000 = 3319ms, T_kernel = 1000ms
         // B_opt = ceil(3319/1000) = 4
-        let d = decide_protocol(160.0, ComputeBackend::CpuOnly, DEFAULT_LAYER_SIZE_MB);
+        let d = decide_protocol(160.0, ComputeBackend::Cpu, DEFAULT_LAYER_SIZE_MB);
         assert_eq!(d.b_opt, 4, "CPU B_opt for 7200 RPM: {}", d.b_opt);
     }
 
@@ -841,7 +813,7 @@ mod tests {
 
     #[test]
     fn test_decision_amd_hdd() {
-        let d = decide_protocol(160.0, ComputeBackend::RocmGpu, DEFAULT_LAYER_SIZE_MB);
+        let d = decide_protocol(160.0, ComputeBackend::Rocm(0), DEFAULT_LAYER_SIZE_MB);
         assert_eq!(d.protocol, StreamingProtocol::Mist);
         assert!(d.ghost_drafting);
         assert!((d.ghost_ttft_ms - 100.0).abs() < 1.0);
@@ -849,7 +821,7 @@ mod tests {
 
     #[test]
     fn test_decision_apple_hdd() {
-        let d = decide_protocol(160.0, ComputeBackend::MetalGpu, DEFAULT_LAYER_SIZE_MB);
+        let d = decide_protocol(160.0, ComputeBackend::Metal, DEFAULT_LAYER_SIZE_MB);
         assert_eq!(d.protocol, StreamingProtocol::Mist);
         assert!(d.ghost_drafting);
         assert!((d.ghost_ttft_ms - 60.0).abs() < 1.0); // UMA advantage
@@ -857,7 +829,7 @@ mod tests {
 
     #[test]
     fn test_decision_arc_nvme() {
-        let d = decide_protocol(5_000.0, ComputeBackend::VulkanGpu, DEFAULT_LAYER_SIZE_MB);
+        let d = decide_protocol(5_000.0, ComputeBackend::Vulkan, DEFAULT_LAYER_SIZE_MB);
         assert_eq!(d.protocol, StreamingProtocol::SlipNvme);
         assert!(d.self_speculative);
     }
@@ -866,33 +838,33 @@ mod tests {
 
     #[test]
     fn test_backend_cpu_only() {
-        assert!(ComputeBackend::CpuOnly.is_cpu_only());
-        assert!(!ComputeBackend::CudaGpu.is_cpu_only());
+        assert!(ComputeBackend::Cpu.is_cpu_only());
+        assert!(!ComputeBackend::Cuda(0).is_cpu_only());
     }
 
     #[test]
     fn test_backend_t_kernel() {
-        assert!((ComputeBackend::CudaGpu.t_kernel_ms() - 70.0).abs() < 0.1);
-        assert!((ComputeBackend::CpuOnly.t_kernel_ms() - 1000.0).abs() < 0.1);
+        assert!((ComputeBackend::Cuda(0).t_kernel_ms() - 70.0).abs() < 0.1);
+        assert!((ComputeBackend::Cpu.t_kernel_ms() - 1000.0).abs() < 0.1);
     }
 
     #[test]
     fn test_backend_ghost_ttft() {
-        assert_eq!(ComputeBackend::CudaGpu.ghost_ttft_ms(), Some(80.0));
-        assert_eq!(ComputeBackend::CpuOnly.ghost_ttft_ms(), None);
+        assert_eq!(ComputeBackend::Cuda(0).ghost_ttft_ms(), Some(80.0));
+        assert_eq!(ComputeBackend::Cpu.ghost_ttft_ms(), None);
     }
 
     #[test]
     fn test_backend_display() {
-        let s = format!("{}", ComputeBackend::CudaGpu);
-        assert!(s.contains("CUDA"));
+        let s = format!("{}", ComputeBackend::Cuda(0));
+        assert!(s.contains("cuda"));
     }
 
     // ── Decision Display ─────────────────────────────────────────
 
     #[test]
     fn test_decision_display() {
-        let d = decide_protocol(110.0, ComputeBackend::CudaGpu, DEFAULT_LAYER_SIZE_MB);
+        let d = decide_protocol(110.0, ComputeBackend::Cuda(0), DEFAULT_LAYER_SIZE_MB);
         let s = format!("{}", d);
         assert!(s.contains("DriveInquisitor"));
         assert!(s.contains("M.I.S.T."));
@@ -900,7 +872,7 @@ mod tests {
 
     #[test]
     fn test_decision_warning_display() {
-        let d = decide_protocol(20.0, ComputeBackend::CudaGpu, DEFAULT_LAYER_SIZE_MB);
+        let d = decide_protocol(20.0, ComputeBackend::Cuda(0), DEFAULT_LAYER_SIZE_MB);
         assert!(d.warning.is_some());
         let w = d.warning.unwrap();
         assert!(w.contains("very slow"), "Warning: {}", w);

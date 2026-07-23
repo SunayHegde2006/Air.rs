@@ -363,12 +363,10 @@ impl PyEngine {
             let streamer = WeightStreamer::open(Path::new(&path))
                 .map_err(to_py_err)?;
 
-            let content = streamer.content();
-
-            // Parse model config and tokenizer using GgufLoader's pub helpers
-            let metadata = GgufLoader::extract_metadata(content);
-            let config   = ModelConfig::from_gguf_metadata(&metadata);
-            let tokenizer = GgufLoader::extract_tokenizer(content, &metadata);
+            let loader = GgufLoader::new(Path::new(&path))
+                .map_err(to_py_err)?;
+            let config = loader.model_config;
+            let tokenizer = loader.tokenizer;
 
             let vocab_size = tokenizer.vocab_size();
 

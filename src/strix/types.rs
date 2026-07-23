@@ -76,6 +76,9 @@ pub enum DType {
     Q4_0_4_4,  // Q4_0 with 4×4 tile transposition for ARM NEON
     Q4_0_4_8,  // Q4_0 with 4×8 tile transposition for ARM NEON
     Q4_0_8_8,  // Q4_0 with 8×8 tile transposition for ARM SVE
+    // PrismML Bonsai ultra-dense formats (GGUF type IDs 41, 42)
+    Q1_0,  // 1-bit binary: ±scale, g128, 18 B/block (2B FP16 scale + 16B signs)
+    Q2_0,  // 2-bit ternary: {-1,0,+1}×scale, g128, 34 B/block (2B FP16 scale + 32B codes)
 }
 
 impl DType {
@@ -127,6 +130,9 @@ impl DType {
             Self::IQ3_M => 162, // same layout, slightly smaller metadata
             // ARM NEON/SVE tiled Q4_0 (same bits-per-weight, reordered tile layout)
             Self::Q4_0_4_4 | Self::Q4_0_4_8 | Self::Q4_0_8_8 => 18,
+            // PrismML Bonsai g128 formats
+            Self::Q1_0 => 18,  // 2B FP16 scale + 16B packed 1-bit signs (128/8 = 16)
+            Self::Q2_0 => 34,  // 2B FP16 scale + 32B packed 2-bit codes (128*2/8 = 32)
         }
     }
 
@@ -151,6 +157,8 @@ impl DType {
             Self::IQ3_S | Self::IQ3_M => 256,  // 256 weights per super-block
             // NEON/SVE tiled — same granularity as Q4_0
             Self::Q4_0_4_4 | Self::Q4_0_4_8 | Self::Q4_0_8_8 => 32,
+            // PrismML Bonsai — 128 elements per block
+            Self::Q1_0 | Self::Q2_0 => 128,
         }
     }
 }

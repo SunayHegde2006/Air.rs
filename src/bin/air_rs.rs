@@ -14,13 +14,28 @@ use std::sync::Arc;
 
 use air_rs::generator::InferenceGenerator;
 use air_rs::loader::GgufLoader;
-use air_rs::model::ModelConfig;
 use air_rs::sampler::SamplerConfig;
 use air_rs::weight_streamer::WeightStreamer;
 use air_rs::scheduler::RequestOrchestrator;
 
 
 // ── CLI argument parsing (hand-rolled, no external dep) ────────────────────
+
+/// Server-mode configuration — groups the many optional serve flags so that
+/// `run_serve` stays within clippy's argument count limit.
+#[derive(Debug, Default)]
+struct ServeConfig {
+    ctx_size: Option<usize>,
+    resident: bool,
+    tp: usize,
+    auto_tool_choice: bool,
+    tool_call_parser: Option<String>,
+    reasoning_format: Option<String>,
+    guided_decoding_backend: Option<String>,
+    chat_template: Option<String>,
+    enable_prefix_caching: bool,
+    max_num_seqs: Option<usize>,
+}
 
 #[derive(Debug)]
 enum Command {
@@ -31,20 +46,23 @@ enum Command {
         temperature: f32,
         top_p: f32,
         stream: bool,
-        /// Override model's native context length for VRAM budget (e.g. 4096 on sm_75)
         ctx_size: Option<usize>,
         resident: bool,
         tp: usize,
         council: bool,
         epsilon: f32,
+        auto_tool_choice: bool,
+        tool_call_parser: Option<String>,
+        reasoning_format: Option<String>,
+        guided_decoding_backend: Option<String>,
+        chat_template: Option<String>,
+        enable_prefix_caching: bool,
     },
     Serve {
         model: PathBuf,
         port: u16,
         host: String,
-        ctx_size: Option<usize>,
-        resident: bool,
-        tp: usize,
+        cfg: ServeConfig,
     },
     Bench {
         model: PathBuf,
@@ -102,6 +120,13 @@ fn parse_generate(args: &[String]) -> Result<Command, String> {
     let epsilon = opt_arg(args, "--epsilon", "")
         .map(|s| s.parse::<f32>().map_err(|_| "invalid --epsilon".to_string()))
         .unwrap_or(Ok(0.15))?;
+    let auto_tool_choice = args.iter().any(|a| a == "--enable-auto-tool-choice" || a == "--auto-tool-selection");
+    let tool_call_parser = opt_arg(args, "--tool-call-parser", "--tool-parser");
+    let reasoning_format = opt_arg(args, "--reasoning-format", "--reasoning-parser");
+    let guided_decoding_backend = opt_arg(args, "--guided-decoding-backend", "--guided-decoding");
+    let chat_template = opt_arg(args, "--chat-template", "");
+    let enable_prefix_caching = args.iter().any(|a| a == "--enable-prefix-caching" || a == "--prefix-caching");
+
     Ok(Command::Generate {
         model: PathBuf::from(model),
         prompt,
@@ -114,6 +139,12 @@ fn parse_generate(args: &[String]) -> Result<Command, String> {
         tp,
         council,
         epsilon,
+        auto_tool_choice,
+        tool_call_parser,
+        reasoning_format,
+        guided_decoding_backend,
+        chat_template,
+        enable_prefix_caching,
     })
 }
 
@@ -124,21 +155,27 @@ fn parse_serve(args: &[String]) -> Result<Command, String> {
         .unwrap_or(Ok(8080))?;
     let host = opt_arg(args, "--host", "-H")
         .unwrap_or_else(|| "127.0.0.1".to_string());
-    let ctx_size = opt_arg(args, "--ctx-size", "")
-        .map(|s| s.parse::<usize>().map_err(|_| "invalid --ctx-size".to_string()))
-        .transpose()?;
-    let resident = args.iter().any(|a| a == "--resident");
-    let tp = opt_arg(args, "--tp", "")
-        .map(|s| s.parse::<usize>().map_err(|_| "invalid --tp".to_string()))
-        .unwrap_or(Ok(1))?;
-    Ok(Command::Serve {
-        model: PathBuf::from(model),
-        port,
-        host,
-        ctx_size,
-        resident,
-        tp,
-    })
+
+    let cfg = ServeConfig {
+        ctx_size: opt_arg(args, "--ctx-size", "")
+            .map(|s| s.parse::<usize>().map_err(|_| "invalid --ctx-size".to_string()))
+            .transpose()?,
+        resident: args.iter().any(|a| a == "--resident"),
+        tp: opt_arg(args, "--tp", "")
+            .map(|s| s.parse::<usize>().map_err(|_| "invalid --tp".to_string()))
+            .unwrap_or(Ok(1))?,
+        auto_tool_choice: args.iter().any(|a| a == "--enable-auto-tool-choice" || a == "--auto-tool-selection"),
+        tool_call_parser: opt_arg(args, "--tool-call-parser", "--tool-parser"),
+        reasoning_format: opt_arg(args, "--reasoning-format", "--reasoning-parser"),
+        guided_decoding_backend: opt_arg(args, "--guided-decoding-backend", "--guided-decoding"),
+        chat_template: opt_arg(args, "--chat-template", ""),
+        enable_prefix_caching: args.iter().any(|a| a == "--enable-prefix-caching" || a == "--prefix-caching"),
+        max_num_seqs: opt_arg(args, "--max-num-seqs", "--max-batch-size")
+            .map(|s| s.parse::<usize>().map_err(|_| "invalid --max-num-seqs".to_string()))
+            .transpose()?,
+    };
+
+    Ok(Command::Serve { model: PathBuf::from(model), port, host, cfg })
 }
 
 fn parse_bench(args: &[String]) -> Result<Command, String> {
@@ -200,26 +237,38 @@ USAGE:
   air-rs info     --model <path>
 
 GENERATE OPTIONS:
-  -m, --model <path>         Path to GGUF model file
-  -p, --prompt <text>        Prompt text (required)
-  -n, --max-tokens <n>       Max tokens to generate (default: 512)
-  -t, --temperature <f>      Sampling temperature (default: 0.7)
-      --top-p <f>            Nucleus sampling threshold (default: 0.9)
-  -s, --stream               Stream tokens to stdout as generated
-      --ctx-size <n>         Override context length for VRAM budget (e.g. 4096)
-                             Useful on cards with <16 GB VRAM (e.g. 2×RTX 2080 Ti)
-      --resident             Resident VRAM mode (pin weights in device memory)
-      --tp <n>               Tensor Parallelism GPUs (default: 1)
-      --council              Enable Consensus-Driven Speculative Council (CDSC)
-      --epsilon <f>          Jensen-Shannon Divergence threshold (default: 0.15)
+  -m, --model <path>                  Path to GGUF model file
+  -p, --prompt <text>                 Prompt text (required)
+  -n, --max-tokens <n>                Max tokens to generate (default: 512)
+  -t, --temperature <f>               Sampling temperature (default: 0.7)
+      --top-p <f>                     Nucleus sampling threshold (default: 0.9)
+  -s, --stream                        Stream tokens to stdout as generated
+      --ctx-size <n>                  Override context length for VRAM budget
+      --resident                      Resident VRAM mode (pin weights in device memory)
+      --tp <n>                        Tensor Parallelism GPUs (default: 1)
+      --council                       Enable Consensus-Driven Speculative Council (CDSC)
+      --epsilon <f>                   JSD threshold for CDSC (default: 0.15)
+      --enable-auto-tool-choice       Model automatically decides when to call tools
+      --tool-call-parser <name>       Tool-call parser: llama3_json | hermes | mistral | deepseekv3
+      --reasoning-format <fmt>        Reasoning trace format: none | deepseek | auto
+      --guided-decoding-backend <be>  Guided decoding engine: xgrammar | outlines
+      --chat-template <tmpl>          Jinja2 chat template name or inline template
+      --enable-prefix-caching         Enable prefix KV-cache for shared system prompts
 
 SERVE OPTIONS:
-  -m, --model <path>         Path to GGUF model file
-  -P, --port <port>          Listen port (default: 8080)
-  -H, --host <host>          Listen host (default: 127.0.0.1)
-      --ctx-size <n>         Override context length for VRAM budget
-      --resident             Resident VRAM mode (pin weights in device memory)
-      --tp <n>               Tensor Parallelism GPUs (default: 1)
+  -m, --model <path>                  Path to GGUF model file
+  -P, --port <port>                   Listen port (default: 8080)
+  -H, --host <host>                   Listen host (default: 127.0.0.1)
+      --ctx-size <n>                  Override context length for VRAM budget
+      --resident                      Resident VRAM mode (pin weights in device memory)
+      --tp <n>                        Tensor Parallelism GPUs (default: 1)
+      --enable-auto-tool-choice       Model automatically decides when to call tools
+      --tool-call-parser <name>       Tool-call parser: llama3_json | hermes | mistral | deepseekv3
+      --reasoning-format <fmt>        Reasoning trace format: none | deepseek | auto (default: auto)
+      --guided-decoding-backend <be>  Guided decoding engine: xgrammar | outlines (default: xgrammar)
+      --chat-template <tmpl>          Jinja2 chat template override
+      --enable-prefix-caching         Enable prefix KV-cache (shared prompt dedup)
+      --max-num-seqs <n>              Max concurrent sequences / batch size
 
 BENCH OPTIONS:
   -m, --model <path>         Path to GGUF model file
@@ -254,15 +303,20 @@ fn run_generate(
     tp: usize,
     council: bool,
     epsilon: f32,
+    auto_tool_choice: bool,
+    tool_call_parser: Option<String>,
+    reasoning_format: Option<String>,
+    guided_decoding_backend: Option<String>,
+    chat_template: Option<String>,
+    enable_prefix_caching: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Loading model: {}", model.display());
     let start = Instant::now();
 
     let streamer = Arc::new(WeightStreamer::open(model)?);
-    let content = streamer.content();
-    let metadata = GgufLoader::extract_metadata(content);
-    let mut config = ModelConfig::from_gguf_metadata(&metadata);
-    let tokenizer = GgufLoader::extract_tokenizer(content, &metadata);
+    let loader = GgufLoader::new(model)?;
+    let mut config = loader.model_config.clone();
+    let tokenizer = loader.tokenizer;
 
     // --ctx-size override: cap the VRAM budget check to a smaller context window.
     // Critical for GPUs with < 16 GB VRAM (e.g. 2× RTX 2080 Ti @ 11 GB each) when
@@ -293,7 +347,22 @@ fn run_generate(
 
     eprintln!("Engine ready in {:.2}s", start.elapsed().as_secs_f64());
     if council {
-        eprintln!("Consensus-Driven Speculative Council (CDSC) enabled (epsilon={})", epsilon);
+        eprintln!("  [CDSC] Speculative Council enabled (epsilon={})", epsilon);
+    }
+    if auto_tool_choice {
+        eprintln!("  [tools] Auto tool-choice enabled (parser={})", tool_call_parser.as_deref().unwrap_or("auto"));
+    }
+    if let Some(ref fmt) = reasoning_format {
+        eprintln!("  [reasoning] format={fmt}");
+    }
+    if let Some(ref be) = guided_decoding_backend {
+        eprintln!("  [guided-decoding] backend={be}");
+    }
+    if let Some(ref tmpl) = chat_template {
+        eprintln!("  [chat-template] {tmpl}");
+    }
+    if enable_prefix_caching {
+        eprintln!("  [prefix-cache] enabled");
     }
     eprintln!("Generating up to {max_tokens} tokens (temp={temperature}, top_p={top_p})…\n");
 
@@ -306,9 +375,7 @@ fn run_serve(
     model: &std::path::Path,
     port: u16,
     host: &str,
-    ctx_size: Option<usize>,
-    resident: bool,
-    tp: usize,
+    cfg: &ServeConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Loading model metadata for server: {}", model.display());
     eprintln!("Endpoints:");
@@ -316,6 +383,25 @@ fn run_serve(
     eprintln!("  POST http://{host}:{port}/v1/completions");
     eprintln!("  GET  http://{host}:{port}/v1/models");
     eprintln!("  GET  http://{host}:{port}/health");
+
+    // Competitor-parity startup banner
+    if cfg.auto_tool_choice {
+        eprintln!("  [tools] Auto tool-choice enabled (parser={})", cfg.tool_call_parser.as_deref().unwrap_or("auto"));
+    }
+    if let Some(ref fmt) = cfg.reasoning_format {
+        eprintln!("  [reasoning] format={fmt}");
+    }
+    let decoding_be = cfg.guided_decoding_backend.as_deref().unwrap_or("xgrammar");
+    eprintln!("  [guided-decoding] backend={decoding_be}");
+    if let Some(ref tmpl) = cfg.chat_template {
+        eprintln!("  [chat-template] {tmpl}");
+    }
+    if cfg.enable_prefix_caching {
+        eprintln!("  [prefix-cache] enabled");
+    }
+    if let Some(n) = cfg.max_num_seqs {
+        eprintln!("  [scheduler] max-num-seqs={n}");
+    }
     eprintln!("\nPress Ctrl-C to stop.");
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -324,10 +410,10 @@ fn run_serve(
 
     let model_name = model.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let streamer = Arc::new(WeightStreamer::open(model)?);
-    let meta = GgufLoader::extract_metadata(streamer.content());
-    let tokenizer = GgufLoader::extract_tokenizer(streamer.content(), &meta);
-    let mut config = ModelConfig::from_gguf_metadata(&meta);
-    if let Some(ctx) = ctx_size {
+    let loader = GgufLoader::new(model)?;
+    let mut config = loader.model_config.clone();
+    let tokenizer = loader.tokenizer;
+    if let Some(ctx) = cfg.ctx_size {
         eprintln!("  ctx-size override: {} tokens (model default: {})", ctx, config.context_length);
         config.context_length = ctx;
     }
@@ -335,8 +421,8 @@ fn run_serve(
     let generator = InferenceGenerator::with_streamer(
         config, SamplerConfig::default(), device,
         Arc::clone(&streamer), None, None,
-        resident,
-        tp,
+        cfg.resident,
+        cfg.tp,
     )?;
 
     let dispatcher = Arc::new(RequestOrchestrator::new(
@@ -449,11 +535,11 @@ fn main() {
         }
         Ok(cmd) => {
             let result = match cmd {
-                Command::Generate { model, prompt, max_tokens, temperature, top_p, stream, ctx_size, resident, tp, council, epsilon } => {
-                    run_generate(&model, &prompt, max_tokens, temperature, top_p, stream, ctx_size, resident, tp, council, epsilon)
+                Command::Generate { model, prompt, max_tokens, temperature, top_p, stream, ctx_size, resident, tp, council, epsilon, auto_tool_choice, tool_call_parser, reasoning_format, guided_decoding_backend, chat_template, enable_prefix_caching } => {
+                    run_generate(&model, &prompt, max_tokens, temperature, top_p, stream, ctx_size, resident, tp, council, epsilon, auto_tool_choice, tool_call_parser, reasoning_format, guided_decoding_backend, chat_template, enable_prefix_caching)
                 }
-                Command::Serve { model, port, host, ctx_size, resident, tp } => {
-                    run_serve(&model, port, &host, ctx_size, resident, tp)
+                Command::Serve { model, port, host, cfg } => {
+                    run_serve(&model, port, &host, &cfg)
                 }
                 Command::Bench { model, n_tokens, n_runs, ctx_size, resident, tp } => {
                     run_bench(&model, n_tokens, n_runs, ctx_size, resident, tp)

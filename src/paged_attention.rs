@@ -176,6 +176,23 @@ impl BlockAllocator {
         }
         block.is_full
     }
+
+    /// Returns `true` if at least `n` blocks are available to allocate.
+    #[inline]
+    pub fn can_allocate(&self, n: usize) -> bool {
+        self.free_blocks.len() >= n
+    }
+
+    /// Number of physical blocks needed to hold `n_tokens` tokens.
+    #[inline]
+    pub fn num_blocks_for_tokens(n_tokens: usize) -> usize {
+        n_tokens.div_ceil(BLOCK_SIZE)
+    }
+
+    /// Utilization ratio (0.0 – 1.0): fraction of blocks in use.
+    pub fn utilization(&self) -> f32 {
+        self.num_used_blocks() as f32 / self.total_blocks as f32
+    }
 }
 
 // ── Block Table ────────────────────────────────────────────────────────────
@@ -321,6 +338,47 @@ impl SequenceManager {
     pub fn num_sequences(&self) -> usize {
         self.tables.len()
     }
+
+    /// Returns `true` if there are enough free blocks to create a new sequence
+    /// and append at least one token.
+    pub fn can_schedule(&self) -> bool {
+        self.allocator.can_allocate(1)
+    }
+
+    /// Swap out all blocks for `seq_id` — returns their IDs for CPU offload.
+    ///
+    /// Caller must copy GPU buffer contents to CPU before calling this;
+    /// this method only updates the block table metadata.
+    /// Returns `Err` if the sequence does not exist.
+    pub fn swap_out(&mut self, seq_id: SeqId) -> Result<Vec<PhysicalBlockId>, &'static str> {
+        let table = self.tables.get(&seq_id).ok_or("sequence not found")?;
+        let blocks = table.physical_blocks.clone();
+        // Release ref-counts so blocks return to the free pool
+        for &bid in &blocks {
+            self.allocator.release(bid);
+        }
+        self.tables.get_mut(&seq_id).unwrap().physical_blocks.clear();
+        Ok(blocks)
+    }
+
+    /// Swap in blocks for `seq_id` from a CPU copy.
+    ///
+    /// Allocates fresh GPU blocks and updates the block table.
+    /// Caller must copy CPU buffer to the newly allocated GPU blocks.
+    /// Returns `Err` if OOM or sequence not found.
+    pub fn swap_in(&mut self, seq_id: SeqId, n_blocks: usize) -> Result<Vec<PhysicalBlockId>, &'static str> {
+        if !self.allocator.can_allocate(n_blocks) {
+            return Err("out of memory — cannot swap in");
+        }
+        let table = self.tables.get_mut(&seq_id).ok_or("sequence not found")?;
+        let mut new_blocks = Vec::with_capacity(n_blocks);
+        for _ in 0..n_blocks {
+            let bid = self.allocator.allocate().unwrap(); // safe: can_allocate checked
+            new_blocks.push(bid);
+        }
+        table.physical_blocks = new_blocks.clone();
+        Ok(new_blocks)
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -450,5 +508,84 @@ mod tests {
         assert_eq!(BlockTable::logical_block_for_token(0), LogicalBlockId(0));
         assert_eq!(BlockTable::logical_block_for_token(BLOCK_SIZE - 1), LogicalBlockId(0));
         assert_eq!(BlockTable::logical_block_for_token(BLOCK_SIZE), LogicalBlockId(1));
+    }
+
+    #[test]
+    fn can_allocate_checks_availability() {
+        let mut alloc = BlockAllocator::new(4);
+        assert!(alloc.can_allocate(4));
+        assert!(!alloc.can_allocate(5));
+        alloc.allocate().unwrap();
+        assert!(alloc.can_allocate(3));
+        assert!(!alloc.can_allocate(4));
+    }
+
+    #[test]
+    fn num_blocks_for_tokens_rounds_up() {
+        assert_eq!(BlockAllocator::num_blocks_for_tokens(0), 0);
+        assert_eq!(BlockAllocator::num_blocks_for_tokens(1), 1);
+        assert_eq!(BlockAllocator::num_blocks_for_tokens(BLOCK_SIZE), 1);
+        assert_eq!(BlockAllocator::num_blocks_for_tokens(BLOCK_SIZE + 1), 2);
+        assert_eq!(BlockAllocator::num_blocks_for_tokens(2 * BLOCK_SIZE), 2);
+    }
+
+    #[test]
+    fn utilization_tracks_usage() {
+        let mut alloc = BlockAllocator::new(4);
+        assert_eq!(alloc.utilization(), 0.0);
+        alloc.allocate().unwrap();
+        assert!((alloc.utilization() - 0.25).abs() < 1e-6);
+        alloc.allocate().unwrap();
+        assert!((alloc.utilization() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn swap_out_frees_blocks() {
+        let mut mgr = SequenceManager::new(4);
+        let sid = mgr.create_sequence();
+        for _ in 0..BLOCK_SIZE {
+            mgr.append_token(sid).unwrap();
+        }
+        let free_before = mgr.allocator.num_free_blocks();
+        let swapped = mgr.swap_out(sid).unwrap();
+        assert_eq!(swapped.len(), 1);
+        // Block returned to pool
+        assert_eq!(mgr.allocator.num_free_blocks(), free_before + 1);
+        assert!(mgr.table(sid).unwrap().physical_blocks.is_empty());
+    }
+
+    #[test]
+    fn swap_in_allocates_new_blocks() {
+        let mut mgr = SequenceManager::new(4);
+        let sid = mgr.create_sequence();
+        // Append one block worth, then swap out
+        for _ in 0..BLOCK_SIZE {
+            mgr.append_token(sid).unwrap();
+        }
+        mgr.swap_out(sid).unwrap();
+        // Swap back in with 1 block
+        let new_blocks = mgr.swap_in(sid, 1).unwrap();
+        assert_eq!(new_blocks.len(), 1);
+        assert_eq!(mgr.table(sid).unwrap().physical_blocks.len(), 1);
+    }
+
+    #[test]
+    fn swap_in_oom_returns_error() {
+        let mut mgr = SequenceManager::new(1);
+        let sid = mgr.create_sequence();
+        mgr.append_token(sid).unwrap(); // use the only block
+        let sid2 = mgr.create_sequence();
+        // All blocks are in use — swap in should fail
+        let result = mgr.swap_in(sid2, 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn can_schedule_reflects_pool_state() {
+        let mut mgr = SequenceManager::new(1);
+        assert!(mgr.can_schedule());
+        let sid = mgr.create_sequence();
+        mgr.append_token(sid).unwrap(); // takes the only block
+        assert!(!mgr.can_schedule());
     }
 }

@@ -52,8 +52,8 @@ impl RequestOrchestrator {
                         if let Some(draft_path) = &req_cfg.draft_model {
                             let (draft_gen, draft_streamer) = draft_models.entry(draft_path.clone()).or_insert_with(|| {
                                 let ds = Arc::new(WeightStreamer::open(draft_path).unwrap());
-                                let metadata = crate::loader::GgufLoader::extract_metadata(ds.content());
-                                let cfg = crate::model::ModelConfig::from_gguf_metadata(&metadata);
+                                let loader = crate::loader::GgufLoader::new(draft_path).unwrap();
+                                let cfg = loader.model_config;
                                 let g = InferenceGenerator::new(cfg, crate::sampler::SamplerConfig::default()).unwrap();
                                 (g, ds)
                             });
