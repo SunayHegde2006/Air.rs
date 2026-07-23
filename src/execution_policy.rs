@@ -17,26 +17,14 @@ pub struct ExecutionPolicy {
 }
 
 impl ExecutionPolicy {
-    pub fn new(sampler: Sampler, draft_size: usize) -> Self {
+    pub fn new(sampler: Sampler) -> Self {
         Self {
             sampler,
             gbnf: None,
-            wavefront_health: WavefrontHealthMonitor::new(draft_size),
+            wavefront_health: WavefrontHealthMonitor::new(8),
             drafter: DrafterState::None,
             sparsity_bank: None,
             medusa_heads: None,
         }
-    }
-
-    pub fn set_grammar(&mut self, constraint: GbnfConstraint) {
-        self.gbnf = Some(constraint);
-    }
-
-    pub fn clear_grammar(&mut self) {
-        self.gbnf = None;
-    }
-
-    pub fn has_grammar(&self) -> bool {
-        self.gbnf.is_some()
     }
 }

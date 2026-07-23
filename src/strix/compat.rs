@@ -177,6 +177,8 @@ pub struct GgufModel {
     pub tensors: Vec<GgufTensorInfo>,
     /// Detected model architecture.
     pub architecture: ModelArchitecture,
+    /// Byte offset in the file where tensor data begins (after 32-byte alignment).
+    pub data_offset: usize,
 }
 
 // ── ModelArchitecture ────────────────────────────────────────────────────
@@ -413,6 +415,9 @@ pub fn gguf_type_to_dtype(type_id: u32) -> DType {
         33 => DType::Q4_0_8_8,
         28 => DType::BF16,
         30 => DType::I32,
+        // PrismML Bonsai ultra-dense formats
+        41 => DType::Q1_0,
+        42 => DType::Q2_0,
         _ => DType::F32, // fallback
     }
 }
@@ -619,12 +624,15 @@ pub fn parse_gguf_model(data: &[u8]) -> Result<GgufModel, CompatError> {
     let mut offset = GgufHeader::SIZE;
     let metadata = parse_metadata_kv(data, &mut offset, header.n_kv)?;
     let tensors = parse_tensor_index(data, &mut offset, header.n_tensors)?;
+    // Tensor data is 32-byte aligned after the index.
+    let data_offset = (offset + 31) & !31;
     let architecture = ModelArchitecture::detect(&metadata);
     Ok(GgufModel {
         header,
         metadata,
         tensors,
         architecture,
+        data_offset,
     })
 }
 

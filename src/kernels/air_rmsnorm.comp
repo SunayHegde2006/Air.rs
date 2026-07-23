@@ -1,0 +1,71 @@
+// air_rmsnorm.comp — Vulkan compute shader: Root Mean Square Normalisation
+//
+// Dispatched as: vkCmdDispatch(ceil(size/256), 1, 1)
+// Push constants: size (u32), eps (f32), has_weight (u32)
+// Binding 0: x (inout float[])
+// Binding 1: weight (readonly float[], ignored when has_weight == 0)
+// Binding 2: partial sums (intermediate scratch, one entry per workgroup)
+//
+// Algorithm — two-pass reduction within a workgroup:
+//   Pass 1: each invocation accumulates size/256 elements of x^2,
+//           then a subgroup tree reduce produces the workgroup sum.
+//   Pass 2: root invocation computes rms_inv and broadcasts it,
+//           then all invocations apply the scale.
+
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PushConstants {
+    uint  size;
+    float eps;
+    uint  has_weight;
+} pc;
+
+layout(set = 0, binding = 0) buffer XBuf       { float x[];      };
+layout(set = 0, binding = 1) buffer WeightBuf  { float weight[]; };
+
+shared float s_sum[8]; // one slot per subgroup (256/32 = 8 subgroups max)
+
+void main() {
+    uint gid  = gl_GlobalInvocationID.x;
+    uint lid  = gl_LocalInvocationID.x;
+    uint sgid = gl_SubgroupID;
+    uint lane = gl_SubgroupInvocationID;
+
+    // ── Phase 1: accumulate x^2 ─────────────────────────────────────────
+    float local_sq = 0.0;
+    for (uint i = gid; i < pc.size; i += gl_WorkGroupSize.x * gl_NumWorkGroups.x) {
+        float v = x[i];
+        local_sq += v * v;
+    }
+
+    // Subgroup reduction (32-wide on most hardware)
+    float sg_sum = subgroupAdd(local_sq);
+
+    if (lane == 0) s_sum[sgid] = sg_sum;
+    barrier();
+
+    // Final reduction across subgroups (done by subgroup 0)
+    float total = 0.0;
+    if (sgid == 0) {
+        uint n_sgs = gl_WorkGroupSize.x / gl_SubgroupSize;
+        float sg0_val = (lane < n_sgs) ? s_sum[lane] : 0.0;
+        total = subgroupAdd(sg0_val);
+    }
+    barrier();
+    // Broadcast total to all invocations via shared mem
+    if (lid == 0) s_sum[0] = total;
+    barrier();
+    total = s_sum[0];
+
+    float rms_inv = inversesqrt(total / float(pc.size) + pc.eps);
+
+    // ── Phase 2: apply normalisation ────────────────────────────────────
+    for (uint i = gid; i < pc.size; i += gl_WorkGroupSize.x * gl_NumWorkGroups.x) {
+        float xi = x[i] * rms_inv;
+        if (pc.has_weight != 0u) xi *= weight[i];
+        x[i] = xi;
+    }
+}

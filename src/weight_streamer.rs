@@ -3,15 +3,33 @@
 //! Streams quantized transformer-block weights on demand from an mmap'd GGUF
 //! file, keeping RSS proportional to *active* layer count rather than total
 //! model size.  Supports all Air.rs model families including hybrid
-//! Qwen3.6 DeltaNet layers.
+//! Qwen3.6 DeltaNet layers, and PrismML Bonsai Q1_0/Q2_0 ultra-dense models.
 
 use crate::model::QBlockWeights;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use candle_core::quantized::gguf_file;
 use candle_core::quantized::QMatMul;
-use candle_core::{Device, Tensor};
+use candle_core::{DType as CandleDType, Device, Tensor};
 use std::io::Cursor;
 use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// Backend enum
+// ---------------------------------------------------------------------------
+
+/// Which backend drives this WeightStreamer.
+///
+/// - `Candle`: standard path — candle's GGUF reader handles all dtypes.
+/// - `Prism`: fallback for PrismML Bonsai files with Q1_0/Q2_0 (type IDs 41/42
+///   that candle does not know).  Uses strix's raw mmap parser + prism_dequant.
+enum Backend {
+    Candle {
+        content: gguf_file::Content,
+    },
+    Prism {
+        model: crate::strix::compat::GgufModel,
+    },
+}
 
 // ---------------------------------------------------------------------------
 // WeightStreamer
@@ -20,7 +38,7 @@ use std::sync::Arc;
 /// Lazy weight streamer.  Open once; call `load_layer` per transformer block.
 pub struct WeightStreamer {
     mmap: Arc<memmap2::Mmap>,
-    content: gguf_file::Content,
+    backend: Backend,
     n_layers: usize,
     #[allow(dead_code)]
     arch: String,
@@ -39,33 +57,53 @@ impl WeightStreamer {
             .map_err(|e| anyhow::anyhow!("Failed to open GGUF file: {:?}: {e}", path.as_ref()))?;
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
 
-        // Parse GGUF header in a scoped block so the borrow on `mmap` ends
-        // before we move it into `Arc::new(mmap)` below.
-        let content = {
+        // Try candle's GGUF reader first.  If it fails (e.g., unknown dtype
+        // for PrismML Bonsai Q1_0/Q2_0), fall back to strix's raw parser.
+        let (backend, arch, n_layers) = {
             let mut cursor = Cursor::new(&mmap[..]);
-            gguf_file::Content::read(&mut cursor)
-                .map_err(|e| anyhow::anyhow!("Failed to parse GGUF header: {e}"))?
+            match gguf_file::Content::read(&mut cursor) {
+                Ok(content) => {
+                    let arch = content
+                        .metadata
+                        .get("general.architecture")
+                        .and_then(|v| match v {
+                            gguf_file::Value::String(s) => Some(s.as_str()),
+                            _ => None,
+                        })
+                        .unwrap_or("llama")
+                        .to_string();
+                    let n_layers = content
+                        .metadata
+                        .get(&format!("{arch}.block_count"))
+                        .and_then(|v| match v {
+                            gguf_file::Value::U32(n) => Some(*n as usize),
+                            gguf_file::Value::U64(n) => Some(*n as usize),
+                            gguf_file::Value::I32(n) => Some(*n as usize),
+                            _ => None,
+                        })
+                        .unwrap_or(32);
+                    (Backend::Candle { content }, arch, n_layers)
+                }
+                Err(candle_err) => {
+                    // Candle couldn't parse — try strix (handles Q1_0/Q2_0).
+                    eprintln!("[WeightStreamer] candle reader failed ({candle_err}), trying PrismML fallback");
+                    let model = crate::strix::compat::parse_gguf_model(&mmap[..])
+                        .map_err(|e| anyhow::anyhow!("strix GGUF parse failed: {e}"))?;
+                    let arch = model
+                        .metadata
+                        .get_str("general.architecture")
+                        .unwrap_or("llama")
+                        .to_string();
+                    let n_layers = model
+                        .metadata
+                        .get_u64(&format!("{arch}.block_count"))
+                        .map(|v| v as usize)
+                        .unwrap_or(32);
+                    println!("[WeightStreamer] PrismML Bonsai mode — {} tensors", model.tensors.len());
+                    (Backend::Prism { model }, arch, n_layers)
+                }
+            }
         };
-
-        let arch = content
-            .metadata
-            .get("general.architecture")
-            .and_then(|v| match v {
-                gguf_file::Value::String(s) => Some(s.as_str()),
-                _ => None,
-            })
-            .unwrap_or("llama");
-
-        let n_layers = content
-            .metadata
-            .get(&format!("{arch}.block_count"))
-            .and_then(|v| match v {
-                gguf_file::Value::U32(n) => Some(*n as usize),
-                gguf_file::Value::U64(n) => Some(*n as usize),
-                gguf_file::Value::I32(n) => Some(*n as usize),
-                _ => None,
-            })
-            .unwrap_or(32);
 
         println!(
             "⚡ WeightStreamer: mmap'd {} ({:.2} GB virtual, RSS ≈ 0)",
@@ -73,12 +111,10 @@ impl WeightStreamer {
             mmap.len() as f64 / 1_073_741_824.0
         );
         println!(
-            "   {} layers, {} tensors — streaming on demand",
+            "   {} layers — streaming on demand",
             n_layers,
-            content.tensor_infos.len()
         );
 
-        let arch_string = arch.to_string();
         let pinned_attn = std::sync::Mutex::new(vec![None; n_layers]);
 
         #[cfg(unix)]
@@ -89,9 +125,9 @@ impl WeightStreamer {
 
         Ok(Self {
             mmap: Arc::new(mmap),
-            content,
+            backend,
             n_layers,
-            arch: arch_string,
+            arch,
             #[cfg(unix)]
             raw_fd,
             pinned_attn,
@@ -104,8 +140,17 @@ impl WeightStreamer {
     }
 
     /// Access the parsed GGUF content (for metadata/tokenizer extraction).
-    pub fn content(&self) -> &gguf_file::Content {
-        &self.content
+    /// Returns `None` for PrismML Bonsai files (use `load_tensor` instead).
+    pub fn content(&self) -> Option<&gguf_file::Content> {
+        match &self.backend {
+            Backend::Candle { content } => Some(content),
+            Backend::Prism { .. } => None,
+        }
+    }
+
+    /// Returns true if this is a PrismML Bonsai ultra-dense model.
+    pub fn is_prism(&self) -> bool {
+        matches!(self.backend, Backend::Prism { .. })
     }
 
     // ─── Per-layer tensor loading ─────────────────────────────────────────
@@ -271,20 +316,23 @@ impl WeightStreamer {
     /// Prefetch hint — layer `layer_id` will be needed soon.
     pub fn prefetch_layer(&self, layer_id: usize) {
         let p = format!("blk.{layer_id}.");
-        for (name, info) in self.content.tensor_infos.iter() {
-            if name.starts_with(&p) {
-                let offset = self.content.tensor_data_offset + info.offset;
-                let nelements: usize = info.shape.dims().iter().product();
-                let length = (nelements * info.ggml_dtype.type_size()) / info.ggml_dtype.block_size();
-                
-                #[cfg(target_os = "linux")]
-                unsafe {
-                    libc::posix_fadvise(
-                        self.raw_fd, 
-                        offset as libc::off_t, 
-                        length as libc::off_t, 
-                        libc::POSIX_FADV_WILLNEED
-                    );
+        match &self.backend {
+            Backend::Candle { content } => {
+                for (name, info) in content.tensor_infos.iter() {
+                    if name.starts_with(&p) {
+                        let offset = content.tensor_data_offset + info.offset;
+                        let nelements: usize = info.shape.dims().iter().product();
+                        let length = (nelements * info.ggml_dtype.type_size()) / info.ggml_dtype.block_size();
+                        #[cfg(target_os = "linux")]
+                        unsafe { libc::posix_fadvise(self.raw_fd, offset as libc::off_t, length as libc::off_t, libc::POSIX_FADV_WILLNEED); }
+                    }
+                }
+            }
+            Backend::Prism { model } => {
+                for ti in model.tensors.iter().filter(|t| t.name.starts_with(&p)) {
+                    let offset = model.data_offset + ti.offset as usize;
+                    #[cfg(target_os = "linux")]
+                    unsafe { libc::posix_fadvise(self.raw_fd, offset as libc::off_t, ti.size_bytes as libc::off_t, libc::POSIX_FADV_WILLNEED); }
                 }
             }
         }
@@ -292,20 +340,23 @@ impl WeightStreamer {
 
     pub fn release_layer(&self, layer_id: usize) {
         let p = format!("blk.{layer_id}.");
-        for (name, info) in self.content.tensor_infos.iter() {
-            if name.starts_with(&p) {
-                let offset = self.content.tensor_data_offset + info.offset;
-                let nelements: usize = info.shape.elem_count();
-                let length = (nelements * info.ggml_dtype.type_size()) / info.ggml_dtype.block_size();
-                
-                #[cfg(target_os = "linux")]
-                unsafe {
-                    libc::posix_fadvise(
-                        self.raw_fd, 
-                        offset as libc::off_t, 
-                        length as libc::off_t, 
-                        libc::POSIX_FADV_DONTNEED
-                    );
+        match &self.backend {
+            Backend::Candle { content } => {
+                for (name, info) in content.tensor_infos.iter() {
+                    if name.starts_with(&p) {
+                        let offset = content.tensor_data_offset + info.offset;
+                        let nelements: usize = info.shape.elem_count();
+                        let length = (nelements * info.ggml_dtype.type_size()) / info.ggml_dtype.block_size();
+                        #[cfg(target_os = "linux")]
+                        unsafe { libc::posix_fadvise(self.raw_fd, offset as libc::off_t, length as libc::off_t, libc::POSIX_FADV_DONTNEED); }
+                    }
+                }
+            }
+            Backend::Prism { model } => {
+                for ti in model.tensors.iter().filter(|t| t.name.starts_with(&p)) {
+                    let offset = model.data_offset + ti.offset as usize;
+                    #[cfg(target_os = "linux")]
+                    unsafe { libc::posix_fadvise(self.raw_fd, offset as libc::off_t, ti.size_bytes as libc::off_t, libc::POSIX_FADV_DONTNEED); }
                 }
             }
         }
@@ -331,29 +382,35 @@ impl WeightStreamer {
         name: &str,
         device: &Device,
     ) -> Result<QMatMul> {
-        let qt_cpu = self.content
-            .tensor(cursor, name, &Device::Cpu)
-            .map_err(|e| anyhow::anyhow!("Failed to read tensor '{name}' to CPU: {e}"))?;
-        
-        let dtype = qt_cpu.dtype();
-        match dtype {
-            candle_core::quantized::GgmlDType::F16 | candle_core::quantized::GgmlDType::Q8K => {
-                let t = qt_cpu.dequantize_f16(&Device::Cpu)?
-                    .to_device(device)
-                    .map_err(|e| anyhow::anyhow!("Failed to move '{name}' to CUDA: {e}"))?;
-                Ok(QMatMul::TensorF16(t))
+        match &self.backend {
+            Backend::Candle { content } => {
+                let qt_cpu = content
+                    .tensor(cursor, name, &Device::Cpu)
+                    .map_err(|e| anyhow::anyhow!("Failed to read tensor '{name}' to CPU: {e}"))?;
+                let dtype = qt_cpu.dtype();
+                match dtype {
+                    candle_core::quantized::GgmlDType::F16 | candle_core::quantized::GgmlDType::Q8K => {
+                        let t = qt_cpu.dequantize_f16(&Device::Cpu)?.to_device(device)
+                            .map_err(|e| anyhow::anyhow!("Failed to move '{name}' to device: {e}"))?;
+                        Ok(QMatMul::TensorF16(t))
+                    }
+                    candle_core::quantized::GgmlDType::F32 => {
+                        let t = qt_cpu.dequantize(&Device::Cpu)?.to_device(device)?;
+                        Ok(QMatMul::Tensor(t))
+                    }
+                    _ => {
+                        let qt = content
+                            .tensor(cursor, name, device)
+                            .map_err(|e| anyhow::anyhow!("Failed to read tensor '{name}' to device: {e}"))?;
+                        QMatMul::from_arc(Arc::new(qt))
+                            .map_err(|e| anyhow::anyhow!("Failed to create QMatMul for '{name}': {e}"))
+                    }
+                }
             }
-            candle_core::quantized::GgmlDType::F32 => {
-                let t = qt_cpu.dequantize(&Device::Cpu)?
-                    .to_device(device)?;
+            Backend::Prism { .. } => {
+                // Prism tensors are dequanted to F32 then wrapped as QMatMul::Tensor.
+                let t = self.prism_dequant_tensor(name, device)?;
                 Ok(QMatMul::Tensor(t))
-            }
-            _ => {
-                let qt = self.content
-                    .tensor(cursor, name, device)
-                    .map_err(|e| anyhow::anyhow!("Failed to read tensor '{name}' to device: {e}"))?;
-                QMatMul::from_arc(Arc::new(qt))
-                    .map_err(|e| anyhow::anyhow!("Failed to create QMatMul for '{name}': {e}"))
             }
         }
     }
@@ -364,17 +421,48 @@ impl WeightStreamer {
         name: &str,
         device: &Device,
     ) -> Result<Tensor> {
-        let qt = self.content
-            .tensor(cursor, name, &Device::Cpu)
-            .map_err(|e| anyhow::anyhow!("Failed to read tensor '{name}' to CPU: {e}"))?;
-        
-        let dtype = qt.dtype();
-        if device.is_cuda() {
-            qt.dequantize_f16(device)
-                .map_err(|e| anyhow::anyhow!("Failed to dequantize_f16 '{name}' on CUDA: {e}"))
-        } else {
-            qt.dequantize_f16(device)
-                .map_err(|e| anyhow::anyhow!("Failed to dequantize_f16 '{name}': {e}"))
+        match &self.backend {
+            Backend::Candle { content } => {
+                let qt = content
+                    .tensor(cursor, name, &Device::Cpu)
+                    .map_err(|e| anyhow::anyhow!("Failed to read tensor '{name}' to CPU: {e}"))?;
+                qt.dequantize_f16(device)
+                    .map_err(|e| anyhow::anyhow!("Failed to dequantize_f16 '{name}': {e}"))
+            }
+            Backend::Prism { .. } => self.prism_dequant_tensor(name, device),
         }
+    }
+
+    /// Dequantise a Q1_0 or Q2_0 tensor directly from the mmap.
+    ///
+    /// Looks up the tensor by name in the strix GgufModel, reads the raw bytes,
+    /// calls the appropriate dequant kernel, and returns a F32 Tensor.
+    fn prism_dequant_tensor(&self, name: &str, device: &Device) -> Result<Tensor> {
+        let model = match &self.backend {
+            Backend::Prism { model } => model,
+            Backend::Candle { .. } => bail!("prism_dequant_tensor called on Candle backend"),
+        };
+        let ti = model.tensors.iter().find(|t| t.name == name)
+            .ok_or_else(|| anyhow::anyhow!("Tensor '{name}' not found in Prism model"))?;
+
+        let abs_start = model.data_offset + ti.offset as usize;
+        let abs_end   = abs_start + ti.size_bytes;
+        let raw = &self.mmap[abs_start..abs_end];
+
+        let mut floats = Vec::new();
+        match ti.dtype {
+            crate::strix::types::DType::Q1_0 => {
+                crate::prism_dequant::dequant_q1_0(raw, &mut floats)?;
+            }
+            crate::strix::types::DType::Q2_0 => {
+                crate::prism_dequant::dequant_q2_0(raw, &mut floats)?;
+            }
+            other => bail!("prism_dequant_tensor: unsupported dtype {other:?} for '{name}'"),
+        }
+
+        // Reshape to tensor shape (dims are stored in GGUF order — transpose as needed by callers).
+        let shape: Vec<usize> = ti.shape.clone();
+        let t = Tensor::from_vec(floats, shape, &Device::Cpu)?;
+        Ok(t.to_device(device)?)
     }
 }

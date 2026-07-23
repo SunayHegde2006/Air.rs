@@ -5,8 +5,21 @@
 //!     creates a stub stdc++.lib for candle-flash-attn compatibility.
 //!   - macOS: links system frameworks (Metal, Accelerate) when features enabled.
 //!   - Linux: links stdc++ for flash-attn CUDA kernels.
+//!
+//! Also compiles:
+//!   - src/kernels/air_compute_impl.c  → libair_compute (AVX-512/AVX2/scalar)
+//!   - src/kernels/*.comp              → *.spv (Vulkan compute, requires glslc)
 
 fn main() {
+    // ── CPU compute kernels (AVX-512 / AVX2 / scalar fallback) ─────────────
+    // Compiled unconditionally — used by all three hardware backends as the
+    // host-side activation pre/post-processing layer.
+    compile_cpu_kernels();
+
+    // ── Vulkan compute shaders → SPIR-V (requires glslc from Vulkan SDK) ──
+    #[cfg(feature = "vulkan")]
+    compile_vulkan_shaders();
+
     // --- Windows MSVC -------------------------------------------------------
     #[cfg(all(target_os = "windows", target_env = "msvc"))]
     {
@@ -73,6 +86,80 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=NVCC_ARCH");
     println!("cargo:rerun-if-env-changed=CUDARC_CUDA_VERSION");
+    println!("cargo:rerun-if-changed=src/kernels/air_compute_impl.c");
+    println!("cargo:rerun-if-changed=src/kernels/air_rmsnorm.comp");
+    println!("cargo:rerun-if-changed=src/kernels/air_matmul.comp");
+}
+
+/// Compile src/kernels/air_compute_impl.c into a static library linked into
+/// the Rust binary. Enables AVX-512/AVX2 if the host compiler supports it.
+fn compile_cpu_kernels() {
+    let mut build = cc::Build::new();
+    build
+        .file("src/kernels/air_compute_impl.c")
+        .opt_level(3)
+        .flag_if_supported("-march=native")
+        .flag_if_supported("-ffast-math")
+        // Link math library for sqrtf / cosf / sinf / powf
+        .flag_if_supported("-lm");
+    build.compile("air_compute");
+    // Emit the link instruction so rustc can find the archive
+    println!("cargo:rustc-link-lib=static=air_compute");
+}
+
+/// Compile Vulkan GLSL compute shaders to SPIR-V using glslc (Vulkan SDK).
+/// If glslc is not in PATH this step is skipped with a warning — the
+/// VulkanBlock will fall back to the CPU path at runtime.
+#[allow(dead_code)]
+fn compile_vulkan_shaders() {
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let shaders = &[
+        "src/kernels/air_rmsnorm.comp",
+        "src/kernels/air_matmul.comp",
+    ];
+
+    // Locate glslc
+    let glslc = if let Ok(g) = std::env::var("GLSLC") {
+        std::path::PathBuf::from(g)
+    } else {
+        // Search standard Vulkan SDK locations
+        let candidates = [
+            "/usr/bin/glslc",
+            "/usr/local/bin/glslc",
+            "/usr/lib/x86_64-linux-gnu/glslc",
+        ];
+        match candidates.iter().find(|p| std::path::Path::new(p).exists()) {
+            Some(p) => std::path::PathBuf::from(p),
+            None => {
+                println!("cargo:warning=Air.rs: glslc not found — Vulkan shaders will not be compiled. Install the Vulkan SDK or set GLSLC env var.");
+                return;
+            }
+        }
+    };
+
+    for src in shaders {
+        let stem = std::path::Path::new(src)
+            .file_stem().unwrap()
+            .to_string_lossy();
+        let spv_path = format!("{}/{}.spv", out_dir, stem);
+        let status = std::process::Command::new(&glslc)
+            .args([
+                "--target-env=vulkan1.2",
+                "-O",
+                src,
+                "-o",
+                &spv_path,
+            ])
+            .status()
+            .expect("failed to spawn glslc");
+        if !status.success() {
+            panic!("glslc failed to compile {}", src);
+        }
+        println!("cargo:warning=Air.rs: compiled {} → {}", src, spv_path);
+    }
+
+    // Export the OUT_DIR so VulkanBlock can find the .spv files at runtime
+    println!("cargo:rustc-env=AIR_SHADER_DIR={}", out_dir);
 }
 
 /// Detect the primary GPU's compute capability (e.g. "89" for sm_89) via

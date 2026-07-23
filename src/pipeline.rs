@@ -25,7 +25,7 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use crate::ucal::SharedBuffer;
+use crate::shared_buffer::SharedBuffer;
 
 // ── Constants ────────────────────────────────────────────────────────────
 

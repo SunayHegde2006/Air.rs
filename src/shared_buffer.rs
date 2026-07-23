@@ -61,6 +61,10 @@ pub enum ComputeBackend {
     Metal,
     /// Vulkan cross-platform GPU (Intel Arc, AMD, etc).
     Vulkan,
+    /// Intel SYCL heterogeneous accelerator at the given device ordinal.
+    Sycl(usize),
+    /// Modular Mojo/MAX accelerated hardware at the given device ordinal.
+    Mojo(usize),
     /// CPU fallback — no discrete GPU.
     Cpu,
 }
@@ -71,10 +75,10 @@ impl ComputeBackend {
         !matches!(self, Self::Cpu)
     }
 
-    /// Device ordinal for multi-GPU selection (`None` for Metal/Vulkan/Cpu).
+    /// Device ordinal for multi-GPU selection.
     pub fn device_ordinal(&self) -> Option<usize> {
         match self {
-            Self::Cuda(n) | Self::Rocm(n) => Some(*n),
+            Self::Cuda(n) | Self::Rocm(n) | Self::Sycl(n) | Self::Mojo(n) => Some(*n),
             _ => None,
         }
     }
@@ -86,6 +90,8 @@ impl ComputeBackend {
             Self::Rocm(_) => "rocm",
             Self::Metal   => "metal",
             Self::Vulkan  => "vulkan",
+            Self::Sycl(_) => "sycl",
+            Self::Mojo(_) => "mojo",
             Self::Cpu     => "cpu",
         }
     }
@@ -98,6 +104,8 @@ impl std::fmt::Display for ComputeBackend {
             Self::Rocm(n) => write!(f, "rocm:{}", n),
             Self::Metal   => write!(f, "metal"),
             Self::Vulkan  => write!(f, "vulkan"),
+            Self::Sycl(n) => write!(f, "sycl:{}", n),
+            Self::Mojo(n) => write!(f, "mojo:{}", n),
             Self::Cpu     => write!(f, "cpu"),
         }
     }

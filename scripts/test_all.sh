@@ -135,7 +135,7 @@ elif command -v python3 &>/dev/null; then
 fi
 
 if [ -n "$PY_BIN" ] && [ -d "python/tests" ]; then
-    if "$PY_BIN" -c "import air_rs" 2>/dev/null; then
+    if "$PY_BIN" -c "import air_rs, pytest" 2>/dev/null; then
         run_suite "pytest python/tests/" "$PY_BIN -m pytest python/tests/ -q 2>&1 | tail -10"
     else
         warn "air_rs not installed in Python env — skipping Python tests"

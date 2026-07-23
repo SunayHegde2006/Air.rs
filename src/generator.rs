@@ -29,6 +29,7 @@ use crate::ops::{self, RopeCache};
 use crate::sampler::{Sampler, SamplerConfig};
 use crate::tokenizer::Tokenizer;
 use crate::weight_streamer::WeightStreamer;
+use crate::paged_attention::SequenceManager;
 use anyhow::Result;
 use candle_core::{Device, DType, Module, Tensor};
 use std::time::Instant;
@@ -90,6 +91,9 @@ pub struct InferenceGenerator {
     pub epsilon: f32,
     pub council_drafter: Option<crate::speculative_council::SpeculativeCouncilDrafter>,
     pub async_verifier: Option<crate::async_verifier::AsyncVerifyingPipeline>,
+    /// Paged KV block table manager (vLLM-style PagedAttention v2).
+    /// `None` unless `enable_paged_kv()` has been called.
+    pub sequence_manager: Option<std::sync::Mutex<SequenceManager>>,
 }
 
 impl InferenceGenerator {
@@ -120,7 +124,7 @@ impl InferenceGenerator {
         let session = SessionContext::new(kv_cache, tp_config);
         
         let sampler = Sampler::new(sampler_config);
-        let policy = ExecutionPolicy::new(sampler, 8); // Default draft size 8
+        let policy = ExecutionPolicy::new(sampler);
         
         let dispatcher = Arc::new(crate::slip::SlipDispatcher::new(
             None,
@@ -140,6 +144,7 @@ impl InferenceGenerator {
             epsilon: 0.15,
             council_drafter: None,
             async_verifier: None,
+            sequence_manager: None,
         })
     }
 
@@ -205,11 +210,11 @@ impl InferenceGenerator {
     /// enabling future heterogeneous stacks (MoE, device-split, etc.).
     ///
     pub fn set_grammar(&mut self, constraint: GbnfConstraint) {
-        self.policy.set_grammar(constraint);
+        self.policy.gbnf = Some(constraint);
     }
 
     pub fn clear_grammar(&mut self) {
-        self.policy.clear_grammar();
+        self.policy.gbnf = None;
     }
 
     pub fn set_tp(&mut self, rank: usize, tp_size: usize) {
@@ -274,7 +279,7 @@ impl InferenceGenerator {
     }
 
     pub fn has_grammar(&self) -> bool {
-        self.policy.has_grammar()
+        self.policy.gbnf.is_some()
     }
 
     pub fn enable_council(&mut self, epsilon: f32, target_model_path: Option<String>) {
@@ -284,6 +289,27 @@ impl InferenceGenerator {
         let vocab_size = self.config.vocab_size;
         self.council_drafter = Some(crate::speculative_council::SpeculativeCouncilDrafter::new(config, epsilon, vocab_size));
         self.async_verifier = Some(crate::async_verifier::AsyncVerifyingPipeline::new(8, target_model_path));
+    }
+
+    /// Enable PagedAttention v2 block-table KV management.
+    ///
+    /// Replaces the dense `KvCacheManager` slot-level cache with a virtual
+    /// page table managed by `SequenceManager`. Call once before the first
+    /// `generate()` call; idempotent if called again.
+    ///
+    /// # Arguments
+    /// * `block_capacity` — number of physical KV blocks in the pool.
+    ///   Each block stores `BLOCK_SIZE` (16) token slots per KV head.
+    ///   Example: 4096 blocks × 64 KB ≈ 256 MB for a 128-head model.
+    pub fn enable_paged_kv(&mut self, block_capacity: usize) {
+        self.sequence_manager.get_or_insert_with(|| {
+            eprintln!(
+                "  [paged-kv] PagedAttention v2 enabled — {block_capacity} blocks \
+                 ({} MB pool)",
+                block_capacity * crate::paged_attention::BLOCK_SIZE * 64 / 1024
+            );
+            std::sync::Mutex::new(SequenceManager::new(block_capacity))
+        });
     }
 }
 

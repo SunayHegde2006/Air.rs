@@ -503,7 +503,6 @@ impl InferenceGenerator {
     }
 
     pub fn reset(&mut self) { self.session.reset(); }
-    pub fn reset_kv_cache(&mut self) { self.reset(); }
     pub fn metrics(&self) -> &InferenceMetrics { &self.session.metrics }
     pub fn device(&self) -> &candle_core::Device { &self.device }
 

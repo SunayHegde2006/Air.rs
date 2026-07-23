@@ -529,6 +529,12 @@ unsafe impl Send for VulkanHal {}
 unsafe impl Sync for VulkanHal {}
 
 impl VulkanHal {
+    /// Return raw Vulkan handles for external compute block integration:
+    /// `(device, queue, phys_dev, queue_family_index)`
+    pub fn get_raw_handles(&self) -> (*mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void, u32) {
+        (self.device, self.queue, self.instance, self.queue_family_index)
+    }
+
     /// Create a new Vulkan HAL, selecting the given physical device index.
     ///
     /// Performs the full Vulkan initialisation sequence:

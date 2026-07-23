@@ -57,6 +57,8 @@ pub fn candle_device(
             { Ok(Device::Cpu) }
         }
         CB::Vulkan   => Ok(Device::Cpu),   // Vulkan Candle backend not yet stable
+        CB::Sycl(_)  => Ok(Device::Cpu),   // SYCL executes in block layer FFI
+        CB::Mojo(_)  => Ok(Device::Cpu),   // Mojo/MAX executes in block layer FFI
         CB::Cpu      => Ok(Device::Cpu),
     }
 }

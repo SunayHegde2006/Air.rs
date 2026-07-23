@@ -17,7 +17,7 @@
   <a href="#build"><img src="https://img.shields.io/badge/Rust-1.75+-F74C00?logo=rust&style=flat-square&maxAge=2592000" alt="Rust 1.75+"></a>
   <a href="#build"><img src="https://img.shields.io/badge/CUDA-11.x%20|%2012.x%20|%2013.x-76B900?logo=nvidia&style=flat-square&maxAge=2592000" alt="CUDA 11-13"></a>
   <a href="#build"><img src="https://img.shields.io/badge/platform-Windows%20|%20Linux%20|%20macOS-blue?style=flat-square&maxAge=2592000" alt="Cross-Platform"></a>
-  <a href="https://github.com/SunayHegde2006/Air.rs/actions"><img src="https://img.shields.io/github/actions/workflow/status/SunayHegde2006/Air.rs/ci.yml?branch=main&style=flat-square&label=CI&maxAge=2592000" alt="CI"></a>
+  <a href="https://github.com/SunayHegde2006/Air.rs/actions"><img src="https://img.shields.io/github/actions/workflow/status/SunayHegde2006/Air.rs/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&maxAge=2592000" alt="License: MIT"></a>
   <a href="https://github.com/SunayHegde2006/Air.rs/stargazers"><img src="https://img.shields.io/github/stars/SunayHegde2006/Air.rs?style=flat-square&color=yellow" alt="Stars"></a>
 </p>
@@ -342,6 +342,8 @@ asyncio.run(main())
 <summary><strong>⚡ Core Features & Quantization</strong></summary>
 
 * **Quantization**: Supports 21 GGUF formats (F32 → IQ4_XS). Includes AQLM 2-bit codebooks, FP8 (E4M3/E5M2), and native HQQ compilation.
+* **DeepSeek MLA (Multi-Head Latent Attention)**: Native FP8/low-rank $c_{\text{kv}}$ compression for DeepSeek V2, V3, and R1 full models. Cuts KV cache footprint by ~6.4× vs standard GQA.
+* **PagedAttention v2**: vLLM-style virtual page-table allocator (`SequenceManager` + `BlockAllocator`) eliminating memory fragmentation (<0.1% waste) with native Copy-on-Write for parallel sampling.
 * **M.I.S.T. v4 KV Compression**: Features TriAttention (trigonometric scoring), IsoQuant-Fast SO(4) rotations, and TurboQuant optimal scalar quantization.
 * **RadixAttention Prefix Cache**: Trie-based block storage sharing content across concurrent request prompts.
 
@@ -357,6 +359,23 @@ asyncio.run(main())
 * **Observability**: Real-time Prometheus metrics (TTFT, TPS) and a native visual TUI.
 
 </details>
+
+---
+
+## API Reference (OpenAI-Compatible REST Server)
+
+Air.rs exposes a full OpenAI-compatible HTTP server running on default `http://127.0.0.1:8080`. Both standard `/v1/*` paths and root `/*` aliases are supported for universal client compatibility.
+
+| Endpoint | Method | Description | Primary Use Case / Harnesses |
+|---|---|---|---|
+| `/v1/chat/completions` (or `/chat/completions`) | `POST` | Core chat generation (SSE streaming + non-streaming, GBNF) | OpenAI SDK, LangChain, AutoGen, Open WebUI |
+| `/v1/responses` (or `/responses`) | `POST` | Modern unified endpoint (text, instructions, reasoning) | Modern OpenAI Realtime/Responses SDK clients |
+| `/v1/embeddings` (or `/embeddings`) | `POST` | Vectorization (384-dim normalized embeddings) | RAG pipelines, LlamaIndex, Vector DBs |
+| `/v1/completions` (or `/completions`) | `POST` | Legacy text completion (raw prompt-in, text-out) | `lm-evaluation-harness`, `vLLM benchmark_serving`, `lighteval`, `HumanEval`, `DSPy` |
+| `/v1/models` (or `/models`) | `GET` | Lists all currently loaded model configurations | GUI Clients, FastChat |
+| `/v1/models/{model}` (or `/models/{model}`) | `GET` | Inspect details for a specific model ID | Model capability discovery |
+| `/v1/models/{model}` (or `/models/{model}`) | `DELETE` | Unloads/deletes model from runtime storage | Dynamic runtime lifecycle management |
+| `/health` | `GET` | Server health, uptime, version, request counters | Docker / Kubernetes Liveness Probes |
 
 ---
 

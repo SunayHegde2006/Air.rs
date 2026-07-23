@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# NVCC Wrapper for Air.rs — v1.1.5
+# NVCC Wrapper for Air.rs — v1.1.7
 #
 # Fixes applied transparently to every nvcc invocation:
 #   1. -fPIC         — required for shared-library (.so) builds on Linux

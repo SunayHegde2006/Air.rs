@@ -71,6 +71,36 @@ impl MlaConfig {
     pub fn deepseek_r1(n_heads: usize) -> Self {
         Self::deepseek_v2(n_heads)
     }
+
+    /// Total Q/K head dimension (nope + rope components).
+    #[inline]
+    pub fn qk_total_head_dim(&self) -> usize {
+        self.qk_nope_head_dim + self.qk_rope_head_dim
+    }
+
+    /// KV compression ratio relative to standard GQA.
+    ///
+    /// Standard GQA stores `n_kv_heads × (qk_nope + qk_rope + v_head_dim)` floats per token.
+    /// MLA stores only `kv_lora_rank + qk_rope_head_dim` floats per token.
+    ///
+    /// Returns `standard_size / mla_size` — higher is better.
+    /// For DeepSeek-V2: ~6.4× with 128 KV heads.
+    pub fn kv_compression_ratio(&self, n_kv_heads: usize) -> f32 {
+        let standard = n_kv_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim + self.v_head_dim);
+        let mla = self.kv_lora_rank + self.qk_rope_head_dim;
+        standard as f32 / mla as f32
+    }
+
+    /// KV cache bytes required per token (BF16 = 2 bytes per element).
+    pub fn cache_bytes_per_token(&self) -> usize {
+        (self.kv_lora_rank + self.qk_rope_head_dim) * 2 // BF16
+    }
+
+    /// Memory saving in bytes per token vs standard GQA (BF16).
+    pub fn saved_bytes_per_token(&self, n_kv_heads: usize) -> usize {
+        let standard = n_kv_heads * self.qk_total_head_dim() * 2;
+        standard.saturating_sub(self.cache_bytes_per_token())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +170,32 @@ impl MlaKvCache {
     /// How many tokens are cached.
     pub fn seq_len(&self) -> usize {
         self.c_kv.as_ref().map(|t| t.dim(0).unwrap_or(0)).unwrap_or(0)
+    }
+
+    /// Truncate cache to `max_seq` tokens (for context window management).
+    pub fn truncate_to(&mut self, max_seq: usize) -> Result<()> {
+        if let Some(ref c) = self.c_kv {
+            let len = c.dim(0)?;
+            if len > max_seq {
+                let tail = len - max_seq;
+                self.c_kv = Some(c.narrow(0, tail, max_seq)?);
+            }
+        }
+        if let Some(ref k) = self.k_rope {
+            let len = k.dim(0)?;
+            if len > max_seq {
+                let tail = len - max_seq;
+                self.k_rope = Some(k.narrow(0, tail, max_seq)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// Approximate memory footprint in bytes (BF16 = 2 bytes).
+    pub fn memory_bytes(&self) -> usize {
+        let c_kv_bytes = self.c_kv.as_ref().map(|t| t.elem_count() * 2).unwrap_or(0);
+        let k_rope_bytes = self.k_rope.as_ref().map(|t| t.elem_count() * 2).unwrap_or(0);
+        c_kv_bytes + k_rope_bytes
     }
 }
 
@@ -300,6 +356,37 @@ mod tests {
     }
 
     #[test]
+    fn test_qk_total_head_dim() {
+        let cfg = MlaConfig::deepseek_v2(128);
+        assert_eq!(cfg.qk_total_head_dim(), 128 + 64); // nope + rope
+    }
+
+    #[test]
+    fn test_kv_compression_ratio_deepseek_v2() {
+        let cfg = MlaConfig::deepseek_v2(128);
+        // Standard GQA: 128 heads × (128 + 64 + 128) = 128 × 320 = 40960
+        // MLA: 512 + 64 = 576
+        // Ratio ≈ 71×
+        let ratio = cfg.kv_compression_ratio(128);
+        assert!(ratio > 6.0, "compression ratio should be >6×, got {ratio}");
+    }
+
+    #[test]
+    fn test_cache_bytes_per_token() {
+        let cfg = MlaConfig::deepseek_v2(128);
+        // (512 + 64) * 2 = 1152 bytes in BF16
+        assert_eq!(cfg.cache_bytes_per_token(), (512 + 64) * 2);
+    }
+
+    #[test]
+    fn test_saved_bytes_per_token() {
+        let cfg = MlaConfig::deepseek_v2(128);
+        // Saved = non-negative
+        let saved = cfg.saved_bytes_per_token(128);
+        assert!(saved > 0, "MLA should save memory vs standard GQA");
+    }
+
+    #[test]
     fn test_mla_kv_cache_append() {
         let device = candle_core::Device::Cpu;
         let mut cache = MlaKvCache::new();
@@ -314,5 +401,41 @@ mod tests {
         let k_rope2 = Tensor::zeros((2, 64), DType::F32, &device).unwrap();
         cache.append(c_kv2, k_rope2).unwrap();
         assert_eq!(cache.seq_len(), 6);
+    }
+
+    #[test]
+    fn test_mla_kv_cache_truncate_to() {
+        let device = candle_core::Device::Cpu;
+        let mut cache = MlaKvCache::new();
+        let c_kv = Tensor::zeros((10, 512), DType::F32, &device).unwrap();
+        let k_rope = Tensor::zeros((10, 64), DType::F32, &device).unwrap();
+        cache.append(c_kv, k_rope).unwrap();
+        assert_eq!(cache.seq_len(), 10);
+
+        cache.truncate_to(6).unwrap();
+        assert_eq!(cache.seq_len(), 6);
+
+        // Truncating to larger than current size is a no-op
+        cache.truncate_to(100).unwrap();
+        assert_eq!(cache.seq_len(), 6);
+    }
+
+    #[test]
+    fn test_mla_kv_cache_memory_bytes() {
+        let device = candle_core::Device::Cpu;
+        let mut cache = MlaKvCache::new();
+        assert_eq!(cache.memory_bytes(), 0);
+        let c_kv = Tensor::zeros((4, 512), DType::F32, &device).unwrap();
+        let k_rope = Tensor::zeros((4, 64), DType::F32, &device).unwrap();
+        cache.append(c_kv, k_rope).unwrap();
+        // 4×512 + 4×64 = 2304 elements × 2 bytes = 4608 bytes
+        assert_eq!(cache.memory_bytes(), (4 * 512 + 4 * 64) * 2);
+    }
+
+    #[test]
+    fn test_mla_kv_cache_default_is_empty() {
+        let cache = MlaKvCache::default();
+        assert_eq!(cache.seq_len(), 0);
+        assert_eq!(cache.memory_bytes(), 0);
     }
 }

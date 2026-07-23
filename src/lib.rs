@@ -11,14 +11,11 @@ pub mod gpu_pipeline;
 pub mod kv_cache;
 pub mod kv_tier;
 pub mod loader;
-pub mod manifest;
 pub mod model;
 pub mod model_variant;  // A1 — Architecture variant detection (Llama/Mistral/Phi-3/Qwen2/Gemma)
 pub mod gbnf;           // B1 — GBNF grammar-constrained generation
 pub mod model_hub;
 pub mod ops;
-#[cfg(feature = "cuda")]
-pub mod orchestrator;
 pub mod sampler;
 pub mod scheduler;
 pub mod speculative;
@@ -30,7 +27,6 @@ pub mod medusa_heads;      // Medusa speculative draft heads (W.C.P.S.R. v1)
 pub mod wavefront;         // W.C.P.S.R. wavefront orchestrator — draft+verify cycle loop
 pub mod shared_buffer;     // platform-agnostic SharedBuffer + ComputeBackend (ADR-0005)
 pub mod metal_compute;     // Metal kernels, context, command encoding (ADR-0005)
-pub mod ucal;              // compat shim — re-exports shared_buffer + metal_compute (ADR-0005)
 pub mod drive_inquisitor;
 pub mod dispatcher;        // Dispatcher trait + TokenChunk (ADR-0003)
 pub mod blocks;            // TransformerBlock trait + QBlock (ADR-0001)
@@ -93,6 +89,7 @@ pub mod alt_quant;    // P12 — GPTQ/AWQ/EXL2 format readers
 pub mod mcp_server;   // P13 — MCP server (Model Context Protocol)
 pub mod hqq;          // F1  — HQQ Half-Quadratic Quantization dequantizer
 pub mod q4_tiled;     // F2  — Q4_0_4_4 / Q4_0_4_8 / Q4_0_8_8 ARM NEON/SVE tile dequant
+pub mod prism_dequant; // F3  — PrismML Q1_0/Q2_0 Bonsai 1-bit/ternary dequantization
 pub mod tq2_drafter;
 pub mod warp_protocol;
 pub mod fft;
@@ -103,8 +100,9 @@ pub mod inference_step;
 pub mod layer_pipeline;
 pub mod speculative_council;
 pub mod async_verifier;
-#[cfg(feature = "cuda")]
-pub mod uploader;
+pub mod air_compute_api;
+#[cfg(feature = "vulkan")]
+pub mod vulkan_block;
 
 #[cfg(feature = "python")]
 pub mod python;
