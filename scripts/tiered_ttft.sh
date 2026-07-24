@@ -132,6 +132,11 @@ while IFS= read -r f; do
 done < <(find "$MODELS_DIR" -maxdepth 2 -name "*.gguf" 2>/dev/null | sort)
 
 info "Models found: ${#MODELS[@]}  (dir: $MODELS_DIR)"
+if [ "${#MODELS[@]}" -eq 0 ]; then
+    warn "No .gguf models found in '$MODELS_DIR'."
+    info "Pass custom directory: ./scripts/tiered_ttft.sh --models-dir=/path/to/gguf/dir"
+    exit 0
+fi
 info "Output:       $OUT_DIR/ttft_${TIMESTAMP}.json"
 echo ""
 
@@ -176,7 +181,7 @@ OUT_FILE="$OUT_DIR/ttft_${TIMESTAMP}.json"
 printf '{\n'
 printf '  "bench_version": "%s",\n'    "$BENCH_VERSION"
 printf '  "timestamp":     "%s",\n'    "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '  "air_rs_version": "%s",\n'   "1.0.0"
+printf '  "air_rs_version": "%s",\n'   "1.1.7"
 printf '  "gpu":           "%s",\n'    "$GPU"
 printf '  "cpu":           "%s",\n'    "$CPU"
 printf '  "runs_per_model": %d,\n'     "$RUNS"

@@ -265,13 +265,15 @@ Apple Silicon uses **unified memory** (100–400 GB/s) — the GPU and CPU share
 
 ### TTFT Latency
 
-`air-rs bench --n-tokens 1` measures the time to first token. These are prefill durations, not decode throughput.
+`air-rs bench --n-tokens 1` measures an **Air.rs-internal proxy** for time-to-first-token: a single token decode via S.L.I.P. These are not comparable to VRAM-resident engines (llama.cpp, Ollama, vLLM) which pay TTFT once at startup. Reproduce with `./scripts/tiered_ttft.sh --models-dir=/your/models`.
 
-| Model | File Size | Tier | Gate Limit | TTFT p99 | Result |
+| Model | File Size | Tier | Internal Gate | Air.rs TTFT proxy | Repro |
 |---|---|---|---|---|---|
-| Qwen3.6-27B-UD-Q8_K_XL | 32.8 GB | T3 (14–35B) | ≤700ms | **~10ms** | ✅ PASS |
-| gemma-4-31B-it-UD-Q8_K_XL | 32.6 GB | T3 (14–35B) | ≤700ms | **~10ms** | ✅ PASS |
-| Llama-3.3-70B-Instruct-Q8_0 | 69.8 GB | Stretch | — | **~12ms** | ℹ️ INFO |
+| Qwen3.6-27B-UD-Q8_K_XL | 32.8 GB | T3 (14–35B) | ≤700ms | ~10ms | `tiered_ttft.sh` |
+| gemma-4-31B-it-UD-Q8_K_XL | 32.6 GB | T3 (14–35B) | ≤700ms | ~10ms | `tiered_ttft.sh` |
+| Llama-3.3-70B-Instruct-Q8_0 | 69.8 GB | Stretch | — | ~12ms | `tiered_ttft.sh` |
+
+> ⚠️ **Methodology note**: Air.rs TTFT is measured after the model is already mmap'd and running. A fair comparison to llama.cpp/Ollama TTFT requires both engines to start from a cold load on the **same hardware under the same VRAM constraint** — we haven't published that comparison yet. PRs with reproducible cross-engine results are welcome.
 
 ---
 
@@ -292,14 +294,16 @@ Measured decode statistics on RTX 3060 12 GB:
 
 ### Air.rs vs Competitors
 
-Throughput comparisons on a 7B Q8 model (fits in 12 GB VRAM, `--resident` mode):
+> **We have not yet published a verified head-to-head benchmark.** The table below was removed pending a reproducible cross-engine test on identical hardware and load conditions. If you run one, please open a PR — we will include it with full methodology.
 
-| Engine | Mode | Decode TPS | TTFT | VRAM Used |
+What you can verify today: Air.rs decode throughput on a 7B Q8 model, 12 GB VRAM, `--resident` mode (RTX 3060 · Ryzen 5 7600 · Ubuntu 22.04):
+
+| Air.rs Mode | Flag | Decode TPS | VRAM Used | Notes |
 |---|---|---|---|---|
-| **Air.rs CDSC + resident** | **Council** | **~160 tok/s** | **~5ms** | **~7.5 GB** |
-| **Air.rs S.L.I.P.** | Streaming | ~2.5 tok/s | ~5ms | ~400 MB |
-| llama.cpp b3447 | CPU Offload | ~18 tok/s | ~120ms | ~7.5 GB |
-| Ollama 0.1.44 | Default | ~15 tok/s | ~150ms | ~7.5 GB |
+| S.L.I.P. streaming | *(default)* | ~2.5 tok/s | ~400 MB | Model larger than VRAM |
+| CDSC resident | `--council --resident` | **~160 tok/s** | ~7.5 GB | Model fits in VRAM |
+
+Reproduce: `cargo build --release && ./target/release/air-rs bench --model your.gguf --runs 10`
 
 ---
 
