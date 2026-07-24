@@ -28,7 +28,7 @@
 
 - [The Problem](#the-problem)
 - [The Air.rs Solution](#the-airrs-solution)
-- [⚡ CDSC Speculative Council Mode (New)](#-cdsc-speculative-council-mode-new)
+- [⚡ CDSC Speculative Council Mode](#-cdsc-speculative-council-mode-new)
   - [First Principles: Why Decoding is Bandwidth-Bound](#first-principles-why-decoding-is-bandwidth-bound)
   - [The Concept: Consensus-Driven Speculative Council (CDSC)](#the-concept-consensus-driven-speculative-council-cdsc)
   - [Realistic Throughput by Hardware](#realistic-throughput-by-hardware)
@@ -38,7 +38,14 @@
   - [Decode Throughput](#decode-throughput)
   - [Air.rs vs Competitors](#airrs-vs-competitors)
 - [Installation Quickstart](#installation-quickstart)
+  - [Python API Installation](#python-api-installation-recommended)
+  - [Async Streaming](#async-streaming-astream-for-fastapi)
 - [Feature Details](#feature-details)
+  - [Core Features & Quantization](#-core-features--quantization)
+  - [Security, Enterprise & Observability](#️-security-enterprise-compliance--observability)
+- [API Reference (OpenAI-Compatible REST Server)](#api-reference-openai-compatible-rest-server)
+- [Cargo Feature Flags Reference](#cargo-feature-flags-reference)
+- [CLI Reference](#cli-reference)
 - [Python API Reference](#python-api-reference)
 - [System Architecture](#system-architecture)
 - [Troubleshooting & Support](#troubleshooting--support)
@@ -395,6 +402,120 @@ Air.rs exposes a full OpenAI-compatible HTTP server running on default `http://1
 | `Engine.reset()` | `()` | Clear active session KV state cache |
 | `Engine.metrics()` | `Metrics` | Returns structural metrics snapshot |
 | `astream(engine, prompt, config=None)`| `AsyncGen[str]` | GIL-free async token generator |
+
+</details>
+
+---
+
+## Cargo Feature Flags Reference
+
+<details>
+<summary><strong>🔧 Cargo Feature Flags — <code>cargo build --release --features &lt;flag&gt;</code></strong></summary>
+
+| Feature Flag | Default | Description | When to use |
+|---|---|---|---|
+| `cuda` | off | Enables CUDA GPU compute via `candle-core/cuda` + `cudarc` | NVIDIA GPU (RTX/GTX/Tesla). Required for GPU-accelerated inference. |
+| `metal` | off | Enables Apple Metal GPU via `candle-core/metal` | Apple Silicon (M1/M2/M3/M4). Required for GPU acceleration on macOS. |
+| `flash-attn` | off | Enables FlashAttention-2 kernel via `candle-flash-attn` | Reduces VRAM usage and speeds up prefill on NVIDIA GPUs. Pair with `cuda`. |
+| `python` | off | Builds Python extension module via `pyo3` (abi3-py311) | Required to build `pip install air-rs` wheel with `maturin`. |
+| `vulkan` | off | Vulkan compute backend stub (in progress) | Future heterogeneous GPU support (AMD, Intel Arc, mobile). |
+| `rocm` | off | ROCm/HIP GPU backend stub (in progress) | Future AMD GPU support. |
+| `sycl` | off | SYCL/oneAPI backend stub (in progress) | Future Intel GPU / cross-vendor support. |
+| `mojo` | off | Mojo/MAX backend stub (in progress) | Future Modular MAX engine integration. |
+| `gds` | off | GPUDirect Storage stub (in progress) | Direct NVMe→VRAM DMA, bypassing host RAM. |
+| `arb-heap` | off | `BinaryHeap`-based O(log n) waiting queue | Enable when batch size W > 512; otherwise the default Vec scan is faster. |
+| `arb-lockfree` | off | Lock-free enqueue path via `crossbeam-channel` | Enable under high-frequency HTTP traffic (>1000 req/s). |
+
+**Common combinations:**
+```bash
+cargo build --release --features cuda,flash-attn          # NVIDIA GPU + FlashAttn
+cargo build --release --features metal                     # Apple Silicon
+cargo build --release --features cuda,flash-attn,python    # NVIDIA + PyPI wheel
+cargo build --release                                       # CPU-only (no GPU)
+```
+
+</details>
+
+---
+
+## CLI Reference
+
+<details>
+<summary><strong>⚙️ <code>air-rs generate</code> — Run inference from the terminal</strong></summary>
+
+```
+air-rs generate --model <path> --prompt <text> [OPTIONS]
+```
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--model` | `-m` | path | **required** | Path to the `.gguf` model file. |
+| `--prompt` | `-p` | string | **required** | Input prompt text. |
+| `--max-tokens` | `-n` | int | `512` | Maximum tokens to generate. |
+| `--temperature` | `-t` | float | `0.7` | Sampling temperature. `0.0` = greedy. |
+| `--top-p` | | float | `1.0` | Nucleus sampling cutoff. |
+| `--stream` | `-s` | bool flag | off | Stream tokens to stdout as they are generated. |
+| `--ctx-size` | | int | model default | Override KV cache context length (useful on <16 GB VRAM). |
+| `--resident` | | bool flag | off | Pin all weights in VRAM. Requires model to fit (enables 100+ tok/s on 7B–13B). |
+| `--council` | | bool flag | off | Enable CDSC speculative decoding (5× throughput multiplier). |
+| `--epsilon` | | float | `0.15` | JSD consensus threshold for CDSC. Lower = more speculative, higher = safer. |
+| `--tp` | | int | `1` | Tensor-parallel degree (multi-GPU, experimental). |
+| `--chat-template` | | string | auto | Override Jinja2 chat template path or name. |
+| `--reasoning-format` | | string | none | Reasoning token parser: `deepseek`, `qwen`, `generic`. |
+| `--guided-decoding-backend` | | string | none | Structured output backend: `outlines`, `lm-format-enforcer`. |
+| `--enable-auto-tool-choice` | | bool flag | off | Enable automatic tool-call parsing. |
+| `--tool-call-parser` | | string | none | Tool-call parser: `hermes`, `mistral`, `llama`. |
+| `--enable-prefix-caching` | | bool flag | off | Enable RadixAttention prefix KV cache sharing across requests. |
+
+</details>
+
+<details>
+<summary><strong>⚙️ <code>air-rs serve</code> — OpenAI-compatible HTTP server</strong></summary>
+
+```
+air-rs serve --model <path> [OPTIONS]
+```
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--model` | `-m` | path | **required** | Path to the `.gguf` model file. |
+| `--port` | `-P` | int | `8080` | TCP port to bind the HTTP server. |
+| `--host` | `-H` | string | `127.0.0.1` | Host address to bind. Use `0.0.0.0` to expose externally. |
+| `--ctx-size` | | int | model default | KV cache context length override. |
+| `--resident` | | bool flag | off | Pin weights in VRAM. |
+| `--tp` | | int | `1` | Tensor-parallel degree (multi-GPU, experimental). |
+| `--max-num-seqs` | | int | `256` | Maximum concurrent sequences in-flight (`--max-batch-size` alias). |
+| `--chat-template` | | string | auto | Override chat template. |
+| `--reasoning-format` | | string | none | Reasoning token parser. |
+| `--guided-decoding-backend` | | string | none | Structured output backend. |
+| `--enable-auto-tool-choice` | | bool flag | off | Enable automatic tool-call parsing. |
+| `--tool-call-parser` | | string | none | Tool-call parser. |
+| `--enable-prefix-caching` | | bool flag | off | Enable RadixAttention prefix KV cache. |
+
+</details>
+
+<details>
+<summary><strong>⚙️ <code>air-rs bench</code> / <code>air-rs info</code> — Benchmarking & Diagnostics</strong></summary>
+
+**`air-rs bench`** — Measure decode throughput:
+```
+air-rs bench --model <path> [OPTIONS]
+```
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--model` | `-m` | path | **required** | Path to `.gguf` model file. |
+| `--n-tokens` | `-n` | int | `50` | Tokens to generate per benchmark run. |
+| `--runs` | `-r` | int | `5` | Number of independent runs (median/mean reported). |
+| `--ctx-size` | | int | model default | KV cache context override. |
+| `--resident` | | bool flag | off | Load weights fully into VRAM before timing. |
+| `--tp` | | int | `1` | Tensor-parallel degree. |
+
+**`air-rs info`** — Print model file metadata:
+```
+air-rs info --model <path>
+```
+Outputs: file size, format, and engine version. No flags beyond `--model`.
 
 </details>
 
