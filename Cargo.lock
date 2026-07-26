@@ -39,7 +39,6 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
- "byteorder",
  "candle-core",
  "candle-flash-attn",
  "cc",
