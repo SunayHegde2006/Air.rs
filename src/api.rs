@@ -763,15 +763,19 @@ async fn delete_model(
     State(state): State<Arc<ApiState>>,
     Path(model_id): Path<String>,
 ) -> impl IntoResponse {
-    (
-        axum::http::StatusCode::OK,
-        Json(DeleteModelResponse {
-            id: model_id,
-            object: "model".to_string(),
-            deleted: true,
-        }),
-    )
-        .into_response()
+    if model_id == state.model_name || model_id == "default" {
+        (
+            axum::http::StatusCode::OK,
+            Json(DeleteModelResponse {
+                id: model_id,
+                object: "model".to_string(),
+                deleted: true,
+            }),
+        )
+            .into_response()
+    } else {
+        ApiError::model_not_found(&model_id).into_response()
+    }
 }
 
 /// POST /v1/embeddings — Vectorization for RAG pipelines.
