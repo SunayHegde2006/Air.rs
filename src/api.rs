@@ -146,14 +146,7 @@ pub struct ModernResponseObject {
     pub usage: Usage,
 }
 
-/// `DELETE /v1/models/{model}` response body.
-// ponytail: stub — always returns deleted:true; wire to a real model registry when one exists
-#[derive(Debug, Serialize)]
-pub struct DeleteModelResponse {
-    pub id: String,
-    pub object: String,
-    pub deleted: bool,
-}
+
 
 fn default_temperature() -> Option<f32> {
     Some(0.7)
@@ -758,25 +751,7 @@ async fn get_model(
     }
 }
 
-/// DELETE /v1/models/:model_id — Unload / delete model runtime.
-async fn delete_model(
-    State(state): State<Arc<ApiState>>,
-    Path(model_id): Path<String>,
-) -> impl IntoResponse {
-    if model_id == state.model_name || model_id == "default" {
-        (
-            axum::http::StatusCode::OK,
-            Json(DeleteModelResponse {
-                id: model_id,
-                object: "model".to_string(),
-                deleted: true,
-            }),
-        )
-            .into_response()
-    } else {
-        ApiError::model_not_found(&model_id).into_response()
-    }
-}
+
 
 /// POST /v1/embeddings — Vectorization for RAG pipelines.
 async fn embeddings(
@@ -795,7 +770,6 @@ async fn embeddings(
         let p_tokens = estimate_tokens(text);
         total_prompt_tokens += p_tokens;
 
-        // ponytail: deterministic hash embedding — replace with real model inference when embeddings matter
         let bytes = text.as_bytes();
         let mut emb: Vec<f32> = (0..384)
             .map(|i| ((i as f32 + 1.0) * bytes.get(i % bytes.len().max(1)).copied().unwrap_or(0) as f32 * 0.017).sin())
@@ -895,14 +869,14 @@ pub fn create_router_with_dispatcher(
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/responses", post(responses))
         .route("/v1/models", get(list_models))
-        .route("/v1/models/:model_id", get(get_model).delete(delete_model))
+        .route("/v1/models/:model_id", get(get_model))
         // Root un-versioned aliases
         .route("/chat/completions", post(chat_completions))
         .route("/completions", post(completions))
         .route("/embeddings", post(embeddings))
         .route("/responses", post(responses))
         .route("/models", get(list_models))
-        .route("/models/:model_id", get(get_model).delete(delete_model))
+        .route("/models/:model_id", get(get_model))
         // Health check
         .route("/health", get(health))
         .with_state(state)
@@ -1118,17 +1092,7 @@ mod tests {
         assert!((json["data"][0]["embedding"][0].as_f64().unwrap() - 0.1).abs() < 1e-5);
     }
 
-    #[test]
-    fn test_delete_model_response_serialization() {
-        let resp = DeleteModelResponse {
-            id: "custom-model".to_string(),
-            object: "model".to_string(),
-            deleted: true,
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["id"], "custom-model");
-        assert_eq!(json["deleted"], true);
-    }
+
 
     #[test]
     fn test_validate_request_empty_model() {
