@@ -460,6 +460,10 @@ fn run_bench(
     if let Some(ctx) = ctx_size {
         eprintln!("  ctx-size override: {} tokens (model default: {})", ctx, config.context_length);
         config.context_length = ctx;
+    } else if config.context_length > 2048 {
+        // ponytail: hard-coded bench default; expose --bench-ctx-size if users need something other than 2048
+        eprintln!("  [bench] ctx-size capped to 2048 (model default: {}) — use --ctx-size to override", config.context_length);
+        config.context_length = 2048;
     }
     let sampler = air_rs::sampler::SamplerConfig::default();
     let device = candle_core::Device::new_cuda(0).unwrap_or(candle_core::Device::Cpu);
