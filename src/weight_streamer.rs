@@ -85,8 +85,9 @@ impl WeightStreamer {
                     (Backend::Candle { content }, arch, n_layers)
                 }
                 Err(candle_err) => {
-                    // Candle couldn't parse — try strix (handles Q1_0/Q2_0).
-                    eprintln!("[WeightStreamer] candle reader failed ({candle_err}), trying PrismML fallback");
+                    // Candle doesn't support IQ-format dtype IDs (19-23) in its header parser.
+                    // For IQ-quant GGUF files (IQ4_XS, IQ2_XXS, etc.) this is expected.
+                    eprintln!("[WeightStreamer] candle header parse skipped ({candle_err}), using PrismML path");
                     let model = crate::strix::compat::parse_gguf_model(&mmap[..])
                         .map_err(|e| anyhow::anyhow!("strix GGUF parse failed: {e}"))?;
                     let arch = model
