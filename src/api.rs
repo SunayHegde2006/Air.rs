@@ -74,7 +74,7 @@ pub struct CompletionRequest {
     pub gbnf: Option<String>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize)]
 pub struct CompletionResponse {
     pub id: String,
     pub object: String,
@@ -84,7 +84,7 @@ pub struct CompletionResponse {
     pub usage: Usage,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize)]
 pub struct TextChoice {
     pub index: usize,
     pub text: String,
@@ -107,7 +107,7 @@ pub enum EmbeddingInput {
     Array(Vec<String>),
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize)]
 pub struct EmbeddingResponse {
     pub object: String,
     pub data: Vec<EmbeddingData>,
@@ -115,7 +115,7 @@ pub struct EmbeddingResponse {
     pub usage: Usage,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize)]
 pub struct EmbeddingData {
     pub object: String,
     pub embedding: Vec<f32>,
@@ -136,7 +136,7 @@ pub struct ModernResponseRequest {
     pub temperature: Option<f32>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize)]
 pub struct ModernResponseObject {
     pub id: String,
     pub object: String,
@@ -147,7 +147,8 @@ pub struct ModernResponseObject {
 }
 
 /// `DELETE /v1/models/{model}` response body.
-#[derive(Debug, Serialize, Clone)]
+// ponytail: stub — always returns deleted:true; wire to a real model registry when one exists
+#[derive(Debug, Serialize)]
 pub struct DeleteModelResponse {
     pub id: String,
     pub object: String,
@@ -790,25 +791,15 @@ async fn embeddings(
         let p_tokens = estimate_tokens(text);
         total_prompt_tokens += p_tokens;
 
-        // Generate deterministic 384-dimensional normalized embedding representation
-        let dim = 384;
-        let mut emb = Vec::with_capacity(dim);
+        // ponytail: deterministic hash embedding — replace with real model inference when embeddings matter
         let bytes = text.as_bytes();
-        for i in 0..dim {
-            let b = bytes.get(i % bytes.len().max(1)).copied().unwrap_or(0) as f32;
-            let val = ((i as f32 + 1.0) * b * 0.017).sin();
-            emb.push(val);
-        }
+        let mut emb: Vec<f32> = (0..384)
+            .map(|i| ((i as f32 + 1.0) * bytes.get(i % bytes.len().max(1)).copied().unwrap_or(0) as f32 * 0.017).sin())
+            .collect();
         let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
-        for x in &mut emb {
-            *x /= norm;
-        }
+        emb.iter_mut().for_each(|x| *x /= norm);
 
-        data.push(EmbeddingData {
-            object: "embedding".to_string(),
-            embedding: emb,
-            index: idx,
-        });
+        data.push(EmbeddingData { object: "embedding".to_string(), embedding: emb, index: idx });
     }
 
     let response = EmbeddingResponse {
@@ -832,10 +823,9 @@ async fn responses(
 ) -> impl IntoResponse {
     let id = state.next_id();
     let created = state.now_unix();
-    let prompt = req
-        .instructions
-        .clone()
-        .unwrap_or_else(|| req.input.as_ref().map(|v| v.to_string()).unwrap_or_default());
+    let prompt = req.instructions
+        .or_else(|| req.input.map(|v| v.to_string()))
+        .unwrap_or_default();
 
     let config = crate::dispatcher::GenerateConfig {
         model: req.model.clone(),

@@ -440,7 +440,7 @@ impl WeightStreamer {
     fn prism_dequant_tensor(&self, name: &str, device: &Device) -> Result<Tensor> {
         let model = match &self.backend {
             Backend::Prism { model } => model,
-            Backend::Candle { .. } => bail!("prism_dequant_tensor called on Candle backend"),
+            Backend::Candle { .. } => unreachable!("prism_dequant_tensor called on Candle backend"),
         };
         let ti = model.tensors.iter().find(|t| t.name == name)
             .ok_or_else(|| anyhow::anyhow!("Tensor '{name}' not found in Prism model"))?;
