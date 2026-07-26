@@ -56,10 +56,7 @@ pub mod qlora;                // QLoRA — AQLM base + low-rank FP32 adapter (v0
 pub mod yarn;                 // YaRN RoPE extension — 128K context on consumer GPU (v0.8.0)
 pub mod chunked_attn;         // Blockwise chunked attention — O(N×B) memory, GQA, causal (v0.8.0)
 pub mod whisper;              // Whisper ASR — mel spectrogram + encoder/decoder pipeline (v0.8.0)
-pub mod pii_filter;       // Enterprise: PII redaction pipeline (v0.9.0)
 pub mod content_safety;   // Enterprise: NSFW/toxicity content safety gate (v0.9.0)
-pub mod oidc;             // Enterprise: OAuth2/OIDC JWT verifier (v0.9.0)
-pub mod audit_log;        // Enterprise: HMAC-chained SOC 2 audit log (v0.9.0)
 pub mod attention_backend; // AttentionBackend trait + HybridAttentionRouter scaffold (v0.9.0)
 pub mod gated_deltanet;   // Gated DeltaNet chunk-parallel recurrence kernel, AVX-512 (v0.10.0)
 pub mod dual_rope;        // Dual p-RoPE freq cache for Gemma 4 local/global layers (v0.10.0)
@@ -100,7 +97,6 @@ pub mod inference_step;
 pub mod layer_pipeline;
 pub mod speculative_council;
 pub mod async_verifier;
-pub mod air_compute_api;
 #[cfg(feature = "vulkan")]
 pub mod vulkan_block;
 

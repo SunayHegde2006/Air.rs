@@ -1078,29 +1078,7 @@ pub fn parse_model_file(path: &Path) -> Result<UnifiedModel, CompatError> {
                 n_shards: pt_model.n_shards,
             })
         }
-        ModelFormat::Onnx => {
-            use super::onnx;
-            let ox_model = onnx::parse_onnx(path)
-                .map_err(|e| CompatError::FormatError(e.to_string()))?;
-            let tensors = ox_model.tensors.into_iter().map(|t| {
-                UnifiedTensorInfo {
-                    name: t.name,
-                    shape: t.shape,
-                    dtype: t.dtype,
-                    data_offset: t.data_offset,
-                    size_bytes: t.size_bytes,
-                    source_path: t.file_path,
-                    format: ModelFormat::Onnx,
-                }
-            }).collect();
-            Ok(UnifiedModel {
-                format: ModelFormat::Onnx,
-                tensors,
-                architecture: ModelArchitecture::Unknown,
-                n_shards: 1,
-            })
-        }
-        ModelFormat::Unknown => {
+        ModelFormat::Onnx | ModelFormat::Unknown => {
             Err(CompatError::FormatError(format!("unsupported format: {}", path.display())))
         }
     }

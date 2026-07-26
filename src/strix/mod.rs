@@ -93,12 +93,9 @@ pub mod backend_detect;
 // Phase 7: Multi-format readers, mmap, tests, validation
 pub mod safetensors;
 pub mod pytorch;
-pub mod onnx;
 pub mod mmap_storage;
 #[cfg(test)]
 pub mod integration_tests;
-#[cfg(test)]
-pub mod chaos_tests;
 #[cfg(test)]
 pub mod benchmarks;
 #[cfg(test)]
