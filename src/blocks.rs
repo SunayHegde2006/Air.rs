@@ -541,14 +541,11 @@ impl LayerUnit for MojoBlock {
         let x_flat = ctx.x.flatten_all()?;
         let mut x_data = x_flat.to_vec1::<f32>()?;
 
-        unsafe {
-            let size = x_data.len();
-            crate::air_compute_api::air_compute_rmsnorm(
-                x_data.as_mut_ptr(),
-                std::ptr::null(),
-                size,
-                1e-6,
-            );
+        let size = x_data.len();
+        let ss: f32 = x_data.iter().map(|&v| v * v).sum::<f32>() / size.max(1) as f32;
+        let scale = 1.0 / (ss + 1e-6).sqrt();
+        for v in &mut x_data {
+            *v *= scale;
         }
 
         let out_tensor = Tensor::from_vec(x_data, ctx.x.shape(), ctx.x.device())?;
@@ -594,14 +591,11 @@ impl LayerUnit for SyclBlock {
         let x_flat = ctx.x.flatten_all()?;
         let mut x_data = x_flat.to_vec1::<f32>()?;
 
-        unsafe {
-            let size = x_data.len();
-            crate::air_compute_api::air_compute_rmsnorm(
-                x_data.as_mut_ptr(),
-                std::ptr::null(),
-                size,
-                1e-6,
-            );
+        let size = x_data.len();
+        let ss: f32 = x_data.iter().map(|&v| v * v).sum::<f32>() / size.max(1) as f32;
+        let scale = 1.0 / (ss + 1e-6).sqrt();
+        for v in &mut x_data {
+            *v *= scale;
         }
 
         let out_tensor = Tensor::from_vec(x_data, ctx.x.shape(), ctx.x.device())?;
