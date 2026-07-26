@@ -579,6 +579,20 @@ We welcome structural research contributions!
 
 ---
 
+## Changelog
+
+### v1.1.8 — 2026-07-26
+
+- **fix(weight_streamer)**: `prism_dequant_tensor` now covers all standard GGUF quant types (Q4_K, Q4_0, Q8_0, Q8_K, Q2_K, Q3_K, Q5_K, Q6_K, F16, F32) via `candle GgmlType::to_float`. Previously only Q1_0/Q2_0 (PrismML Bonsai) were handled, causing a hard crash on IQ4_XS models like `Qwen3.6-27B-IQ4_XS.gguf`.
+- **refactor(api)**: Removed stub `DELETE /v1/models/:id` endpoint and `DeleteModelResponse` — route returned unconditional `deleted: true` without unloading weights.
+- **chore**: Pruned dead deps (`jsonwebtoken`, `base64`, `hmac`) and resolved full ponytail debt ledger.
+
+### v1.1.7 — 2026-07-22
+
+- Initial stable release with CDSC speculative council, S.L.I.P. weight streamer, IQ4_XS/Q4_K loader (via PrismML path), and VRAM guard.
+
+---
+
 ## Citation & Licensing
 
 Cite this repository if used in performance research:
