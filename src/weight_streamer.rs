@@ -449,20 +449,148 @@ impl WeightStreamer {
         let abs_end   = abs_start + ti.size_bytes;
         let raw = &self.mmap[abs_start..abs_end];
 
-        let mut floats = Vec::new();
-        match ti.dtype {
+        let shape = candle_core::Shape::from(ti.shape.clone());
+        let t = match ti.dtype {
+            crate::strix::types::DType::F32 => {
+                let floats: Vec<f32> = raw
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .collect();
+                Tensor::from_vec(floats, shape, &Device::Cpu)?
+            }
+            crate::strix::types::DType::F16 => {
+                let floats: Vec<f32> = raw
+                    .chunks_exact(2)
+                    .map(|b| half::f16::from_le_bytes(b.try_into().unwrap()).to_f32())
+                    .collect();
+                Tensor::from_vec(floats, shape, &Device::Cpu)?
+            }
             crate::strix::types::DType::Q1_0 => {
+                let mut floats = Vec::new();
                 crate::prism_dequant::dequant_q1_0(raw, &mut floats)?;
+                Tensor::from_vec(floats, shape, &Device::Cpu)?
             }
             crate::strix::types::DType::Q2_0 => {
+                let mut floats = Vec::new();
                 crate::prism_dequant::dequant_q2_0(raw, &mut floats)?;
+                Tensor::from_vec(floats, shape, &Device::Cpu)?
+            }
+            crate::strix::types::DType::Q4_0 | crate::strix::types::DType::Q4_0_4_4
+            | crate::strix::types::DType::Q4_0_4_8 | crate::strix::types::DType::Q4_0_8_8 => {
+                use candle_core::quantized::GgmlType;
+                let blocks: &[candle_core::quantized::k_quants::BlockQ4_0] = unsafe {
+                    std::slice::from_raw_parts(
+                        raw.as_ptr() as *const _,
+                        raw.len() / std::mem::size_of::<candle_core::quantized::k_quants::BlockQ4_0>(),
+                    )
+                };
+                let mut floats = vec![0.0f32; blocks.len() * 32];
+                candle_core::quantized::k_quants::BlockQ4_0::to_float(blocks, &mut floats);
+                Tensor::from_vec(floats, shape, &Device::Cpu)?
+            }
+            crate::strix::types::DType::Q8_0 => {
+                use candle_core::quantized::GgmlType;
+                let blocks: &[candle_core::quantized::k_quants::BlockQ8_0] = unsafe {
+                    std::slice::from_raw_parts(
+                        raw.as_ptr() as *const _,
+                        raw.len() / std::mem::size_of::<candle_core::quantized::k_quants::BlockQ8_0>(),
+                    )
+                };
+                let mut floats = vec![0.0f32; blocks.len() * 32];
+                candle_core::quantized::k_quants::BlockQ8_0::to_float(blocks, &mut floats);
+                Tensor::from_vec(floats, shape, &Device::Cpu)?
+            }
+            crate::strix::types::DType::Q4_K => {
+                use candle_core::quantized::GgmlType;
+                let blocks: &[candle_core::quantized::k_quants::BlockQ4K] = unsafe {
+                    std::slice::from_raw_parts(
+                        raw.as_ptr() as *const _,
+                        raw.len() / std::mem::size_of::<candle_core::quantized::k_quants::BlockQ4K>(),
+                    )
+                };
+                let mut floats = vec![0.0f32; blocks.len() * 256];
+                candle_core::quantized::k_quants::BlockQ4K::to_float(blocks, &mut floats);
+                Tensor::from_vec(floats, shape, &Device::Cpu)?
+            }
+            crate::strix::types::DType::Q8_K => {
+                use candle_core::quantized::GgmlType;
+                let blocks: &[candle_core::quantized::k_quants::BlockQ8K] = unsafe {
+                    std::slice::from_raw_parts(
+                        raw.as_ptr() as *const _,
+                        raw.len() / std::mem::size_of::<candle_core::quantized::k_quants::BlockQ8K>(),
+                    )
+                };
+                let mut floats = vec![0.0f32; blocks.len() * 256];
+                candle_core::quantized::k_quants::BlockQ8K::to_float(blocks, &mut floats);
+                Tensor::from_vec(floats, shape, &Device::Cpu)?
+            }
+            crate::strix::types::DType::Q2_K => {
+                use candle_core::quantized::GgmlType;
+                let blocks: &[candle_core::quantized::k_quants::BlockQ2K] = unsafe {
+                    std::slice::from_raw_parts(
+                        raw.as_ptr() as *const _,
+                        raw.len() / std::mem::size_of::<candle_core::quantized::k_quants::BlockQ2K>(),
+                    )
+                };
+                let mut floats = vec![0.0f32; blocks.len() * 256];
+                candle_core::quantized::k_quants::BlockQ2K::to_float(blocks, &mut floats);
+                Tensor::from_vec(floats, shape, &Device::Cpu)?
+            }
+            crate::strix::types::DType::Q3_K => {
+                use candle_core::quantized::GgmlType;
+                let blocks: &[candle_core::quantized::k_quants::BlockQ3K] = unsafe {
+                    std::slice::from_raw_parts(
+                        raw.as_ptr() as *const _,
+                        raw.len() / std::mem::size_of::<candle_core::quantized::k_quants::BlockQ3K>(),
+                    )
+                };
+                let mut floats = vec![0.0f32; blocks.len() * 256];
+                candle_core::quantized::k_quants::BlockQ3K::to_float(blocks, &mut floats);
+                Tensor::from_vec(floats, shape, &Device::Cpu)?
+            }
+            crate::strix::types::DType::Q5_K => {
+                use candle_core::quantized::GgmlType;
+                let blocks: &[candle_core::quantized::k_quants::BlockQ5K] = unsafe {
+                    std::slice::from_raw_parts(
+                        raw.as_ptr() as *const _,
+                        raw.len() / std::mem::size_of::<candle_core::quantized::k_quants::BlockQ5K>(),
+                    )
+                };
+                let mut floats = vec![0.0f32; blocks.len() * 256];
+                candle_core::quantized::k_quants::BlockQ5K::to_float(blocks, &mut floats);
+                Tensor::from_vec(floats, shape, &Device::Cpu)?
+            }
+            crate::strix::types::DType::Q6_K => {
+                use candle_core::quantized::GgmlType;
+                let blocks: &[candle_core::quantized::k_quants::BlockQ6K] = unsafe {
+                    std::slice::from_raw_parts(
+                        raw.as_ptr() as *const _,
+                        raw.len() / std::mem::size_of::<candle_core::quantized::k_quants::BlockQ6K>(),
+                    )
+                };
+                let mut floats = vec![0.0f32; blocks.len() * 256];
+                candle_core::quantized::k_quants::BlockQ6K::to_float(blocks, &mut floats);
+                Tensor::from_vec(floats, shape, &Device::Cpu)?
             }
             other => bail!("prism_dequant_tensor: unsupported dtype {other:?} for '{name}'"),
-        }
-
-        // Reshape to tensor shape (dims are stored in GGUF order — transpose as needed by callers).
-        let shape: Vec<usize> = ti.shape.clone();
-        let t = Tensor::from_vec(floats, shape, &Device::Cpu)?;
+        };
         Ok(t.to_device(device)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_q4_k_dequant_block() {
+        use candle_core::quantized::GgmlType;
+        let raw = vec![0u8; std::mem::size_of::<candle_core::quantized::k_quants::BlockQ4K>()];
+        let blocks: &[candle_core::quantized::k_quants::BlockQ4K] = unsafe {
+            std::slice::from_raw_parts(raw.as_ptr() as *const _, 1)
+        };
+        let mut floats = vec![0.0f32; 256];
+        candle_core::quantized::k_quants::BlockQ4K::to_float(blocks, &mut floats);
+        assert_eq!(floats.len(), 256);
     }
 }
