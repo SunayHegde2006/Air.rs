@@ -40,7 +40,6 @@ dashmap = "6.1"
 rayon = "1.10"
 rand = { version = "0.8", features = ["small_rng"] }
 rand_chacha = "0.3"
-indicatif = "0.17"
 
 # §13 optional ARB performance deps (feature-gated, default = std-only)
 ordered-float = { version = "4.2", optional = true }

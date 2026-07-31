@@ -221,13 +221,13 @@ impl Default for SafetyPolicy {
 /// if !verdict.safe { /* block request */ }
 /// ```
 pub struct ContentSafetyGate {
-    classifier: Box<dyn SafetyClassifier>,
+    classifier: KeywordClassifier,
     pub policy: SafetyPolicy,
 }
 
 impl ContentSafetyGate {
-    /// Construct with a custom classifier and policy.
-    pub fn new(classifier: Box<dyn SafetyClassifier>, policy: SafetyPolicy) -> Self {
+    /// Construct with policy.
+    pub fn new(classifier: KeywordClassifier, policy: SafetyPolicy) -> Self {
         Self { classifier, policy }
     }
 
@@ -260,7 +260,7 @@ impl ContentSafetyGate {
 
 impl Default for ContentSafetyGate {
     fn default() -> Self {
-        Self::new(Box::new(KeywordClassifier::default()), SafetyPolicy::default())
+        Self::new(KeywordClassifier::default(), SafetyPolicy::default())
     }
 }
 
@@ -325,7 +325,7 @@ mod tests {
             action: SafetyAction::Warn,
             ..SafetyPolicy::default()
         };
-        let gate = ContentSafetyGate::new(Box::new(KeywordClassifier::new()), policy);
+        let gate = ContentSafetyGate::new(KeywordClassifier::new(), policy);
         // Even if verdict is unsafe, should_block returns false under Warn policy
         assert!(!gate.should_block("how to kill someone"),
             "Warn policy should not block");
