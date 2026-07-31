@@ -35,7 +35,7 @@ function Write-Err   { param([string]$msg) Write-Host "  [X] $msg" -ForegroundCo
 
 Write-Host ""
 Write-Host "  ======================================================" -ForegroundColor Magenta
-Write-Host "       Air.rs Build System — v1.1.7 (Stable)            " -ForegroundColor Magenta
+Write-Host "       Air.rs Build System — v1.2.0 (Stable)            " -ForegroundColor Magenta
 Write-Host "  ======================================================" -ForegroundColor Magenta
 Write-Host ""
 
