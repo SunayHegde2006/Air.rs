@@ -295,52 +295,7 @@ impl InferenceKernel for MockKernel {
 }
 
 // ---------------------------------------------------------------------------
-// KvSlot-Aware KV Cache Indexing — §7 "KV-slot indexing into cache tensor"
-// ---------------------------------------------------------------------------
-// The ARB scheduler assigns each sequence a `kv_slot: usize` from the
-// KvSlotAllocator. The KvCacheManager currently indexes by (layer_id) and
-// stores a single batch dimension. To support multi-sequence batching per the
-// §7 spec, the KvCacheManager needs slot-indexed load/save.
-//
-// The adapter below bridges the ARB kv_slot index to `KvCacheManager` by
-// treating each slot as an independent "virtual" manager index. In a full
-// multi-sequence implementation the backing tensor would be
-// [max_batch_size, seq_len, n_kv_heads, head_dim], and we'd index the batch
-// axis with kv_slot. This module exposes the trait surface so higher layers
-// can implement it.
 
-/// Trait for KV cache storage that understands ARB slot indices.
-///
-/// Each sequence in the batch occupies one `kv_slot`. This trait lets the
-/// inference kernel load/save KV tensors per-slot without knowing the
-/// underlying layout (contiguous batch tensor vs per-slot managers).
-pub trait SlotKvCache: Send {
-    /// Load K/V tensors for a specific slot + layer to the compute device.
-    ///
-    /// Returns `(k, v)` as candle tensors ready for attention.
-    /// Shape: `[1, cached_seq_len, n_kv_heads, head_dim]`.
-    fn load(
-        &self,
-        slot: usize,
-        layer_id: usize,
-    ) -> candle_core::Result<(
-        Option<candle_core::Tensor>,
-        Option<candle_core::Tensor>,
-    )>;
-
-    /// Save updated K/V tensors back to the slot storage after a forward
-    /// pass through `layer_id`.
-    fn save(
-        &mut self,
-        slot: usize,
-        layer_id: usize,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-    ) -> candle_core::Result<()>;
-
-    /// Clear all cached state for a slot (called when sequence finishes).
-    fn clear_slot(&mut self, slot: usize);
-}
 
 // ---------------------------------------------------------------------------
 // Tests
