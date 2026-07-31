@@ -274,12 +274,14 @@ impl WeightStreamer {
         Ok(crate::moe::ExpertWeights { w_gate, w_up, w_down })
     }
 
-    /// Load the token-embedding table (dequantized F16).
-    pub fn load_embedding(&self, device: &Device) -> Result<Tensor> {
+    /// Load the token-embedding table (dequantized F32, always on CPU).
+    ///
+    /// The table stays on CPU regardless of `device` — for a 27B model it
+    /// dequants to ~5 GiB f32, exceeding consumer GPU VRAM. Callers should
+    /// move only the result of `index_select` to the device after lookup.
+    pub fn load_embedding(&self, _device: &Device) -> Result<Tensor> {
         let mut c = Cursor::new(&self.mmap[..]);
-        // Always try to put on CUDA to save system RAM
-        let target = device;
-        self.dequant(&mut c, "token_embd.weight", target)
+        self.dequant(&mut c, "token_embd.weight", &Device::Cpu)
     }
 
     /// Load the final RMSNorm weight (dequantized F16).
@@ -299,7 +301,8 @@ impl WeightStreamer {
         let mut c = Cursor::new(&self.mmap[..]);
         self.qmatmul(&mut c, "output.weight", device)
             .or_else(|_| self.qmatmul(&mut c, "lm_head.weight", device))
-            .or_else(|_| self.qmatmul(&mut c, "token_embd.weight", device))
+            // Tied-embedding fallback: keep on CPU — same size concern as load_embedding.
+            .or_else(|_| self.qmatmul(&mut c, "token_embd.weight", &Device::Cpu))
     }
 
     pub fn load_output(&self, device: &Device) -> Result<(Tensor, QMatMul)> {
