@@ -208,8 +208,9 @@ impl InferenceGenerator {
         let embedding_table = streamer.load_embedding(&self.device)?;
         let (final_norm_weight, _) = streamer.load_output(&self.device)?;
         
-        let tokens_tensor = Tensor::new(draft_tokens, &self.device)?;
-        let mut x = embedding_table.index_select(&tokens_tensor, 0)?;
+        let mut x = embedding_table
+            .index_select(&Tensor::new(draft_tokens, &candle_core::Device::Cpu)?, 0)?
+            .to_device(&self.device)?;
 
         let lm_head_matrix = self.session.lm_head_tensor.as_ref().cloned().unwrap_or_else(|| {
              Tensor::zeros((self.config.vocab_size, self.config.hidden_dim), DType::F16, &self.device).unwrap()
@@ -412,8 +413,9 @@ impl InferenceGenerator {
             let chunk_end = chunk_start + PREFILL_CHUNK_SIZE;
             let chunk_tokens = &all_tokens[chunk_start..chunk_end];
 
-            let token_tensor = Tensor::new(chunk_tokens, &self.device)?;
-            let mut hidden = embedding_table.index_select(&token_tensor, 0)?;
+            let mut hidden = embedding_table
+                .index_select(&Tensor::new(chunk_tokens, &candle_core::Device::Cpu)?, 0)?
+                .to_device(&self.device)?;
             hidden = hidden.unsqueeze(0)?;
 
             for layer_id in 0..self.config.n_layers {
@@ -460,8 +462,9 @@ impl InferenceGenerator {
             (&all_tokens[all_tokens.len() - 1..], all_tokens.len() - 1)
         };
 
-        let token_tensor = Tensor::new(input_tokens, &self.device)?;
-        let mut hidden = embedding_table.index_select(&token_tensor, 0)?;
+        let mut hidden = embedding_table
+            .index_select(&Tensor::new(input_tokens, &candle_core::Device::Cpu)?, 0)?
+            .to_device(&self.device)?;
         hidden = hidden.unsqueeze(0)?;
 
         let layer_loop_start = Instant::now();
