@@ -152,6 +152,38 @@ impl Drop for SchedulerThread {
     }
 }
 
+// ── Predictive Prefill Routing ───────────────────────────────────────────
+
+/// Classifies incoming requests to route prefill vs. decode to disaggregated
+/// nodes, hiding latency via speculative prompt routing (vLLM-style).
+#[derive(Debug, Clone)]
+pub struct PrefillRouter {
+    /// Estimated prompt token count threshold above which we emit a prefill request.
+    pub prefill_threshold: usize,
+    /// Running estimate of average prefill cost in ms.
+    pub avg_prefill_cost_ms: f64,
+    samples: u64,
+}
+
+impl PrefillRouter {
+    pub fn new(prefill_threshold: usize) -> Self {
+        Self { prefill_threshold, avg_prefill_cost_ms: 0.0, samples: 0 }
+    }
+
+    /// Returns `true` if the prompt should be disaggregated to a prefill node.
+    pub fn should_offload_prefill(&self, prompt_tokens: usize) -> bool {
+        prompt_tokens >= self.prefill_threshold
+    }
+
+    /// Update rolling avg with an observed prefill cost (ms).
+    pub fn record_prefill_cost(&mut self, cost_ms: f64) {
+        self.samples += 1;
+        // ponytail: EMA with α=0.1; replace with per-priority queues if multi-SLA needed
+        self.avg_prefill_cost_ms =
+            0.1 * cost_ms + 0.9 * self.avg_prefill_cost_ms;
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -504,6 +504,31 @@ impl ExpertVramScheduler {
 }
 
 // ---------------------------------------------------------------------------
+// Expert Parallelism (EP) — Decentralized Router
+// ---------------------------------------------------------------------------
+
+/// Decentralized Expert Parallelism (EP) router for cross-GPU MoE expert dispatch.
+#[derive(Debug, Clone)]
+pub struct ExpertRouter {
+    /// Map of expert_id -> target GPU device_id
+    pub partition_table: HashMap<usize, usize>,
+}
+
+impl ExpertRouter {
+    pub fn new(n_experts: usize, n_gpus: usize) -> Self {
+        let mut partition_table = HashMap::new();
+        for id in 0..n_experts {
+            partition_table.insert(id, id % n_gpus.max(1));
+        }
+        Self { partition_table }
+    }
+
+    pub fn route_target_gpu(&self, expert_id: usize) -> usize {
+        *self.partition_table.get(&expert_id).unwrap_or(&0)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GGUF Tensor Name Conventions
 // ---------------------------------------------------------------------------
 
