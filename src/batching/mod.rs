@@ -57,7 +57,6 @@ pub use arb::{
 pub use kernel::{
     InferenceKernel,
     MockKernel,
-    SlotKvCache,
     run_arb_loop,
     // §8 Scheduler Tick Loop
     LoopConfig,
@@ -65,4 +64,3 @@ pub use kernel::{
     IdleNotifier,
     inference_loop,
 };
-
