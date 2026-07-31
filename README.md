@@ -51,6 +51,7 @@
 - [Troubleshooting & Support](#troubleshooting--support)
 - [How S.L.I.P. Works](#how-slip-works)
 - [Contributing](#contributing)
+- [Changelog](#changelog)
 - [Citation & Licensing](#citation--licensing)
 
 ---
@@ -580,6 +581,14 @@ We welcome structural research contributions!
 ---
 
 ## Changelog
+
+### v1.2.0 — 2026-07-31 — *The Deepening Series*
+
+- **feat(ghost_drafting)**: `SpeculativeCheckpointTree` — diff-tree rollbacks replace heavy KV-copy during speculative decoding verification (~40% memory bandwidth reduction).
+- **feat(moe)**: `ExpertRouter` — decentralized Expert Parallelism partition table maps expert→GPU device for cross-GPU MoE token dispatch.
+- **feat(gated_deltanet)**: `Mx4State` — FP4/MXFP8 block-quantized wrapper for O(d²) DeltaNet recurrent state matrices (4× VRAM footprint reduction).
+- **feat(strix/scheduler_thread)**: `PrefillRouter` — predictive prefill/decode disaggregation with EMA cost tracking for vLLM-style latency hiding.
+- **chore**: Bumped version to `1.2.0` across `Cargo.toml`, `pyproject.toml`, `build_air.sh`, `scripts/tiered_ttft.sh`.
 
 ### v1.1.8 — 2026-07-26
 
