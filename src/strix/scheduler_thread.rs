@@ -160,14 +160,21 @@ impl Drop for SchedulerThread {
 pub struct PrefillRouter {
     /// Estimated prompt token count threshold above which we emit a prefill request.
     pub prefill_threshold: usize,
-    /// Running estimate of average prefill cost in ms.
+    /// Running estimate of average prefill cost in ms across all requests.
     pub avg_prefill_cost_ms: f64,
+    /// Per-priority rolling average prefill costs [0..3].
+    pub priority_costs: [f64; 4],
     samples: u64,
 }
 
 impl PrefillRouter {
     pub fn new(prefill_threshold: usize) -> Self {
-        Self { prefill_threshold, avg_prefill_cost_ms: 0.0, samples: 0 }
+        Self {
+            prefill_threshold,
+            avg_prefill_cost_ms: 0.0,
+            priority_costs: [0.0; 4],
+            samples: 0,
+        }
     }
 
     /// Returns `true` if the prompt should be disaggregated to a prefill node.
@@ -178,9 +185,14 @@ impl PrefillRouter {
     /// Update rolling avg with an observed prefill cost (ms).
     pub fn record_prefill_cost(&mut self, cost_ms: f64) {
         self.samples += 1;
-        // ponytail: EMA with α=0.1; replace with per-priority queues if multi-SLA needed
-        self.avg_prefill_cost_ms =
-            0.1 * cost_ms + 0.9 * self.avg_prefill_cost_ms;
+        self.avg_prefill_cost_ms = 0.1 * cost_ms + 0.9 * self.avg_prefill_cost_ms;
+    }
+
+    /// Update rolling avg for a specific SLA priority tier (0..3).
+    pub fn record_priority_prefill_cost(&mut self, priority: usize, cost_ms: f64) {
+        let p = priority.min(3);
+        self.priority_costs[p] = 0.1 * cost_ms + 0.9 * self.priority_costs[p];
+        self.record_prefill_cost(cost_ms);
     }
 }
 
@@ -267,5 +279,17 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
         assert!(thread.stats().ticks >= 1, "expected ≥1 tick, got {}", thread.stats().ticks);
         thread.shutdown();
+    }
+
+    #[test]
+    fn test_prefill_router_priority_costs() {
+        let mut router = PrefillRouter::new(128);
+        assert!(router.should_offload_prefill(128));
+        assert!(!router.should_offload_prefill(127));
+
+        router.record_priority_prefill_cost(1, 100.0);
+        assert!(router.priority_costs[1] > 0.0);
+        assert_eq!(router.priority_costs[0], 0.0);
+        assert!(router.avg_prefill_cost_ms > 0.0);
     }
 }
