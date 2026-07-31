@@ -336,8 +336,7 @@ pub fn format_size(bytes: u64) -> String {
 pub fn hash_file(path: &Path) -> Result<String> {
     use sha2::Digest;
     let data = fs::read(path)?;
-    let hash = sha2::Sha256::digest(&data);
-    Ok(format!("{:x}", hash))
+    Ok(format!("{:x}", sha2::Sha256::digest(&data)))
 }
 
 // ---------------------------------------------------------------------------
