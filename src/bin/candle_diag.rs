@@ -73,17 +73,13 @@ fn main() {
     println!("CUDA:");
     if utils::cuda_is_available() {
         let mut dev_idx = 0;
-        loop {
-            match Device::new_cuda(dev_idx) {
-                Ok(dev) => {
-                    println!("  Device {dev_idx}: {:?}", dev);
-                    all_ok &= probe_device(&format!("CUDA:{dev_idx}"), &dev);
-                    probe_dtypes(&dev);
-                    dev_idx += 1;
-                }
-                Err(_) => break,
-            }
+        while let Ok(dev) = Device::new_cuda(dev_idx) {
+            println!("  Device {dev_idx}: {:?}", dev);
+            all_ok &= probe_device(&format!("CUDA:{dev_idx}"), &dev);
+            probe_dtypes(&dev);
+            dev_idx += 1;
         }
+
         if dev_idx == 0 {
             println!("  ⚠️  CUDA is available but no devices enumerated.");
         }
