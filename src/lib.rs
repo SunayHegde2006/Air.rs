@@ -2,7 +2,17 @@
 // TODO: remove when the project is upgraded to rustc ≥ 1.96.
 #![allow(dead_code, unused_mut, unused_imports, unused_assignments, unused_variables, clippy::needless_range_loop, clippy::manual_is_multiple_of, clippy::too_many_arguments, clippy::should_implement_trait, clippy::derivable_impls, clippy::manual_contains, clippy::manual_range_contains, clippy::doc_lazy_continuation, clippy::let_and_return, clippy::manual_div_ceil, clippy::excessive_precision)]
 pub mod api;
+pub mod air_compute_api {
+    use std::os::raw::c_float;
+
+    extern "C" {
+        pub fn air_compute_rmsnorm(x: *mut c_float, weight: *const c_float, size: usize, eps: c_float);
+        pub fn air_compute_rope(x: *mut c_float, pos: usize, theta: c_float, dim: usize, seq_len: usize);
+        pub fn air_compute_matmul(out: *mut c_float, lhs: *const c_float, rhs: *const c_float, m: usize, n: usize, k: usize);
+    }
+}
 pub mod batching;
+
 /// Backward-compat re-export: `crate::arb::*` still works.
 pub use batching::arb as arb;
 pub mod chat_template;
@@ -97,8 +107,11 @@ pub mod inference_step;
 pub mod layer_pipeline;
 pub mod speculative_council;
 pub mod async_verifier;
+pub mod modelfile;     // Modelfile system prompt & deployment parameter configuration
 #[cfg(feature = "vulkan")]
 pub mod vulkan_block;
+
+
 
 #[cfg(feature = "python")]
 pub mod python;

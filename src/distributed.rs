@@ -9,6 +9,8 @@ use async_trait::async_trait;
 /// Abstract communication backend for distributed orchestration.
 #[async_trait]
 pub trait Communicator: Send + Sync + std::fmt::Debug {
+
+
     /// Rank of the current node in the world.
     fn rank(&self) -> usize;
     /// Total number of nodes in the world.
@@ -82,6 +84,8 @@ impl TcpCommunicator {
 
 #[async_trait]
 impl Communicator for TcpCommunicator {
+
+
     fn rank(&self) -> usize { self.rank }
     fn world_size(&self) -> usize { self.world_size }
 

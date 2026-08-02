@@ -10,9 +10,13 @@
 //!
 //! See ADR-0003.
 
-use futures_util::stream::{BoxStream, StreamExt};
+use std::pin::Pin;
+use tokio_stream::{Stream, StreamExt};
 use anyhow::Result;
 use crate::gbnf::GbnfConstraint;
+
+pub type BoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + 'a>>;
+
 
 // ---------------------------------------------------------------------------
 // Public value types
@@ -165,7 +169,7 @@ impl Dispatcher for DistributedDispatcher {
             Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx))
         } else {
             let chunks = vec![Err(anyhow::anyhow!("generate() called on follower rank {}", comm.rank()))];
-            Box::pin(futures_util::stream::iter(chunks))
+            Box::pin(tokio_stream::iter(chunks))
         }
     }
 
@@ -217,7 +221,7 @@ impl Dispatcher for MockDispatcher {
             .map(|t| Ok(TokenChunk::Token { id: 0, text: t.clone() }))
             .collect();
         chunks.push(Ok(TokenChunk::Stop { finish_reason: FinishReason::Stop }));
-        Box::pin(futures_util::stream::iter(chunks))
+        Box::pin(tokio_stream::iter(chunks))
     }
 
     fn list_models(&self) -> Vec<String> {
@@ -228,10 +232,10 @@ impl Dispatcher for MockDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::StreamExt;
 
     #[tokio::test]
     async fn mock_dispatcher_emits_tokens() {
+
         let d = MockDispatcher::new("test-model", vec!["Hello", " world"]);
         let chunks: Vec<_> = d.generate(GenerateConfig::default())
             .collect::<Vec<_>>()

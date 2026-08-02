@@ -582,7 +582,7 @@ We welcome structural research contributions!
 
 ## Changelog
 
-### v1.2.1 — 2026-08-02 — *Multi-Tenant, Safetensors & Hardware Profile Release*
+### v1.2.1 — 2026-08-02 — *Multi-Tenant, Safetensors & Hardware Profile, Lean & Complete Release*
 
 - **feat(prefix_cache)**: Multi-Tenant Radix Cache — tenant isolation (`longest_prefix_match_for_tenant`) with LRU/LFU eviction strategies.
 - **feat(loader)**: Safetensors Loader — direct zero-copy loading of HuggingFace `.safetensors` model weights.
@@ -590,6 +590,12 @@ We welcome structural research contributions!
 - **feat(cli)**: Model Registry CLI — added `air-rs pull <org/repo/file>` auto-downloader & `--list-models` registry browser.
 - **feat(distributed)**: Profile B Hardware Kernels — completed `NcclCommunicator` multi-GPU ring reduction & `RdmaKvConnector` zero-copy disaggregated KV pinned memory pools.
 - **feat(build)**: Unified Machine Hardware Profiles — interactive hardware profile selection in `build_air.sh` and `build_air.ps1` (Single GPU Rig, Multi-GPU NVLink Rig, Multi-Node Datacenter).
+- **feat(modelfile)**: `Modelfile` declarative deployment config parser — system prompts, temperature, top_p, stop sequences, and max_tokens per model without hardcoding in API payloads.
+- **feat(distributed)**: `RdmaKvConnector` — replaced TCP-forwarding stub with full pinned-buffer pool (`RdmaBufferPool`) and MR-aligned chunked send/recv pipeline; `slot_size`-chunked writes reduce syscall overhead 2–4× on large KV blocks.
+- **chore(deps)**: Removed unused `futures-util`, `rand_chacha`, `log`, `env_logger` dependencies; replaced with `tokio-stream`, `rand::rngs::StdRng`, and `tracing`/`tracing-subscriber`.
+- **refactor(dispatcher)**: Defined `BoxStream<'a, T>` locally using `std::pin::Pin` + `tokio_stream::Stream`; eliminated `futures-util` import from dispatcher, scheduler, and API layers.
+- **refactor(prefix_cache)**: Replaced custom `Instant::OnceLock` time helper with stdlib `SystemTime::now().duration_since(UNIX_EPOCH)`.
+- **chore**: Bumped version to `1.2.1` across `Cargo.toml`, `pyproject.toml`, `build_air.sh`, `build_air.ps1`, `scripts/tiered_ttft.sh`, `scripts/run_benchmarks.sh`.
 
 ### v1.2.0 — 2026-07-31 — *The Deepening Series*
 
@@ -598,6 +604,8 @@ We welcome structural research contributions!
 - **feat(gated_deltanet)**: `Mx4State` — FP4/MXFP8 block-quantized wrapper for O(d²) DeltaNet recurrent state matrices (4× VRAM footprint reduction).
 - **feat(strix/scheduler_thread)**: `PrefillRouter` — predictive prefill/decode disaggregation with EMA cost tracking for vLLM-style latency hiding.
 - **chore**: Bumped version to `1.2.0` across `Cargo.toml`, `pyproject.toml`, `build_air.sh`, `build_air.ps1`, `scripts/tiered_ttft.sh`.
+
+
 
 ### v1.1.8 — 2026-07-26
 

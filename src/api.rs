@@ -23,7 +23,8 @@ use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::ReceiverStream;
-use futures_util::StreamExt;
+use tokio_stream::StreamExt;
+
 use crate::dispatcher::Dispatcher;
 
 // ---------------------------------------------------------------------------

@@ -1,10 +1,9 @@
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
-use crate::dispatcher::{GenerateConfig, TokenChunk, FinishReason, Dispatcher};
+use crate::dispatcher::{GenerateConfig, TokenChunk, FinishReason, Dispatcher, BoxStream};
 use crate::generator::InferenceGenerator;
 use crate::tokenizer::Tokenizer;
 use crate::weight_streamer::WeightStreamer;
-use futures_util::stream::BoxStream;
 use anyhow::Result;
 
 /// A high-leverage orchestrator for multiple concurrent inference requests.
