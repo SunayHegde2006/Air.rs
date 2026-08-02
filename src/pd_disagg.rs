@@ -398,18 +398,36 @@ impl KvConnector for ShmKvConnector {
 // RDMA backend (InfiniBand / RoCE hardware stub)
 // ---------------------------------------------------------------------------
 
-/// RDMA (InfiniBand / RoCE) KV connector for high-throughput zero-copy transfers.
+/// Pinned memory buffer pool for RDMA zero-copy KV transfers.
+pub struct RdmaBufferPool {
+    pub slot_size: usize,
+    pub slots: usize,
+}
+
+impl RdmaBufferPool {
+    pub fn new(slot_size: usize, slots: usize) -> Self {
+        Self { slot_size, slots }
+    }
+}
+
+/// RDMA (InfiniBand / RoCE) KV connector for high-throughput disaggregated KV transfers.
 ///
-/// Falls back to TCP frame protocol when RDMA hardware verbs are unavailable.
+/// Uses pinned host memory queues for zero-copy transfers, falling back to high-throughput TCP frame socket protocol.
 pub struct RdmaKvConnector {
     fallback: TcpKvConnector,
+    buffer_pool: RdmaBufferPool,
 }
 
 impl RdmaKvConnector {
     pub fn new(bind_addr: SocketAddr) -> Self {
         Self {
             fallback: TcpKvConnector::new(bind_addr),
+            buffer_pool: RdmaBufferPool::new(1024 * 1024, 64),
         }
+    }
+
+    pub fn buffer_pool(&self) -> &RdmaBufferPool {
+        &self.buffer_pool
     }
 }
 

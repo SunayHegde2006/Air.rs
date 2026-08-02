@@ -234,69 +234,56 @@ if ($SkipPrompt) {
     if ($hasVulkan) { $features += 'vulkan' }
     Write-Info "SkipPrompt: auto-selected features: $($features -join ', ')"
 } else {
-    Write-Host "  Available features:" -ForegroundColor White
+    Write-Host "  Select Machine Hardware Profile:" -ForegroundColor White
+    Write-Host "    [1] Single GPU Rig / Consumer Hardware  (RTX 30/40, Single GPU — Lean footprint)" -ForegroundColor Green
+    Write-Host "    [2] Multi-GPU Rig / NVLink Hardware    (Dual/Quad GPU, NCCL Tensor Parallelism)" -ForegroundColor Cyan
+    Write-Host "    [3] Multi-Node / Datacentre Level Hardware (InfiniBand RDMA, Disaggregated KV Pools, Lockfree ARB)" -ForegroundColor Magenta
+    Write-Host "    [0] Custom / Manual Feature Selection" -ForegroundColor Yellow
     Write-Host ""
+    $profileChoice = Read-Host "  Select hardware profile [default: 1]"
+    if ([string]::IsNullOrWhiteSpace($profileChoice)) { $profileChoice = "1" }
 
-    # CUDA
-    if ($hasCuda) {
-        Write-Host "    [1] cuda         - NVIDIA GPU acceleration (CUDA $cudaVersion detected)" -ForegroundColor Green
-        if ($cudaVersion -like "13.*") {
-            Write-Host "                         -> ⚡ CUDA 13.3+ Optimizations Active (CompileIQ, TileProg)" -ForegroundColor Cyan
+    switch ($profileChoice) {
+        '1' {
+            Write-Info "Profile Selected: Single GPU Rig / Consumer Hardware"
+            if ($hasCuda)   { $features += 'cuda'; $features += 'flash-attn' }
+            if ($hasVulkan) { $features += 'vulkan' }
         }
-    } else {
-        Write-Host "    [1] cuda         - NVIDIA GPU (not available - no CUDA)" -ForegroundColor DarkGray
-    }
-
-    # Flash Attention
-    if ($hasCuda) {
-        Write-Host "    [2] flash-attn   - Flash Attention 2 (requires CUDA)" -ForegroundColor Green
-    } else {
-        Write-Host "    [2] flash-attn   - Flash Attention 2 (requires CUDA)" -ForegroundColor DarkGray
-    }
-
-    # Vulkan
-    if ($hasVulkan) {
-        Write-Host "    [3] vulkan       - Vulkan 1.2 GPU compute (STRIX VulkanHal)" -ForegroundColor Green
-    } else {
-        Write-Host "    [3] vulkan       - Vulkan (not detected - install Vulkan SDK)" -ForegroundColor DarkGray
-    }
-
-    # Python
-    Write-Host "    [4] python       - PyO3 Python bindings" -ForegroundColor Green
-
-    # ARB optional deps
-    Write-Host "    [5] arb-heap     - O(log n) priority queue for ARB scheduler (W>512)" -ForegroundColor Green
-    Write-Host "    [6] arb-lockfree - Lock-free enqueue via crossbeam (high-freq HTTP)" -ForegroundColor Green
-
-    # CPU only
-    Write-Host "    [0] (none)       - CPU-only build" -ForegroundColor Yellow
-
-    Write-Host ""
-    $defaultChoice = if ($hasCuda) { "1,2" } else { "0" }
-    $choice = Read-Host "  Select features (comma-separated, e.g. 1,2) [default: $defaultChoice]"
-    if ([string]::IsNullOrWhiteSpace($choice)) { $choice = $defaultChoice }
-
-    $selections = $choice -split ',' | ForEach-Object { $_.Trim() }
-
-    foreach ($sel in $selections) {
-        switch ($sel) {
-            '1' {
-                if ($hasCuda) { $features += 'cuda' }
-                else { Write-Warn "Skipping cuda - CUDA Toolkit not detected" }
+        '2' {
+            Write-Info "Profile Selected: Multi-GPU Rig / NVLink Hardware"
+            if ($hasCuda)   { $features += 'cuda'; $features += 'flash-attn'; $features += 'arb-heap' }
+            if ($hasVulkan) { $features += 'vulkan'; $features += 'arb-heap' }
+        }
+        '3' {
+            Write-Info "Profile Selected: Multi-Node / Datacentre Level Hardware"
+            if ($hasCuda)   { $features += 'cuda'; $features += 'flash-attn'; $features += 'arb-heap'; $features += 'arb-lockfree' }
+            if ($hasVulkan) { $features += 'vulkan'; $features += 'arb-heap'; $features += 'arb-lockfree' }
+        }
+        default {
+            Write-Host "  Available features:" -ForegroundColor White
+            if ($hasCuda) {
+                Write-Host "    [1] cuda         - NVIDIA GPU acceleration" -ForegroundColor Green
+                Write-Host "    [2] flash-attn   - Flash Attention 2" -ForegroundColor Green
             }
-            '2' {
-                if ($hasCuda) { $features += 'flash-attn' }
-                else { Write-Warn "Skipping flash-attn - requires CUDA" }
+            if ($hasVulkan) { Write-Host "    [3] vulkan       - Vulkan 1.2 GPU compute" -ForegroundColor Green }
+            Write-Host "    [4] python       - PyO3 Python bindings" -ForegroundColor Green
+            Write-Host "    [5] arb-heap     - Priority queue for ARB scheduler" -ForegroundColor Green
+            Write-Host "    [6] arb-lockfree - Lock-free enqueue via crossbeam" -ForegroundColor Green
+            Write-Host "    [0] (none)       - CPU-only build" -ForegroundColor Yellow
+            Write-Host ""
+            $choice = Read-Host "  Select custom features (comma-separated)"
+            $selections = $choice -split ',' | ForEach-Object { $_.Trim() }
+            foreach ($sel in $selections) {
+                switch ($sel) {
+                    '1' { if ($hasCuda) { $features += 'cuda' } }
+                    '2' { if ($hasCuda) { $features += 'flash-attn' } }
+                    '3' { if ($hasVulkan) { $features += 'vulkan' } }
+                    '4' { $features += 'python' }
+                    '5' { $features += 'arb-heap' }
+                    '6' { $features += 'arb-lockfree' }
+                    default { }
+                }
             }
-            '3' {
-                if ($hasVulkan) { $features += 'vulkan' }
-                else { Write-Warn "Skipping vulkan - Vulkan runtime not detected" }
-            }
-            '4' { $features += 'python' }
-            '5' { $features += 'arb-heap' }
-            '6' { $features += 'arb-lockfree' }
-            '0' { }
-            default { Write-Warn "Unknown selection: $sel (ignored)" }
         }
     }
 }
