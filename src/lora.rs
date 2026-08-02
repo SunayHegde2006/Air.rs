@@ -240,6 +240,34 @@ impl SharedAdapterCache {
     }
 }
 
+/// Multi-tenant Multi-LoRA pool for batched adapter multiplexing.
+#[derive(Debug, Clone)]
+pub struct MultiLoraPool {
+    pub cache: SharedAdapterCache,
+}
+
+impl MultiLoraPool {
+    pub fn new(vram_budget_bytes: u64) -> Self {
+        Self {
+            cache: SharedAdapterCache::new(vram_budget_bytes),
+        }
+    }
+
+    /// Group incoming batch requests by adapter_id for efficient S-LoRA batching.
+    pub fn group_by_adapter<'a, T>(
+        &self,
+        requests: &'a [T],
+        get_adapter_id: impl Fn(&'a T) -> Option<&'a AdapterId>,
+    ) -> HashMap<Option<AdapterId>, Vec<&'a T>> {
+        let mut grouped: HashMap<Option<AdapterId>, Vec<&'a T>> = HashMap::new();
+        for req in requests {
+            let key = get_adapter_id(req).cloned();
+            grouped.entry(key).or_default().push(req);
+        }
+        grouped
+    }
+}
+
 // ── LoraLinear ────────────────────────────────────────────────────────────
 
 /// A linear layer that applies an optional LoRA adapter delta.

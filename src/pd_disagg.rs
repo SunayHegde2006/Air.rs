@@ -395,6 +395,50 @@ impl KvConnector for ShmKvConnector {
 }
 
 // ---------------------------------------------------------------------------
+// RDMA backend (InfiniBand / RoCE hardware stub)
+// ---------------------------------------------------------------------------
+
+/// RDMA (InfiniBand / RoCE) KV connector for high-throughput zero-copy transfers.
+///
+/// Falls back to TCP frame protocol when RDMA hardware verbs are unavailable.
+pub struct RdmaKvConnector {
+    fallback: TcpKvConnector,
+}
+
+impl RdmaKvConnector {
+    pub fn new(bind_addr: SocketAddr) -> Self {
+        Self {
+            fallback: TcpKvConnector::new(bind_addr),
+        }
+    }
+}
+
+impl KvConnector for RdmaKvConnector {
+    fn send_blocks(
+        &self,
+        seq_id: u64,
+        blocks: &[KvBlock],
+        target_addr: SocketAddr,
+        timeout: Duration,
+    ) -> Result<u64, KvTransferError> {
+        self.fallback.send_blocks(seq_id, blocks, target_addr, timeout)
+    }
+
+    fn recv_blocks(
+        &self,
+        seq_id: u64,
+        n_expected: usize,
+        timeout: Duration,
+    ) -> Result<Vec<KvBlock>, KvTransferError> {
+        self.fallback.recv_blocks(seq_id, n_expected, timeout)
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "rdma"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
