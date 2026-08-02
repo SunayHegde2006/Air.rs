@@ -17,8 +17,16 @@ use std::path::Path;
 #[command(name = "air-rs", version, about)]
 struct Args {
     /// Path to the GGUF model file
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "")]
     model: String,
+
+    /// Pull model from Hugging Face Hub (e.g. "TheBloke/Llama-2-7B-GGUF/llama-2-7b.Q4_K_M.gguf")
+    #[arg(long)]
+    pull: Option<String>,
+
+    /// List locally cached models in registry
+    #[arg(long, default_value_t = false)]
+    list_models: bool,
 
     /// The prompt to generate from
     #[arg(short, long, default_value = "Hello")]
@@ -55,6 +63,44 @@ fn main() -> Result<()> {
     println!();
 
     let args = Args::parse();
+
+    if args.list_models {
+        let registry = air_rs::model_hub::ModelRegistry::load()?;
+        println!("📜 Local Model Registry ({} models):", registry.models.len());
+        for m in registry.list() {
+            println!("  - {} / {} ({})", m.repo_id, m.filename, m.local_path);
+        }
+        return Ok(());
+    }
+
+    if let Some(target) = args.pull {
+        let parts: Vec<&str> = target.split('/').collect();
+        if parts.len() < 3 {
+            anyhow::bail!("Invalid pull target. Format: org/repo/filename");
+        }
+        let repo_id = format!("{}/{}", parts[0], parts[1]);
+        let filename = parts[2..].join("/");
+        println!("📥 Pulling model: {} ({})", repo_id, filename);
+        let res = air_rs::model_hub::download_model(&repo_id, &filename, false, None)?;
+        println!("{res}");
+        let mut registry = air_rs::model_hub::ModelRegistry::load()?;
+        registry.add(air_rs::model_hub::ModelEntry {
+            repo_id,
+            filename: filename.clone(),
+            local_path: res.local_path.to_string_lossy().into(),
+            size_bytes: res.size_bytes,
+            sha256: Some(res.sha256),
+            downloaded_at: format!("{:?}", std::time::SystemTime::now()),
+            alias: None,
+        });
+        registry.save()?;
+        return Ok(());
+    }
+
+    if args.model.is_empty() {
+        println!("No model specified. Use --model <path> or --pull <org/repo/file> or --help");
+        return Ok(());
+    }
 
     // 1. Parse GGUF metadata (config + tokenizer) via loader
     println!("📂 Loading model metadata: {}", args.model);

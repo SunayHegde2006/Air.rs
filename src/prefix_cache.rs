@@ -64,6 +64,8 @@ pub struct RadixNode {
     pub last_access: AtomicU64,
     /// Total number of accesses — used by LFU eviction.
     pub access_count: AtomicU64,
+    /// Tenant identifier for multi-tenant isolation.
+    pub tenant_id: Option<String>,
 }
 
 impl RadixNode {
@@ -75,6 +77,7 @@ impl RadixNode {
             ref_count: AtomicUsize::new(0),
             last_access: AtomicU64::new(now_millis()),
             access_count: AtomicU64::new(1),
+            tenant_id: None,
         }
     }
 
@@ -160,20 +163,28 @@ impl RadixCache {
     // -----------------------------------------------------------------------
 
     /// Find the longest prefix of `tokens` already cached.
-    ///
-    /// Returns `(matched_len, kv_block_ids)` where:
-    /// - `matched_len` is the number of leading tokens whose KV is cached.
-    /// - `kv_block_ids` is the concatenated list of block ids for those tokens.
-    ///
-    /// A miss (nothing cached) returns `(0, vec![])`.
     pub fn longest_prefix_match(&self, tokens: &[u32]) -> (usize, Vec<u32>) {
+        self.longest_prefix_match_for_tenant(tokens, None)
+    }
+
+    /// Insert a mapping from `tokens` to `kv_block_ids`.
+    pub fn insert(&self, tokens: &[u32], kv_block_ids: &[u32]) {
+        self.insert_for_tenant(tokens, kv_block_ids, None);
+    }
+
+    /// Find the longest prefix match enforcing tenant isolation if specified.
+    pub fn longest_prefix_match_for_tenant(
+        &self,
+        tokens: &[u32],
+        tenant_id: Option<&str>,
+    ) -> (usize, Vec<u32>) {
         if tokens.is_empty() {
             self.misses.fetch_add(1, Ordering::Relaxed);
             return (0, vec![]);
         }
 
         let root = self.root.read().expect("root lock poisoned");
-        let (matched, blocks) = self.walk_for_match(&root, tokens, 0);
+        let (matched, blocks) = self.walk_for_match_tenant(&root, tokens, 0, tenant_id);
 
         if matched == 0 {
             self.misses.fetch_add(1, Ordering::Relaxed);
@@ -181,6 +192,144 @@ impl RadixCache {
             self.hits.fetch_add(1, Ordering::Relaxed);
         }
         (matched, blocks)
+    }
+
+    fn walk_for_match_tenant(
+        &self,
+        node: &RadixNode,
+        remaining: &[u32],
+        depth: usize,
+        tenant_id: Option<&str>,
+    ) -> (usize, Vec<u32>) {
+        if remaining.is_empty() {
+            return (depth, vec![]);
+        }
+
+        let first = remaining[0];
+        let child_arc = match node.children.get(&first) {
+            Some(arc) => arc.clone(),
+            None => return (depth, vec![]),
+        };
+
+        let child = child_arc.read().expect("child lock poisoned");
+        // Enforce tenant boundary: if child is marked with a tenant, it must match
+        if let (Some(node_tenant), Some(req_tenant)) = (&child.tenant_id, tenant_id) {
+            if node_tenant != req_tenant {
+                return (depth, vec![]);
+            }
+        }
+        child.touch();
+
+        let edge = &child.token_ids;
+        let common = edge
+            .iter()
+            .zip(remaining.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+
+        if common < edge.len() {
+            let partial_blocks = child.kv_block_ids[..common.min(child.kv_block_ids.len())].to_vec();
+            return (depth + common, partial_blocks);
+        }
+
+        let mut blocks = child.kv_block_ids.clone();
+        let (deeper_match, deeper_blocks) =
+            self.walk_for_match_tenant(&child, &remaining[common..], depth + common, tenant_id);
+
+        blocks.extend(deeper_blocks);
+        (deeper_match, blocks)
+    }
+
+    /// Insert mapping with optional tenant_id for tenant isolation.
+    pub fn insert_for_tenant(&self, tokens: &[u32], kv_block_ids: &[u32], tenant_id: Option<&str>) {
+        if tokens.is_empty() || kv_block_ids.is_empty() {
+            return;
+        }
+        let n_new_blocks = kv_block_ids.len();
+
+        if self.total_blocks.load(Ordering::Relaxed) + n_new_blocks > self.max_blocks {
+            self.evict_until(n_new_blocks);
+        }
+
+        let mut root = self.root.write().expect("root lock poisoned");
+        self.insert_into_tenant(&mut root, tokens, kv_block_ids, tenant_id);
+        self.total_blocks.fetch_add(n_new_blocks, Ordering::Relaxed);
+    }
+
+    fn insert_into_tenant(&self, node: &mut RadixNode, tokens: &[u32], kv_blocks: &[u32], tenant_id: Option<&str>) {
+        if tokens.is_empty() {
+            return;
+        }
+        let first = tokens[0];
+
+        if let Some(child_arc) = node.children.get(&first) {
+            let mut child = child_arc.write().expect("child lock poisoned");
+            let edge = child.token_ids.clone();
+            let common = edge
+                .iter()
+                .zip(tokens.iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+
+            if common == edge.len() {
+                let remaining_tokens = &tokens[common..];
+                let remaining_blocks = if kv_blocks.len() >= common {
+                    &kv_blocks[common..]
+                } else {
+                    &[]
+                };
+                self.insert_into_tenant(&mut child, remaining_tokens, remaining_blocks, tenant_id);
+            } else {
+                let split_tokens = edge[..common].to_vec();
+                let split_blocks = child.kv_block_ids[..common.min(child.kv_block_ids.len())].to_vec();
+
+                let old_tail_tokens = edge[common..].to_vec();
+                let old_tail_blocks = child.kv_block_ids[common.min(child.kv_block_ids.len())..].to_vec();
+                let old_tail_first = old_tail_tokens[0];
+
+                let old_grandchild = RadixNode {
+                    token_ids: old_tail_tokens,
+                    kv_block_ids: old_tail_blocks,
+                    children: std::mem::take(&mut child.children),
+                    ref_count: AtomicUsize::new(0),
+                    last_access: AtomicU64::new(now_millis()),
+                    access_count: AtomicU64::new(1),
+                    tenant_id: child.tenant_id.clone(),
+                };
+
+                let new_tail_tokens = tokens[common..].to_vec();
+                let new_tail_blocks = if kv_blocks.len() >= common {
+                    kv_blocks[common..].to_vec()
+                } else {
+                    vec![]
+                };
+                let new_tail_first = if new_tail_tokens.is_empty() {
+                    u32::MAX
+                } else {
+                    new_tail_tokens[0]
+                };
+
+                child.token_ids = split_tokens;
+                child.kv_block_ids = split_blocks;
+                child.children.clear();
+                child
+                    .children
+                    .insert(old_tail_first, Arc::new(RwLock::new(old_grandchild)));
+
+                if !new_tail_tokens.is_empty() {
+                    let mut new_node = RadixNode::new(new_tail_tokens, new_tail_blocks);
+                    new_node.tenant_id = tenant_id.map(String::from);
+                    child.children.insert(
+                        new_tail_first,
+                        Arc::new(RwLock::new(new_node)),
+                    );
+                }
+            }
+        } else {
+            let mut new_node = RadixNode::new(tokens.to_vec(), kv_blocks.to_vec());
+            new_node.tenant_id = tenant_id.map(String::from);
+            node.children.insert(first, Arc::new(RwLock::new(new_node)));
+        }
     }
 
     fn walk_for_match(
@@ -223,111 +372,6 @@ impl RadixCache {
 
         blocks.extend(deeper_blocks);
         (deeper_match, blocks)
-    }
-
-    // -----------------------------------------------------------------------
-    // Insert
-    // -----------------------------------------------------------------------
-
-    /// Insert a mapping from `tokens` → `kv_block_ids` into the trie.
-    ///
-    /// Performs Patricia split if necessary. No-op if already cached.
-    pub fn insert(&self, tokens: &[u32], kv_block_ids: &[u32]) {
-        if tokens.is_empty() || kv_block_ids.is_empty() {
-            return;
-        }
-        let n_new_blocks = kv_block_ids.len();
-
-        // Evict if over budget before inserting.
-        if self.total_blocks.load(Ordering::Relaxed) + n_new_blocks > self.max_blocks {
-            self.evict_until(n_new_blocks);
-        }
-
-        let mut root = self.root.write().expect("root lock poisoned");
-        self.insert_into(&mut root, tokens, kv_block_ids);
-        self.total_blocks.fetch_add(n_new_blocks, Ordering::Relaxed);
-    }
-
-    fn insert_into(&self, node: &mut RadixNode, tokens: &[u32], kv_blocks: &[u32]) {
-        if tokens.is_empty() {
-            return;
-        }
-
-        let first = tokens[0];
-
-        if let Some(child_arc) = node.children.get(&first) {
-            let mut child = child_arc.write().expect("child lock poisoned");
-
-            // Find common prefix length between existing edge and new tokens.
-            let edge = child.token_ids.clone();
-            let common = edge
-                .iter()
-                .zip(tokens.iter())
-                .take_while(|(a, b)| a == b)
-                .count();
-
-            if common == edge.len() {
-                // Full match on this edge: recurse.
-                let remaining_tokens = &tokens[common..];
-                let remaining_blocks = if kv_blocks.len() >= common {
-                    &kv_blocks[common..]
-                } else {
-                    &[]
-                };
-                self.insert_into(&mut child, remaining_tokens, remaining_blocks);
-            } else {
-                // Partial match: Patricia split.
-                // 1. Shrink current child to `common` prefix.
-                let split_tokens = edge[..common].to_vec();
-                let split_blocks = child.kv_block_ids[..common.min(child.kv_block_ids.len())].to_vec();
-
-                // 2. Old remainder becomes a new grandchild.
-                let old_tail_tokens = edge[common..].to_vec();
-                let old_tail_blocks = child.kv_block_ids[common.min(child.kv_block_ids.len())..].to_vec();
-                let old_tail_first = old_tail_tokens[0];
-
-                let old_grandchild = RadixNode {
-                    token_ids: old_tail_tokens,
-                    kv_block_ids: old_tail_blocks,
-                    children: std::mem::take(&mut child.children),
-                    ref_count: AtomicUsize::new(0),
-                    last_access: AtomicU64::new(now_millis()),
-                    access_count: AtomicU64::new(1),
-                };
-
-                // 3. New remainder becomes another new grandchild.
-                let new_tail_tokens = tokens[common..].to_vec();
-                let new_tail_blocks = if kv_blocks.len() >= common {
-                    kv_blocks[common..].to_vec()
-                } else {
-                    vec![]
-                };
-                let new_tail_first = if new_tail_tokens.is_empty() {
-                    u32::MAX
-                } else {
-                    new_tail_tokens[0]
-                };
-
-                // 4. Rewrite the current child as the split node.
-                child.token_ids = split_tokens;
-                child.kv_block_ids = split_blocks;
-                child.children.clear();
-                child
-                    .children
-                    .insert(old_tail_first, Arc::new(RwLock::new(old_grandchild)));
-
-                if !new_tail_tokens.is_empty() {
-                    child.children.insert(
-                        new_tail_first,
-                        Arc::new(RwLock::new(RadixNode::new(new_tail_tokens, new_tail_blocks))),
-                    );
-                }
-            }
-        } else {
-            // No child for this first token: create new leaf.
-            let new_node = RadixNode::new(tokens.to_vec(), kv_blocks.to_vec());
-            node.children.insert(first, Arc::new(RwLock::new(new_node)));
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -625,6 +669,23 @@ mod tests {
         // Empty cache → nothing to free; that's fine — invariant: total <= max.
         assert_eq!(freed, 0);
         assert!(c.stats().total_cached_blocks == 0);
+    }
+
+    #[test]
+    fn test_multi_tenant_isolation() {
+        let c = cache(100);
+        let tokens = vec![1, 2, 3];
+        c.insert_for_tenant(&tokens, &[10, 20, 30], Some("tenant_a"));
+
+        // Match for same tenant succeeds
+        let (len_a, blocks_a) = c.longest_prefix_match_for_tenant(&tokens, Some("tenant_a"));
+        assert_eq!(len_a, 3);
+        assert_eq!(blocks_a, vec![10, 20, 30]);
+
+        // Match for different tenant is isolated (0 match)
+        let (len_b, blocks_b) = c.longest_prefix_match_for_tenant(&tokens, Some("tenant_b"));
+        assert_eq!(len_b, 0);
+        assert!(blocks_b.is_empty());
     }
 
     // Verify Send + Sync

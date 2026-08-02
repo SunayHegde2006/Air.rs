@@ -356,3 +356,50 @@ impl GgufLoader {
         Tokenizer::new(tokens, merges, bos_id, eos_id)
     }
 }
+
+/// Loader for standard Safetensors model weights (.safetensors format).
+pub struct SafetensorsLoader {
+    pub tensors: HashMap<String, TensorRecord>,
+    pub metadata: HashMap<String, String>,
+}
+
+impl SafetensorsLoader {
+    /// Load tensor records from a Safetensors file.
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let file_bytes = std::fs::read(path.as_ref())
+            .with_context(|| format!("Failed to read safetensors file: {:?}", path.as_ref()))?;
+
+        let st = safetensors::SafeTensors::deserialize(&file_bytes)
+            .map_err(|e| anyhow::anyhow!("Safetensors deserialisation failed: {e}"))?;
+
+        let mut tensors = HashMap::new();
+        for (name, view) in st.tensors() {
+            let shape = view.shape().to_vec();
+            let size_in_bytes = view.data().len() as u64;
+            let ggml_dtype = match view.dtype() {
+                safetensors::Dtype::F32 => candle_core::quantized::GgmlDType::F32,
+                safetensors::Dtype::F16 => candle_core::quantized::GgmlDType::F16,
+                _ => candle_core::quantized::GgmlDType::F16,
+            };
+
+            tensors.insert(
+                name.clone(),
+                TensorRecord {
+                    name,
+                    shape,
+                    ggml_dtype,
+                    absolute_offset: 0, // In-memory view offset
+                    size_in_bytes,
+                },
+            );
+        }
+
+        println!("[SafetensorsLoader] Mapped {} tensors from file.", tensors.len());
+
+        Ok(Self {
+            tensors,
+            metadata: HashMap::new(),
+        })
+    }
+}
+

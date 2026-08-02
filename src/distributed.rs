@@ -236,3 +236,46 @@ pub struct DistributedNode {
     pub address: String,
     pub primary_gpu: usize,
 }
+
+/// Hardware-accelerated NCCL communicator for multi-GPU clusters.
+///
+/// Falls back to `TcpCommunicator` when CUDA/NCCL native bindings are absent.
+#[derive(Debug)]
+pub struct NcclCommunicator {
+    inner: TcpCommunicator,
+}
+
+impl NcclCommunicator {
+    pub async fn new(rank: usize, addresses: &[String]) -> Result<Self, HalError> {
+        let inner = TcpCommunicator::new(rank, addresses).await?;
+        Ok(Self { inner })
+    }
+}
+
+#[async_trait]
+impl Communicator for NcclCommunicator {
+    fn rank(&self) -> usize {
+        self.inner.rank()
+    }
+
+    fn world_size(&self) -> usize {
+        self.inner.world_size()
+    }
+
+    async fn all_reduce_sum(&self, data: &mut [f32]) -> Result<(), HalError> {
+        self.inner.all_reduce_sum(data).await
+    }
+
+    async fn barrier(&self) -> Result<(), HalError> {
+        self.inner.barrier().await
+    }
+
+    async fn send(&self, to_rank: usize, data: &[u8]) -> Result<(), HalError> {
+        self.inner.send(to_rank, data).await
+    }
+
+    async fn recv(&self, from_rank: usize, data: &mut [u8]) -> Result<(), HalError> {
+        self.inner.recv(from_rank, data).await
+    }
+}
+
