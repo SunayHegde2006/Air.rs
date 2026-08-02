@@ -56,62 +56,8 @@ struct CuFileStatus {
 /// These symbols are resolved at link time against `libcufile.so`.
 /// When the `cuda` feature is disabled, none of this code compiles.
 #[cfg(all(feature = "cuda", feature = "gds"))]
-mod cufile_ffi {
-    use super::*;
+use crate::strix::cufile_ffi;
 
-    #[cfg(all(feature = "cuda", feature = "gds"))]
-    #[link(name = "cufile")]
-    extern "C" {
-        /// Initialize the cuFile driver.
-        pub fn cuFileDriverOpen() -> i32;
-
-        /// Shut down the cuFile driver.
-        pub fn cuFileDriverClose() -> i32;
-
-        /// Register a GPU buffer for cuFile I/O.
-        ///
-        /// `devPtr_base`: device pointer returned by cudaMalloc
-        /// `size`: buffer size in bytes
-        /// `flags`: 0
-        pub fn cuFileBufRegister(
-            dev_ptr_base: *mut u8,
-            size: usize,
-            flags: u32,
-        ) -> i32;
-
-        /// Deregister a GPU buffer.
-        pub fn cuFileBufDeregister(dev_ptr_base: *mut u8) -> i32;
-
-        /// Register a file descriptor for cuFile I/O.
-        ///
-        /// `descr`: cuFile descriptor (wraps the fd)
-        /// Returns opaque cuFile handle or error.
-        pub fn cuFileHandleRegister(
-            handle: *mut std::ffi::c_void,
-            descr: *const CuFileDescr,
-        ) -> i32;
-
-        /// Deregister a file handle.
-        pub fn cuFileHandleDeregister(handle: *mut std::ffi::c_void) -> i32;
-
-        /// Synchronous read: file → GPU VRAM (DMA).
-        ///
-        /// `handle`: registered cuFile handle
-        /// `devPtr_base`: registered device buffer
-        /// `size`: bytes to read
-        /// `file_offset`: offset in the file
-        /// `devPtr_offset`: offset within the device buffer
-        ///
-        /// Returns bytes read (≥0) or negative error code.
-        pub fn cuFileRead(
-            handle: *mut std::ffi::c_void,
-            dev_ptr_base: *mut u8,
-            size: usize,
-            file_offset: i64,
-            dev_ptr_offset: i64,
-        ) -> i64;
-    }
-}
 
 /// Check a cuFile return code.
 #[cfg(feature = "cuda")]
@@ -505,8 +451,8 @@ impl GdsStorageHal {
         // Initialize cuFile driver if available via cuFileDriverOpen.
         #[cfg(all(feature = "cuda", feature = "gds"))]
         let driver_initialized = if capability.is_usable() {
-            let code = unsafe { cufile_ffi::cuFileDriverOpen() };
-            code == 0
+            let status = unsafe { cufile_ffi::cuFileDriverOpen() };
+            status.is_ok()
         } else {
             false
         };
@@ -574,18 +520,20 @@ impl GdsStorageHal {
         gpu_dst: GpuPtr,
         file_path: &str,
         file_offset: u64,
-        size: usize,
+        transfer_size: usize,
     ) -> GdsTransfer {
+        let method = self.select_method(transfer_size);
         GdsTransfer {
             gpu_dst,
             file_path: file_path.to_string(),
             file_offset,
-            transfer_size: size,
+            transfer_size,
             status: GdsTransferStatus::Pending,
-            method: self.select_method(size),
+            method,
             bytes_transferred: 0,
         }
     }
+
 
     /// Submit a GDS transfer for execution.
     ///
@@ -629,21 +577,16 @@ impl GdsStorageHal {
 
         let fd = file.as_raw_fd();
 
-        // Register the file handle with cuFile.
-        let mut descr = CuFileDescr {
-            handle_type: 0, // CU_FILE_HANDLE_TYPE_OPAQUE_FD
-            handle_fd: fd,
-            _padding: [0u8; 256],
-        };
-        let mut cufile_handle: *mut std::ffi::c_void = std::ptr::null_mut();
+        let descr = cufile_ffi::make_descr(fd);
+        let mut cufile_handle: cufile_ffi::CUfileHandle_t = std::ptr::null_mut();
 
         let reg_result = unsafe {
             cufile_ffi::cuFileHandleRegister(
-                &mut cufile_handle as *mut _ as *mut std::ffi::c_void,
-                &descr as *const CuFileDescr,
+                &mut cufile_handle,
+                &descr,
             )
         };
-        if reg_result != 0 {
+        if !reg_result.is_ok() {
             // cuFile registration failed — fall back to pinned path.
             transfer.method = TransferMethod::PinnedHostStaging;
             return self.submit_pinned(transfer);
@@ -652,12 +595,12 @@ impl GdsStorageHal {
         // Register the GPU buffer with cuFile.
         let buf_reg = unsafe {
             cufile_ffi::cuFileBufRegister(
-                transfer.gpu_dst.0 as *mut u8,
+                transfer.gpu_dst.0 as *mut std::ffi::c_void,
                 transfer.transfer_size,
                 0,
             )
         };
-        if buf_reg != 0 {
+        if !buf_reg.is_ok() {
             unsafe { cufile_ffi::cuFileHandleDeregister(cufile_handle) };
             transfer.method = TransferMethod::PinnedHostStaging;
             return self.submit_pinned(transfer);
@@ -668,7 +611,7 @@ impl GdsStorageHal {
         let bytes = unsafe {
             cufile_ffi::cuFileRead(
                 cufile_handle,
-                transfer.gpu_dst.0 as *mut u8,
+                transfer.gpu_dst.0 as *mut std::ffi::c_void,
                 transfer.transfer_size,
                 transfer.file_offset as i64,
                 0, // device buffer offset
@@ -677,7 +620,7 @@ impl GdsStorageHal {
 
         // Cleanup registrations.
         unsafe {
-            cufile_ffi::cuFileBufDeregister(transfer.gpu_dst.0 as *mut u8);
+            let _ = cufile_ffi::cuFileBufDeregister(transfer.gpu_dst.0 as *mut std::ffi::c_void);
             cufile_ffi::cuFileHandleDeregister(cufile_handle);
         }
 
@@ -783,10 +726,11 @@ impl Drop for GdsStorageHal {
         // Close the cuFile driver if we initialized it.
         #[cfg(all(feature = "cuda", feature = "gds"))]
         if self.driver_initialized {
-            unsafe { cufile_ffi::cuFileDriverClose() };
+            unsafe { let _ = cufile_ffi::cuFileDriverClose(); }
         }
     }
 }
+
 
 /// GPUDirect Storage statistics.
 #[derive(Debug, Clone)]

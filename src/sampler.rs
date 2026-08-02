@@ -5,8 +5,7 @@
 //! off between quality, diversity, and determinism.
 
 use candle_core::{DType, Result, Tensor, D};
-use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha8Rng;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 /// Configuration for the sampling strategy.
 #[derive(Clone, Debug)]
@@ -49,16 +48,17 @@ impl SamplerConfig {
 /// Samples the next token from model logits.
 pub struct Sampler {
     config: SamplerConfig,
-    rng: ChaCha8Rng,
+    rng: StdRng,
 }
 
 impl Sampler {
     pub fn new(config: SamplerConfig) -> Self {
         Self {
             config,
-            rng: ChaCha8Rng::from_entropy(),
+            rng: StdRng::from_entropy(),
         }
     }
+
 
     pub fn config(&self) -> &SamplerConfig {
         &self.config

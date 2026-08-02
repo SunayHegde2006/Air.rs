@@ -181,7 +181,7 @@ OUT_FILE="$OUT_DIR/ttft_${TIMESTAMP}.json"
 printf '{\n'
 printf '  "bench_version": "%s",\n'    "$BENCH_VERSION"
 printf '  "timestamp":     "%s",\n'    "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '  "air_rs_version": "%s",\n'   "1.2.0"
+printf '  "air_rs_version": "%s",\n'   "1.2.1"
 printf '  "gpu":           "%s",\n'    "$GPU"
 printf '  "cpu":           "%s",\n'    "$CPU"
 printf '  "runs_per_model": %d,\n'     "$RUNS"

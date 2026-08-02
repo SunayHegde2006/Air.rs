@@ -17,7 +17,7 @@
 #   (YaRN, chunked-attn, Whisper, OCS algos are always compiled-in, CUDA 13.3 optimized)
 # =============================================================================
 
-BENCH_VERSION="1.2.0  # v0.8.0 feature set"
+BENCH_VERSION="1.2.1  # v0.8.0 feature set"
 
 set -euo pipefail
 

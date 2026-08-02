@@ -1,6 +1,6 @@
 [package]
 name = "air-rs"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 authors = ["Sunay Hegde"]
 description = "A high-performance, memory-fluid LLM inference engine."
@@ -31,15 +31,13 @@ safetensors = "0.5.2"
 # API & Utilities
 axum = { version = "0.7", features = ["default"] }
 tokio-stream = "0.1"
-futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
 thiserror = "2.0"
 dashmap = "6.1"
 rayon = "1.10"
-rand = { version = "0.8", features = ["small_rng"] }
-rand_chacha = "0.3"
+rand = { version = "0.8", features = ["small_rng", "std_rng"] }
 
 # §13 optional ARB performance deps (feature-gated, default = std-only)
 ordered-float = { version = "4.2", optional = true }
@@ -51,24 +49,26 @@ dirs = "5.0"
 ureq = { version = "2.10", default-features = false, features = ["tls", "gzip"] }
 sha2 = "0.10"
 uuid = { version = "1.10", features = ["v4"] }
-log = "0.4"
-env_logger = "0.11"
 clap = { version = "4.5", features = ["derive"] }
 tracing = "0.1"
 async-trait = "0.1"
 tracing-subscriber = "0.3"
 
+
+
+
 [features]
 default = []
 cuda = ["candle-core/cuda", "dep:cudarc"]
-rocm = []
-vulkan = []
-sycl = []
-mojo = []
+rocm = [] # Enables ROCm/HIP HAL backend (src/strix/rocm_hal.rs)
+vulkan = [] # Enables Vulkan 1.2 compute block & HAL (src/vulkan_block.rs, src/strix/vulkan_hal.rs)
+sycl = [] # Enables SYCL hardware execution queue (SyclBlock in src/blocks.rs)
+mojo = [] # Enables Modular Mojo & MAX graph execution (MojoBlock in src/blocks.rs)
 metal = ["candle-core/metal"]
 flash-attn = ["candle-flash-attn"]
-gds = []
+gds = ["cuda"] # Enables cuFile GPUDirect Storage NVMe-to-VRAM DMA (src/strix/gpu_direct.rs, src/strix/cufile_ffi.rs)
 python = ["pyo3"]
+
 # §13 optional performance deps
 # Enable BinaryHeap-based O(log n) priority queue for waiting queue (W > 512)
 arb-heap = ["dep:ordered-float"]
