@@ -582,6 +582,15 @@ We welcome structural research contributions!
 
 ## Changelog
 
+### v1.2.1 — 2026-08-02 — *Multi-Tenant, Safetensors & Hardware Profile Release*
+
+- **feat(prefix_cache)**: Multi-Tenant Radix Cache — tenant isolation (`longest_prefix_match_for_tenant`) with LRU/LFU eviction strategies.
+- **feat(loader)**: Safetensors Loader — direct zero-copy loading of HuggingFace `.safetensors` model weights.
+- **feat(lora)**: Multi-LoRA Multiplexing — dynamic `MultiLoraPool` S-LoRA style adapter batching per request.
+- **feat(cli)**: Model Registry CLI — added `air-rs pull <org/repo/file>` auto-downloader & `--list-models` registry browser.
+- **feat(distributed)**: Profile B Hardware Kernels — completed `NcclCommunicator` multi-GPU ring reduction & `RdmaKvConnector` zero-copy disaggregated KV pinned memory pools.
+- **feat(build)**: Unified Machine Hardware Profiles — interactive hardware profile selection in `build_air.sh` and `build_air.ps1` (Single GPU Rig, Multi-GPU NVLink Rig, Multi-Node Datacenter).
+
 ### v1.2.0 — 2026-07-31 — *The Deepening Series*
 
 - **feat(ghost_drafting)**: `SpeculativeCheckpointTree` — diff-tree rollbacks replace heavy KV-copy during speculative decoding verification (~40% memory bandwidth reduction).
