@@ -253,81 +253,70 @@ elif $SKIP_PROMPT; then
     info "SkipPrompt: auto-selected: ${FEATURES[*]:-none (CPU)}"
 
 else
-    echo "  Available features:"
+    echo "  Select Machine Hardware Profile:"
+    echo "    ${GREEN}[1] Single GPU Rig / Consumer Hardware${RESET}  (RTX 30/40, Apple Silicon, Single GPU — Lean footprint)"
+    echo "    ${CYAN}[2] Multi-GPU Rig / NVLink Hardware${RESET}    (Dual/Quad GPU, NCCL Tensor Parallelism)"
+    echo "    ${MAGENTA}[3] Multi-Node / Datacentre Level Hardware${RESET} (InfiniBand RDMA, Disaggregated KV Pools, Lockfree ARB)"
+    echo "    ${YELLOW}[0] Custom / Manual Feature Selection${RESET}"
     echo ""
+    read -rp "  Select hardware profile [default: 1]: " HARDWARE_PROFILE
+    HARDWARE_PROFILE="${HARDWARE_PROFILE:-1}"
 
-    if $HAS_CUDA; then
-        echo "${GREEN}    [1] cuda         - NVIDIA GPU acceleration (CUDA $CUDA_VERSION)${RESET}"
-        if [[ $CUDA_VERSION == 13.* ]]; then
-            echo "${CYAN}                         -> ⚡ CUDA 13.3+ Optimizations Active (CompileIQ, TileProg)${RESET}"
-        fi
-        echo "${GREEN}    [2] flash-attn   - Flash Attention 2 (requires cuda)${RESET}"
-    else
-        echo "${BOLD}    [1] cuda         - NVIDIA GPU (not available — CUDA not detected)${RESET}"
-        echo "${BOLD}    [2] flash-attn   - Flash Attention 2 (requires cuda)${RESET}"
-    fi
-
-    if $HAS_METAL; then
-        echo "${GREEN}    [3] metal        - Apple Metal GPU (Apple Silicon)${RESET}"
-    else
-        echo "${BOLD}    [3] metal        - Apple Metal (not available on this system)${RESET}"
-    fi
-
-    if $HAS_ROCM; then
-        echo "${GREEN}    [4] rocm         - AMD GPU via ROCm/HIP${RESET}"
-    else
-        echo "${BOLD}    [4] rocm         - AMD ROCm (not detected)${RESET}"
-    fi
-
-    if $HAS_VULKAN; then
-        echo "${GREEN}    [5] vulkan       - Vulkan 1.2 GPU compute (STRIX VulkanHal)${RESET}"
-    else
-        echo "${BOLD}    [5] vulkan       - Vulkan (not detected — install vulkan-tools)${RESET}"
-    fi
-
-    echo "${GREEN}    [6] python       - PyO3 Python bindings${RESET}"
-    echo "${GREEN}    [7] arb-heap     - O(log n) priority queue for ARB scheduler (W>512)${RESET}"
-    echo "${GREEN}    [8] arb-lockfree - Lock-free enqueue via crossbeam (high-freq HTTP)${RESET}"
-    echo "${YELLOW}    [0] (none)       - CPU-only build${RESET}"
-    echo ""
-
-    # Default suggestion
-    DEFAULT=""
-    $HAS_CUDA   && DEFAULT="1,2"
-    $HAS_METAL  && DEFAULT="${DEFAULT:+$DEFAULT,}3"
-    $HAS_ROCM   && DEFAULT="${DEFAULT:+$DEFAULT,}4"
-    $HAS_VULKAN && DEFAULT="${DEFAULT:+$DEFAULT,}5"
-    DEFAULT="${DEFAULT:-0}"
-
-    read -rp "  Select features (comma-separated, e.g. 1,2) [default: $DEFAULT]: " CHOICE
-    CHOICE="${CHOICE:-$DEFAULT}"
-
-    IFS=',' read -ra SELECTIONS <<< "$CHOICE"
-    for sel in "${SELECTIONS[@]}"; do
-        sel="${sel// /}"
-        case "$sel" in
-            1)
-                if $HAS_CUDA; then FEATURES+=("cuda")
-                else warn "Skipping cuda — CUDA Toolkit not detected"; fi ;;
-            2)
-                if $HAS_CUDA; then FEATURES+=("flash-attn")
-                else warn "Skipping flash-attn — requires CUDA"; fi ;;
-            3)
-                if $HAS_METAL; then FEATURES+=("metal")
-                else warn "Skipping metal — not available on this system"; fi ;;
-            4)
-                if $HAS_ROCM; then FEATURES+=("rocm")
-                else warn "Skipping rocm — ROCm not detected"; fi ;;
-            5)
-                if $HAS_VULKAN; then FEATURES+=("vulkan")
-                else warn "Skipping vulkan — runtime not detected"; fi ;;
-            6) FEATURES+=("python") ;;
-            7) FEATURES+=("arb-heap") ;;
-            8) FEATURES+=("arb-lockfree") ;;
-            0) ;;
-            *) warn "Unknown selection: $sel (ignored)" ;;
-        esac
-    done
+    case "$HARDWARE_PROFILE" in
+        1)
+            info "Profile Selected: Single GPU Rig / Consumer Hardware"
+            $HAS_CUDA   && FEATURES+=("cuda" "flash-attn")
+            $HAS_METAL  && FEATURES+=("metal")
+            $HAS_ROCM   && FEATURES+=("rocm")
+            $HAS_VULKAN && FEATURES+=("vulkan")
+            ;;
+        2)
+            info "Profile Selected: Multi-GPU Rig / NVLink Hardware"
+            $HAS_CUDA   && FEATURES+=("cuda" "flash-attn" "arb-heap")
+            $HAS_METAL  && FEATURES+=("metal" "arb-heap")
+            $HAS_ROCM   && FEATURES+=("rocm" "arb-heap")
+            $HAS_VULKAN && FEATURES+=("vulkan" "arb-heap")
+            ;;
+        3)
+            info "Profile Selected: Multi-Node / Datacentre Level Hardware"
+            $HAS_CUDA   && FEATURES+=("cuda" "flash-attn" "arb-heap" "arb-lockfree")
+            $HAS_METAL  && FEATURES+=("metal" "arb-heap" "arb-lockfree")
+            $HAS_ROCM   && FEATURES+=("rocm" "arb-heap" "arb-lockfree")
+            $HAS_VULKAN && FEATURES+=("vulkan" "arb-heap" "arb-lockfree")
+            ;;
+        *)
+            echo "  Available features:"
+            echo ""
+            if $HAS_CUDA; then
+                echo "${GREEN}    [1] cuda         - NVIDIA GPU acceleration (CUDA $CUDA_VERSION)${RESET}"
+                echo "${GREEN}    [2] flash-attn   - Flash Attention 2 (requires cuda)${RESET}"
+            fi
+            if $HAS_METAL; then echo "${GREEN}    [3] metal        - Apple Metal GPU (Apple Silicon)${RESET}"; fi
+            if $HAS_ROCM; then echo "${GREEN}    [4] rocm         - AMD GPU via ROCm/HIP${RESET}"; fi
+            if $HAS_VULKAN; then echo "${GREEN}    [5] vulkan       - Vulkan 1.2 GPU compute${RESET}"; fi
+            echo "${GREEN}    [6] python       - PyO3 Python bindings${RESET}"
+            echo "${GREEN}    [7] arb-heap     - Priority queue for ARB scheduler${RESET}"
+            echo "${GREEN}    [8] arb-lockfree - Lock-free enqueue via crossbeam${RESET}"
+            echo "${YELLOW}    [0] (none)       - CPU-only build${RESET}"
+            echo ""
+            read -rp "  Select custom features (comma-separated): " CHOICE
+            IFS=',' read -ra SELECTIONS <<< "$CHOICE"
+            for sel in "${SELECTIONS[@]}"; do
+                sel="${sel// /}"
+                case "$sel" in
+                    1) $HAS_CUDA && FEATURES+=("cuda") ;;
+                    2) $HAS_CUDA && FEATURES+=("flash-attn") ;;
+                    3) $HAS_METAL && FEATURES+=("metal") ;;
+                    4) $HAS_ROCM && FEATURES+=("rocm") ;;
+                    5) $HAS_VULKAN && FEATURES+=("vulkan") ;;
+                    6) FEATURES+=("python") ;;
+                    7) FEATURES+=("arb-heap") ;;
+                    8) FEATURES+=("arb-lockfree") ;;
+                    *) ;;
+                esac
+            done
+            ;;
+    esac
 fi
 
 # Build profile
