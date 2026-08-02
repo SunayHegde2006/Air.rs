@@ -107,3 +107,13 @@ harness = false
 name = "air-rs"
 path = "src/bin/air_rs.rs"
 required-features = []
+
+[[bin]]
+name = "candle-diag"
+path = "src/bin/candle_diag.rs"
+required-features = []
+
+[[bin]]
+name = "air-probe"
+path = "src/bin/probe.rs"
+required-features = []
