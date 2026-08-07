@@ -215,7 +215,7 @@ def shutdown_stream_executor(wait: bool = True) -> None:
         _STREAM_EXECUTOR = None
 
 
-def load(target: str, **kwargs) -> Engine:
+def load(target: str, **kwargs: object) -> "Engine":
     """Zero-config high-level helper to load an Engine from a path, HF repo ID, or alias.
 
     Examples
