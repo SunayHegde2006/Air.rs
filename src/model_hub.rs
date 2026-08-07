@@ -120,8 +120,9 @@ impl ModelRegistry {
 
     fn registry_path() -> Result<PathBuf> {
         let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from)
-            .context("Cannot determine home directory ($HOME not set)")?;
+            .context("Cannot determine home directory ($HOME / %USERPROFILE% not set)")?;
         Ok(home.join(REGISTRY_FILE))
     }
 
@@ -166,8 +167,9 @@ pub fn download_url(repo_id: &str, filename: &str) -> String {
 /// Construct the local path for a model file.
 pub fn model_path(repo_id: &str, filename: &str) -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-        .context("Cannot determine home directory ($HOME not set)")?;
+        .context("Cannot determine home directory ($HOME / %USERPROFILE% not set)")?;
     Ok(home.join(MODELS_DIR).join(repo_id).join(filename))
 }
 

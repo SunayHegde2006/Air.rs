@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner-github.png" alt="Air.rs Banner" width="800"/>
+  <img src="https://raw.githubusercontent.com/SunayHegde2006/Air.rs/main/assets/banner-github.png" alt="Air.rs Banner" width="800"/>
 </p>
 
 <h1 align="center">Air.rs</h1>
