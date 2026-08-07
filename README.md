@@ -40,6 +40,13 @@
 - [Installation Quickstart](#installation-quickstart)
   - [Python API Installation](#python-api-installation-recommended)
   - [Async Streaming](#async-streaming-astream-for-fastapi)
+- [✨ v1.2.2 New Features](#-v122-new-features)
+  - [Zero-Config Run (`air-rs --run`)](#zero-config-run-air-rs---run)
+  - [Interactive TUI REPL (`--interactive`)](#interactive-tui-repl---interactive)
+  - [Concurrent OpenAI REST Server (`--serve`)](#concurrent-openai-rest-server---serve)
+  - [TLS / HTTPS (`--tls-cert` / `--tls-key`)](#tls--https----tls-cert----tls-key)
+  - [Python `air_rs.load()`](#python-air_rsload)
+  - [Metal Compute Kernels](#metal-compute-kernels-apple-silicon)
 - [Feature Details](#feature-details)
   - [Core Features & Quantization](#-core-features--quantization)
   - [Security, Enterprise & Observability](#️-security-enterprise-compliance--observability)
@@ -53,6 +60,7 @@
 - [Contributing](#contributing)
 - [Changelog](#changelog)
 - [Citation & Licensing](#citation--licensing)
+
 
 ---
 
@@ -348,7 +356,128 @@ asyncio.run(main())
 
 ---
 
+## ✨ v1.2.2 New Features
+
+<details>
+<summary><strong>Zero-Config Run (<code>air-rs --run</code>)</strong></summary>
+
+One command replaces the previous 3-step pull → configure → serve flow:
+
+```sh
+# By local GGUF path
+air-rs --run ./llama-3.2-3b.Q4_K_M.gguf
+
+# From registry alias (after pull)
+air-rs --run llama-3.2-3b
+
+# Raw HuggingFace target
+air-rs --run TheBloke/Llama-2-7B-GGUF/llama-2-7b.Q4_K_M.gguf
+```
+
+Resolves: local path → registry alias → HuggingFace download automatically.
+
+</details>
+
+<details>
+<summary><strong>Interactive TUI REPL (<code>--interactive</code>)</strong></summary>
+
+Run a full multi-turn terminal chat session with streaming output, throughput stats, and slash commands:
+
+```sh
+air-rs --run llama.gguf --interactive
+```
+
+**Slash commands in REPL:**
+
+| Command | Description |
+|---|---|
+| `/help` | Show all commands |
+| `/clear` | Clear conversation history |
+| `/stats` | Show generation statistics |
+| `/temp 0.5` | Set temperature |
+| `/exit` | Exit the REPL |
+
+</details>
+
+<details>
+<summary><strong>Concurrent OpenAI REST Server (<code>--serve</code>)</strong></summary>
+
+Spawn a full OpenAI-compatible server in the background while the REPL or single-inference mode runs in the foreground:
+
+```sh
+# Start background server + REPL
+air-rs --run llama.gguf --serve --interactive
+
+# Background server only, single inference
+air-rs --run llama.gguf --serve --port 9000
+
+# Default port is 8080
+air-rs serve --model llama.gguf --port 8080
+```
+
+Endpoints available: `POST /v1/chat/completions`, `POST /v1/completions`, `GET /v1/models`, `GET /health`.
+
+</details>
+
+<details>
+<summary><strong>TLS / HTTPS (<code>--tls-cert</code> / <code>--tls-key</code>)</strong></summary>
+
+Pass PEM certificate and key to serve endpoints over HTTPS via Rustls (no OpenSSL required):
+
+```sh
+air-rs serve --model llama.gguf \
+  --tls-cert /etc/ssl/certs/server.pem \
+  --tls-key  /etc/ssl/private/server.key \
+  --port 443 --host 0.0.0.0
+```
+
+- Both `--tls-cert` and `--tls-key` must be specified together (validation error if one is missing).
+- Without flags: plain HTTP as before.
+- Certificate format: standard PEM (use `openssl req -x509 -newkey rsa:4096 -nodes -keyout server.key -out server.pem -days 365` for self-signed).
+
+</details>
+
+<details>
+<summary><strong>Python <code>air_rs.load()</code></strong></summary>
+
+Zero-config high-level Python helper — no need to call `Engine.from_gguf()` directly:
+
+```python
+import air_rs
+
+# From path or alias
+engine = air_rs.load("path/to/model.gguf")
+print(engine.generate("Explain attention in one sentence."))
+
+# Streaming
+async for token in air_rs.astream(engine, "Once upon a time"):
+    print(token, end="", flush=True)
+```
+
+</details>
+
+<details>
+<summary><strong>Metal Compute Kernels (Apple Silicon)</strong></summary>
+
+Production Metal Shading Language (MSL) kernels for Apple Silicon M1/M2/M3/M4:
+
+| Kernel | Description |
+|---|---|
+| `deltanet_recurrence` | DeltaNet state update `H_t = α·H_{t-1} + β·(k·v^T)` + query projection |
+| `rms_norm` | Fast GPU RMSNorm with `rsqrt` instruction |
+| `silu_mul` | SwiGLU fused activation (`g / (1 + expf(-g)) × up`) |
+
+Enable with:
+```sh
+cargo build --release --features metal
+```
+
+</details>
+
+---
+
 ## Feature Details
+
 
 <details>
 <summary><strong>⚡ Core Features & Quantization</strong></summary>
@@ -582,6 +711,16 @@ We welcome structural research contributions!
 
 ## Changelog
 
+### v1.2.2 — 2026-08-07 — *Zero-Config UX, TUI REPL, REST Server & TLS Release*
+
+- **feat(cli)**: Zero-Config CLI Entry Point (`air-rs --run <target>`) — auto-resolves local GGUF paths, registry aliases, and Hugging Face repositories seamlessly.
+- **feat(tui)**: Interactive TUI REPL (`air-rs --run <target> --interactive`) — multi-turn chat with streaming output, live throughput stats, status bar, and slash commands (`/help`, `/clear`, `/temp`, `/stats`, `/exit`).
+- **feat(server)**: Background OpenAI REST Server (`--serve`) — concurrent background Axum server execution alongside CLI generation or interactive REPL sessions.
+- **feat(tls)**: Hardware/Production TLS Provisioning (`--tls-cert` & `--tls-key`) — native PEM certificate and private key support via Rustls for secure HTTPS REST API deployment.
+- **feat(sdk)**: Zero-Config Python SDK (`air_rs.load(target)`) — high-level entry point for direct `Engine` loading from paths or aliases.
+- **feat(metal)**: Metal Compute Acceleration — production Metal Shading Language (MSL) kernels for DeltaNet recurrence, RMSNorm, and SwiGLU on Apple Silicon.
+- **chore**: Bumped version to `1.2.2` across `Cargo.toml`, `pyproject.toml`, `build_air.sh`, `build_air.ps1`, `scripts/tiered_ttft.sh`, `scripts/run_benchmarks.sh`.
+
 ### v1.2.1 — 2026-08-02 — *Multi-Tenant, Safetensors & Hardware Profile, Lean & Complete Release*
 
 - **feat(prefix_cache)**: Multi-Tenant Radix Cache — tenant isolation (`longest_prefix_match_for_tenant`) with LRU/LFU eviction strategies.
@@ -605,17 +744,6 @@ We welcome structural research contributions!
 - **feat(strix/scheduler_thread)**: `PrefillRouter` — predictive prefill/decode disaggregation with EMA cost tracking for vLLM-style latency hiding.
 - **chore**: Bumped version to `1.2.0` across `Cargo.toml`, `pyproject.toml`, `build_air.sh`, `build_air.ps1`, `scripts/tiered_ttft.sh`.
 
-
-
-### v1.1.8 — 2026-07-26
-
-- **fix(weight_streamer)**: `prism_dequant_tensor` now covers all standard GGUF quant types (Q4_K, Q4_0, Q8_0, Q8_K, Q2_K, Q3_K, Q5_K, Q6_K, F16, F32) via `candle GgmlType::to_float`. Previously only Q1_0/Q2_0 (PrismML Bonsai) were handled, causing a hard crash on IQ4_XS models like `Qwen3.6-27B-IQ4_XS.gguf`.
-- **refactor(api)**: Removed stub `DELETE /v1/models/:id` endpoint and `DeleteModelResponse` — route returned unconditional `deleted: true` without unloading weights.
-- **chore**: Pruned dead deps (`jsonwebtoken`, `base64`, `hmac`) and resolved full ponytail debt ledger.
-
-### v1.1.7 — 2026-07-22
-
-- Initial stable release with CDSC speculative council, S.L.I.P. weight streamer, IQ4_XS/Q4_K loader (via PrismML path), and VRAM guard.
 
 ---
 

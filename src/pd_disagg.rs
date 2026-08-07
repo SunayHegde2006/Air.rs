@@ -453,13 +453,17 @@ pub struct RdmaKvConnector {
 
 impl RdmaKvConnector {
     pub fn new(bind_addr: SocketAddr) -> Self {
+        Self::new_with_pool(bind_addr, 1024 * 1024, 64)
+    }
+
+    pub fn new_with_pool(bind_addr: SocketAddr, slot_size: usize, slots: usize) -> Self {
         Self {
             bind_addr,
-            // ponytail: 1 MiB slots × 64 slots; tune slot_size to match target NIC MTU or ibv MR granularity.
-            buffer_pool: std::sync::Mutex::new(RdmaBufferPool::new(1024 * 1024, 64)),
+            buffer_pool: std::sync::Mutex::new(RdmaBufferPool::new(slot_size, slots)),
             store: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+
 
     /// Start a background accept loop (same protocol as TCP connector).
     pub fn start_listener(&self) -> io::Result<()> {

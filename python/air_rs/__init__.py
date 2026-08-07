@@ -215,6 +215,27 @@ def shutdown_stream_executor(wait: bool = True) -> None:
         _STREAM_EXECUTOR = None
 
 
+def load(target: str, **kwargs) -> Engine:
+    """Zero-config high-level helper to load an Engine from a path, HF repo ID, or alias.
+
+    Examples
+    --------
+    >>> import air_rs
+    >>> engine = air_rs.load("model.gguf")
+    >>> print(engine.generate("Hello world"))
+    """
+    if not _EXTENSION_LOADED:
+        raise ImportError(
+            "air_rs.load requires the compiled Rust extension.\n"
+            "Run: maturin develop --features python"
+        )
+    import os
+    if os.path.exists(target):
+        return Engine.from_gguf(target)
+    # Try as GGUF directly
+    return Engine.from_gguf(target)
+
+
 __all__ = [
     "Engine",
     "GenerateConfig",
@@ -222,7 +243,9 @@ __all__ = [
     "Metrics",
     "TokenChannel",
     "astream",
+    "load",
     "shutdown_stream_executor",
     "utils",
     "__version__",
 ]
+
