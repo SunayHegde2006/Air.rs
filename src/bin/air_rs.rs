@@ -35,6 +35,10 @@ struct ServeConfig {
     chat_template: Option<String>,
     enable_prefix_caching: bool,
     max_num_seqs: Option<usize>,
+    /// PEM certificate file path for TLS (requires --tls-key too)
+    tls_cert: Option<String>,
+    /// PEM private key file path for TLS (requires --tls-cert too)
+    tls_key: Option<String>,
 }
 
 #[derive(Debug)]
@@ -156,6 +160,15 @@ fn parse_serve(args: &[String]) -> Result<Command, String> {
     let host = opt_arg(args, "--host", "-H")
         .unwrap_or_else(|| "127.0.0.1".to_string());
 
+    // Validate TLS: both cert and key must be specified together.
+    let tls_cert = opt_arg(args, "--tls-cert", "");
+    let tls_key  = opt_arg(args, "--tls-key", "");
+    match (&tls_cert, &tls_key) {
+        (Some(_), None) => return Err("--tls-cert requires --tls-key".into()),
+        (None, Some(_)) => return Err("--tls-key requires --tls-cert".into()),
+        _ => {}
+    }
+
     let cfg = ServeConfig {
         ctx_size: opt_arg(args, "--ctx-size", "")
             .map(|s| s.parse::<usize>().map_err(|_| "invalid --ctx-size".to_string()))
@@ -173,6 +186,8 @@ fn parse_serve(args: &[String]) -> Result<Command, String> {
         max_num_seqs: opt_arg(args, "--max-num-seqs", "--max-batch-size")
             .map(|s| s.parse::<usize>().map_err(|_| "invalid --max-num-seqs".to_string()))
             .transpose()?,
+        tls_cert,
+        tls_key,
     };
 
     Ok(Command::Serve { model: PathBuf::from(model), port, host, cfg })
@@ -378,13 +393,20 @@ fn run_serve(
     cfg: &ServeConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Loading model metadata for server: {}", model.display());
-    eprintln!("Endpoints:");
-    eprintln!("  POST http://{host}:{port}/v1/chat/completions");
-    eprintln!("  POST http://{host}:{port}/v1/completions");
-    eprintln!("  GET  http://{host}:{port}/v1/models");
-    eprintln!("  GET  http://{host}:{port}/health");
 
-    // Competitor-parity startup banner
+    let tls_enabled = cfg.tls_cert.is_some();
+    let scheme = if tls_enabled { "https" } else { "http" };
+    eprintln!("Endpoints:");
+    eprintln!("  POST {scheme}://{host}:{port}/v1/chat/completions");
+    eprintln!("  POST {scheme}://{host}:{port}/v1/completions");
+    eprintln!("  GET  {scheme}://{host}:{port}/v1/models");
+    eprintln!("  GET  {scheme}://{host}:{port}/health");
+
+    if tls_enabled {
+        eprintln!("  [tls] cert={} key={}",
+            cfg.tls_cert.as_deref().unwrap_or(""),
+            cfg.tls_key.as_deref().unwrap_or(""));
+    }
     if cfg.auto_tool_choice {
         eprintln!("  [tools] Auto tool-choice enabled (parser={})", cfg.tool_call_parser.as_deref().unwrap_or("auto"));
     }
@@ -432,14 +454,37 @@ fn run_serve(
         streamer,
     ));
 
-    rt.block_on(async {
-        let app = air_rs::api::create_router_with_dispatcher(model_name, dispatcher);
-        let addr = format!("{}:{}", host, port);
-        eprintln!("Starting HTTP server on {addr}");
-        let listener = tokio::net::TcpListener::bind(&addr).await?;
-        axum::serve(listener, app).await?;
-        Ok::<(), Box<dyn std::error::Error>>(())
-    })?;
+    let addr: std::net::SocketAddr = format!("{}:{}", host, port).parse()?;
+
+    if let (Some(cert_path), Some(key_path)) = (&cfg.tls_cert, &cfg.tls_key) {
+        // TLS path: load PEM cert + key, serve via rustls.
+        let cert_pem = std::fs::read(cert_path)
+            .map_err(|e| format!("failed to read --tls-cert {cert_path}: {e}"))?;
+        let key_pem = std::fs::read(key_path)
+            .map_err(|e| format!("failed to read --tls-key {key_path}: {e}"))?;
+
+        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(cert_pem, key_pem);
+
+        rt.block_on(async {
+            let app = air_rs::api::create_router_with_dispatcher(model_name, dispatcher);
+            eprintln!("Starting HTTPS server on {addr}");
+            let tls_cfg = tls_config.await
+                .map_err(|e| format!("TLS config error: {e}"))?;
+            axum_server::bind_rustls(addr, tls_cfg)
+                .serve(app.into_make_service())
+                .await
+                .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))
+        })?;
+    } else {
+        // Plain HTTP path.
+        rt.block_on(async {
+            let app = air_rs::api::create_router_with_dispatcher(model_name, dispatcher);
+            eprintln!("Starting HTTP server on {addr}");
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            axum::serve(listener, app).await?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
+    }
 
     Ok(())
 }

@@ -119,9 +119,12 @@ impl ModelRegistry {
     }
 
     fn registry_path() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("Cannot determine home directory")?;
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .context("Cannot determine home directory ($HOME not set)")?;
         Ok(home.join(REGISTRY_FILE))
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -162,9 +165,12 @@ pub fn download_url(repo_id: &str, filename: &str) -> String {
 
 /// Construct the local path for a model file.
 pub fn model_path(repo_id: &str, filename: &str) -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Cannot determine home directory")?;
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("Cannot determine home directory ($HOME not set)")?;
     Ok(home.join(MODELS_DIR).join(repo_id).join(filename))
 }
+
 
 /// Check if a model file already exists locally.
 pub fn is_cached(repo_id: &str, filename: &str) -> Result<bool> {
