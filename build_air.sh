@@ -297,6 +297,11 @@ else
             echo "${GREEN}    [6] python       - PyO3 Python bindings${RESET}"
             echo "${GREEN}    [7] arb-heap     - Priority queue for ARB scheduler${RESET}"
             echo "${GREEN}    [8] arb-lockfree - Lock-free enqueue via crossbeam${RESET}"
+            echo "${GREEN}    [9] sycl         - Intel OneAPI / SYCL acceleration${RESET}"
+            echo "${GREEN}    [10] mojo        - Modular Mojo / MAX compute graph execution${RESET}"
+            if $HAS_CUDA; then
+                echo "${GREEN}    [11] gds         - GPUDirect Storage NVMe-to-VRAM DMA (requires cuda)${RESET}"
+            fi
             echo "${YELLOW}    [0] (none)       - CPU-only build${RESET}"
             echo ""
             read -rp "  Select custom features (comma-separated): " CHOICE
@@ -312,9 +317,13 @@ else
                     6) FEATURES+=("python") ;;
                     7) FEATURES+=("arb-heap") ;;
                     8) FEATURES+=("arb-lockfree") ;;
+                    9) FEATURES+=("sycl") ;;
+                    10) FEATURES+=("mojo") ;;
+                    11) $HAS_CUDA && FEATURES+=("gds") ;;
                     *) ;;
                 esac
             done
+
             ;;
     esac
 fi
