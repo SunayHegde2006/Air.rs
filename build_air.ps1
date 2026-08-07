@@ -269,6 +269,10 @@ if ($SkipPrompt) {
             Write-Host "    [4] python       - PyO3 Python bindings" -ForegroundColor Green
             Write-Host "    [5] arb-heap     - Priority queue for ARB scheduler" -ForegroundColor Green
             Write-Host "    [6] arb-lockfree - Lock-free enqueue via crossbeam" -ForegroundColor Green
+            Write-Host "    [7] sycl         - Intel OneAPI / SYCL acceleration" -ForegroundColor Green
+            Write-Host "    [8] mojo        - Modular Mojo / MAX compute graph execution" -ForegroundColor Green
+            if ($hasCuda) { Write-Host "    [9] gds          - GPUDirect Storage NVMe-to-VRAM DMA" -ForegroundColor Green }
+            Write-Host "    [10] rocm        - AMD GPU via ROCm/HIP" -ForegroundColor Green
             Write-Host "    [0] (none)       - CPU-only build" -ForegroundColor Yellow
             Write-Host ""
             $choice = Read-Host "  Select custom features (comma-separated)"
@@ -281,12 +285,17 @@ if ($SkipPrompt) {
                     '4' { $features += 'python' }
                     '5' { $features += 'arb-heap' }
                     '6' { $features += 'arb-lockfree' }
+                    '7' { $features += 'sycl' }
+                    '8' { $features += 'mojo' }
+                    '9' { if ($hasCuda) { $features += 'gds' } }
+                    '10' { $features += 'rocm' }
                     default { }
                 }
             }
         }
     }
 }
+
 
 # Determine build profile
 $buildProfile = if ($DebugBuild) { "" } else { "--release" }
