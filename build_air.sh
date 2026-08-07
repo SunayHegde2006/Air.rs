@@ -428,7 +428,12 @@ echo "${GREEN}  [✓] Evaluation Gates (CI Guard)        ${RESET}(HellaSwag/MMLU
 echo "${GREEN}  [✓] Whisper Production Pipeline        ${RESET}(Beam Search, whisper.rs)"
 echo "${GREEN}  [✓] Self-Healing CUDA 13 Logic         ${RESET}(Transparent bindings, v1.1.4)"
 echo "${GREEN}  [✓] GPU ISA Targeting (sm_XX)           ${RESET}(Arch-optimised kernels, v1.1.5)"
+echo "${GREEN}  [✓] Zero-Config CLI Entry Point        ${RESET}(air-rs --run <target>, air_rs.rs)"
+echo "${GREEN}  [✓] Interactive TUI REPL               ${RESET}(air-rs --interactive, tui.rs)"
+echo "${GREEN}  [✓] Concurrent REST Server + TLS       ${RESET}(--serve --tls-cert, api.rs)"
+echo "${GREEN}  [✓] Metal MSL Compute Kernels          ${RESET}(DeltaNet/RMSNorm/SwiGLU, kernels.metal)"
 echo ""
+
 
 BUILD_START=$(date +%s)
 if eval "$CMD"; then
