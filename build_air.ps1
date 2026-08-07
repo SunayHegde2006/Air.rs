@@ -373,7 +373,12 @@ Write-Host "  [+] Evaluation Gates (CI Guard)        (HellaSwag/MMLU, eval.rs)" 
 Write-Host "  [+] Whisper Production Pipeline        (Beam Search, whisper.rs)" -ForegroundColor Green
 Write-Host "  [+] Self-Healing CUDA 13 Logic         (Transparent bindings, v1.1.4)" -ForegroundColor Green
 Write-Host "  [+] GPU ISA Targeting (sm_XX)           (Arch-optimised kernels, v1.1.5)" -ForegroundColor Green
+Write-Host "  [+] Zero-Config CLI Entry Point        (air-rs --run <target>, air_rs.rs)" -ForegroundColor Green
+Write-Host "  [+] Interactive TUI REPL               (air-rs --interactive, tui.rs)" -ForegroundColor Green
+Write-Host "  [+] Concurrent REST Server + TLS       (--serve --tls-cert, api.rs)" -ForegroundColor Green
+Write-Host "  [+] Metal MSL Compute Kernels          (DeltaNet/RMSNorm/SwiGLU, kernels.metal)" -ForegroundColor Green
 Write-Host ""
+
 
 # Execute build
 $buildStart = Get-Date
