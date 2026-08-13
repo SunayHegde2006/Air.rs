@@ -1,8 +1,0 @@
-version: 1
-default_repo: air.rs
-repos:
-- path: .
-  alias: air.rs
-  is_primary: true
-  indexed_at: '2026-08-02T16:11:20.815081+00:00'
-  last_commit_at_index: ea283a4c7bde3db13a473e567e9fc738e35d44b6
