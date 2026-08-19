@@ -17,6 +17,7 @@ use air_rs::loader::GgufLoader;
 use air_rs::sampler::SamplerConfig;
 use air_rs::weight_streamer::WeightStreamer;
 use air_rs::scheduler::RequestOrchestrator;
+use air_rs::speculative::{SpeculativeDecoder, SpeculativeConfig};
 
 
 // ── CLI argument parsing (hand-rolled, no external dep) ────────────────────
@@ -35,10 +36,24 @@ struct ServeConfig {
     chat_template: Option<String>,
     enable_prefix_caching: bool,
     max_num_seqs: Option<usize>,
+    /// Path to draft GGUF model for speculative decoding (--model-draft / -md)
+    model_draft: Option<String>,
+    /// Max draft tokens per speculative step (--draft-max)
+    draft_max: usize,
     /// PEM certificate file path for TLS (requires --tls-key too)
     tls_cert: Option<String>,
     /// PEM private key file path for TLS (requires --tls-cert too)
     tls_key: Option<String>,
+    /// GPUDirect Storage (cuFile DMA) enabled
+    gds: bool,
+    /// Enable HBM-aware KV-cache CPU swap for long contexts
+    kv_swap: bool,
+    /// Bytes per KV block for CPU swap buffer (default: 65536 = 64KB)
+    kv_swap_block_bytes: usize,
+    /// Universal Ternary Resident Model Engine enabled
+    ternary: bool,
+    /// Ternary CDSC Self-Speculation enabled
+    ternary_cdsc: bool,
 }
 
 #[derive(Debug)]
@@ -55,12 +70,19 @@ enum Command {
         tp: usize,
         council: bool,
         epsilon: f32,
+        model_draft: Option<PathBuf>,
+        draft_max: usize,
         auto_tool_choice: bool,
         tool_call_parser: Option<String>,
         reasoning_format: Option<String>,
         guided_decoding_backend: Option<String>,
         chat_template: Option<String>,
         enable_prefix_caching: bool,
+        gds: bool,
+        kv_swap: bool,
+        kv_swap_block_bytes: usize,
+        ternary: bool,
+        ternary_cdsc: bool,
     },
     Serve {
         model: PathBuf,
@@ -75,6 +97,7 @@ enum Command {
         ctx_size: Option<usize>,
         resident: bool,
         tp: usize,
+        gds: bool,
     },
     Info {
         model: PathBuf,
@@ -124,12 +147,23 @@ fn parse_generate(args: &[String]) -> Result<Command, String> {
     let epsilon = opt_arg(args, "--epsilon", "")
         .map(|s| s.parse::<f32>().map_err(|_| "invalid --epsilon".to_string()))
         .unwrap_or(Ok(0.15))?;
+    let model_draft = opt_arg(args, "--model-draft", "-md").map(PathBuf::from);
+    let draft_max = opt_arg(args, "--draft-max", "")
+        .map(|s| s.parse::<usize>().map_err(|_| "invalid --draft-max".to_string()))
+        .unwrap_or(Ok(5))?;
     let auto_tool_choice = args.iter().any(|a| a == "--enable-auto-tool-choice" || a == "--auto-tool-selection");
     let tool_call_parser = opt_arg(args, "--tool-call-parser", "--tool-parser");
     let reasoning_format = opt_arg(args, "--reasoning-format", "--reasoning-parser");
     let guided_decoding_backend = opt_arg(args, "--guided-decoding-backend", "--guided-decoding");
     let chat_template = opt_arg(args, "--chat-template", "");
     let enable_prefix_caching = args.iter().any(|a| a == "--enable-prefix-caching" || a == "--prefix-caching");
+    let gds = args.iter().any(|a| a == "--gds" || a == "--gds-dma");
+    let kv_swap = args.iter().any(|a| a == "--kv-swap");
+    let kv_swap_block_bytes = opt_arg(args, "--kv-swap-block-kb", "")
+        .map(|s| s.parse::<usize>().map_err(|_| "invalid --kv-swap-block-kb".to_string()))
+        .unwrap_or(Ok(64))? * 1024;
+    let ternary = args.iter().any(|a| a == "--ternary" || a == "--bitnet");
+    let ternary_cdsc = args.iter().any(|a| a == "--ternary-cdsc");
 
     Ok(Command::Generate {
         model: PathBuf::from(model),
@@ -143,12 +177,19 @@ fn parse_generate(args: &[String]) -> Result<Command, String> {
         tp,
         council,
         epsilon,
+        model_draft,
+        draft_max,
         auto_tool_choice,
         tool_call_parser,
         reasoning_format,
         guided_decoding_backend,
         chat_template,
         enable_prefix_caching,
+        gds,
+        kv_swap,
+        kv_swap_block_bytes,
+        ternary,
+        ternary_cdsc,
     })
 }
 
@@ -186,8 +227,19 @@ fn parse_serve(args: &[String]) -> Result<Command, String> {
         max_num_seqs: opt_arg(args, "--max-num-seqs", "--max-batch-size")
             .map(|s| s.parse::<usize>().map_err(|_| "invalid --max-num-seqs".to_string()))
             .transpose()?,
+        model_draft: opt_arg(args, "--model-draft", "-md"),
+        draft_max: opt_arg(args, "--draft-max", "")
+            .map(|s| s.parse::<usize>().map_err(|_| "invalid --draft-max".to_string()))
+            .unwrap_or(Ok(5))?,
         tls_cert,
         tls_key,
+        gds: args.iter().any(|a| a == "--gds" || a == "--gds-dma"),
+        kv_swap: args.iter().any(|a| a == "--kv-swap"),
+        kv_swap_block_bytes: opt_arg(args, "--kv-swap-block-kb", "")
+            .map(|s| s.parse::<usize>().map_err(|_| "invalid --kv-swap-block-kb".to_string()))
+            .unwrap_or(Ok(64))? * 1024,
+        ternary: args.iter().any(|a| a == "--ternary" || a == "--bitnet"),
+        ternary_cdsc: args.iter().any(|a| a == "--ternary-cdsc"),
     };
 
     Ok(Command::Serve { model: PathBuf::from(model), port, host, cfg })
@@ -208,6 +260,7 @@ fn parse_bench(args: &[String]) -> Result<Command, String> {
     let tp = opt_arg(args, "--tp", "")
         .map(|s| s.parse::<usize>().map_err(|_| "invalid --tp".to_string()))
         .unwrap_or(Ok(1))?;
+    let gds = args.iter().any(|a| a == "--gds" || a == "--gds-dma");
     Ok(Command::Bench {
         model: PathBuf::from(model),
         n_tokens,
@@ -215,6 +268,7 @@ fn parse_bench(args: &[String]) -> Result<Command, String> {
         ctx_size,
         resident,
         tp,
+        gds,
     })
 }
 
@@ -263,6 +317,8 @@ GENERATE OPTIONS:
       --tp <n>                        Tensor Parallelism GPUs (default: 1)
       --council                       Enable Consensus-Driven Speculative Council (CDSC)
       --epsilon <f>                   JSD threshold for CDSC (default: 0.15)
+  -md, --model-draft <path>           Path to draft GGUF for speculative decoding
+      --draft-max <n>                 Max draft tokens per speculative step (default: 5)
       --enable-auto-tool-choice       Model automatically decides when to call tools
       --tool-call-parser <name>       Tool-call parser: llama3_json | hermes | mistral | deepseekv3
       --reasoning-format <fmt>        Reasoning trace format: none | deepseek | auto
@@ -318,17 +374,28 @@ fn run_generate(
     tp: usize,
     council: bool,
     epsilon: f32,
+    model_draft: Option<PathBuf>,
+    draft_max: usize,
     auto_tool_choice: bool,
     tool_call_parser: Option<String>,
     reasoning_format: Option<String>,
     guided_decoding_backend: Option<String>,
     chat_template: Option<String>,
     enable_prefix_caching: bool,
+    gds: bool,
+    kv_swap: bool,
+    kv_swap_block_bytes: usize,
+    ternary: bool,
+    ternary_cdsc: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = (&model_draft, draft_max);
     eprintln!("Loading model: {}", model.display());
     let start = Instant::now();
 
     let streamer = Arc::new(WeightStreamer::open(model)?);
+    if gds {
+        streamer.enable_gds();
+    }
     let loader = GgufLoader::new(model)?;
     let mut config = loader.model_config.clone();
     let tokenizer = loader.tokenizer;
@@ -349,7 +416,7 @@ fn run_generate(
     };
 
     let mut generator = InferenceGenerator::with_streamer(
-        config, sampler_config, candle_core::Device::new_cuda(0)
+        config, sampler_config.clone(), candle_core::Device::new_cuda(0)
             .unwrap_or(candle_core::Device::Cpu),
         Arc::clone(&streamer), None, None,
         resident,
@@ -359,10 +426,22 @@ fn run_generate(
     if council {
         generator.enable_council(epsilon, Some(model.to_string_lossy().to_string()));
     }
+    if kv_swap {
+        generator.enable_kv_swap(4096, kv_swap_block_bytes);
+    }
+    if ternary {
+        generator.enable_ternary();
+    }
+    if ternary_cdsc {
+        generator.enable_ternary_cdsc();
+    }
 
     eprintln!("Engine ready in {:.2}s", start.elapsed().as_secs_f64());
     if council {
         eprintln!("  [CDSC] Speculative Council enabled (epsilon={})", epsilon);
+    }
+    if let Some(ref draft_path) = model_draft {
+        eprintln!("  [speculative] Draft model enabled: {} (max_draft={})", draft_path.display(), draft_max);
     }
     if auto_tool_choice {
         eprintln!("  [tools] Auto tool-choice enabled (parser={})", tool_call_parser.as_deref().unwrap_or("auto"));
@@ -381,7 +460,30 @@ fn run_generate(
     }
     eprintln!("Generating up to {max_tokens} tokens (temp={temperature}, top_p={top_p})…\n");
 
-    let _ = generator.generate(&tokenizer, prompt, max_tokens, &streamer)?;
+    if let Some(ref draft_path) = model_draft {
+        let draft_streamer = Arc::new(WeightStreamer::open(draft_path)?);
+        let draft_loader = GgufLoader::new(draft_path)?;
+        let draft_config = draft_loader.model_config.clone();
+        let mut draft_generator = InferenceGenerator::with_streamer(
+            draft_config,
+            sampler_config.clone(),
+            candle_core::Device::new_cuda(0).unwrap_or(candle_core::Device::Cpu),
+            Arc::clone(&draft_streamer),
+            None,
+            None,
+            resident,
+            tp,
+        )?;
+        let spec_config = SpeculativeConfig {
+            draft_tokens: draft_max,
+            max_draft_tokens: draft_max * 2,
+            min_draft_tokens: 1,
+        };
+        let mut spec_decoder = SpeculativeDecoder::new(&mut generator, &mut draft_generator, spec_config)?;
+        let _ = spec_decoder.generate(&tokenizer, prompt, max_tokens, &streamer, &draft_streamer, None)?;
+    } else {
+        let _ = generator.generate(&tokenizer, prompt, max_tokens, &streamer)?;
+    }
 
     Ok(())
 }
@@ -407,6 +509,9 @@ fn run_serve(
             cfg.tls_cert.as_deref().unwrap_or(""),
             cfg.tls_key.as_deref().unwrap_or(""));
     }
+    if let Some(ref draft_path) = cfg.model_draft {
+        eprintln!("  [speculative] Draft model enabled: {} (max_draft={})", draft_path, cfg.draft_max);
+    }
     if cfg.auto_tool_choice {
         eprintln!("  [tools] Auto tool-choice enabled (parser={})", cfg.tool_call_parser.as_deref().unwrap_or("auto"));
     }
@@ -422,7 +527,8 @@ fn run_serve(
         eprintln!("  [prefix-cache] enabled");
     }
     if let Some(n) = cfg.max_num_seqs {
-        eprintln!("  [scheduler] max-num-seqs={n}");
+        let prefill_budget = air_rs::generator::PREFILL_CHUNK_SIZE;
+        eprintln!("  [scheduler] max-num-seqs={n} prefill-chunk={prefill_budget} (Sarathi chunked-prefill)");
     }
     eprintln!("\nPress Ctrl-C to stop.");
 
@@ -432,6 +538,9 @@ fn run_serve(
 
     let model_name = model.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let streamer = Arc::new(WeightStreamer::open(model)?);
+    if cfg.gds {
+        streamer.enable_gds();
+    }
     let loader = GgufLoader::new(model)?;
     let mut config = loader.model_config.clone();
     let tokenizer = loader.tokenizer;
@@ -440,12 +549,21 @@ fn run_serve(
         config.context_length = ctx;
     }
     let device = candle_core::Device::new_cuda(0).unwrap_or(candle_core::Device::Cpu);
-    let generator = InferenceGenerator::with_streamer(
+    let mut generator = InferenceGenerator::with_streamer(
         config, SamplerConfig::default(), device,
         Arc::clone(&streamer), None, None,
         cfg.resident,
         cfg.tp,
     )?;
+    if cfg.kv_swap {
+        generator.enable_kv_swap(4096, cfg.kv_swap_block_bytes);
+    };
+    if cfg.ternary {
+        generator.enable_ternary();
+    }
+    if cfg.ternary_cdsc {
+        generator.enable_ternary_cdsc();
+    }
 
     let dispatcher = Arc::new(RequestOrchestrator::new(
         model_name.clone(),
@@ -496,10 +614,14 @@ fn run_bench(
     ctx_size: Option<usize>,
     resident: bool,
     tp: usize,
+    gds: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Loading model: {}", model_path.display());
 
     let streamer = Arc::new(WeightStreamer::open(model_path)?);
+    if gds {
+        streamer.enable_gds();
+    }
     let loader = air_rs::loader::GgufLoader::new(model_path)?;
     let mut config = loader.model_config.clone();
     if let Some(ctx) = ctx_size {
@@ -583,14 +705,14 @@ fn main() {
         }
         Ok(cmd) => {
             let result = match cmd {
-                Command::Generate { model, prompt, max_tokens, temperature, top_p, stream, ctx_size, resident, tp, council, epsilon, auto_tool_choice, tool_call_parser, reasoning_format, guided_decoding_backend, chat_template, enable_prefix_caching } => {
-                    run_generate(&model, &prompt, max_tokens, temperature, top_p, stream, ctx_size, resident, tp, council, epsilon, auto_tool_choice, tool_call_parser, reasoning_format, guided_decoding_backend, chat_template, enable_prefix_caching)
+                Command::Generate { model, prompt, max_tokens, temperature, top_p, stream, ctx_size, resident, tp, council, epsilon, model_draft, draft_max, auto_tool_choice, tool_call_parser, reasoning_format, guided_decoding_backend, chat_template, enable_prefix_caching, gds, kv_swap, kv_swap_block_bytes, ternary, ternary_cdsc } => {
+                    run_generate(&model, &prompt, max_tokens, temperature, top_p, stream, ctx_size, resident, tp, council, epsilon, model_draft, draft_max, auto_tool_choice, tool_call_parser, reasoning_format, guided_decoding_backend, chat_template, enable_prefix_caching, gds, kv_swap, kv_swap_block_bytes, ternary, ternary_cdsc)
                 }
                 Command::Serve { model, port, host, cfg } => {
                     run_serve(&model, port, &host, &cfg)
                 }
-                Command::Bench { model, n_tokens, n_runs, ctx_size, resident, tp } => {
-                    run_bench(&model, n_tokens, n_runs, ctx_size, resident, tp)
+                Command::Bench { model, n_tokens, n_runs, ctx_size, resident, tp, gds } => {
+                    run_bench(&model, n_tokens, n_runs, ctx_size, resident, tp, gds)
                 }
                 Command::Info { model } => run_info(&model),
             };

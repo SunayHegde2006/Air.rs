@@ -307,25 +307,34 @@ pub enum ThinkEvent {
     ThinkEnd,
 }
 
-/// Trait abstracting thinking-mode token detection.
-///
-/// Implementors:
-/// - `TagBasedThinking`   — watches byte sequences (`<think>` / `</think>`)
-/// - `SpecialTokenThinking` — watches special token IDs from GGUF vocab
-///
-/// Both are `Send + Sync` so they can live behind `Arc<dyn ThinkingTokenizer>`.
-pub trait ThinkingTokenizer: Send + Sync {
-    /// Process one token.
-    ///
-    /// Returns `Some(ThinkEvent)` if this token caused a thinking state change,
-    /// `None` otherwise. Must be called in order for every generated token.
-    fn process_token(&mut self, token_id: u32, token_text: &str) -> Option<ThinkEvent>;
+/// Enum abstracting thinking-mode token detection.
+#[derive(Clone, Debug)]
+pub enum ThinkingDetector {
+    TagBased(TagBasedThinking),
+    SpecialToken(SpecialTokenThinking),
+}
 
-    /// Reset state (called between inference sessions).
-    fn reset(&mut self);
+impl ThinkingDetector {
+    pub fn process_token(&mut self, token_id: u32, token_text: &str) -> Option<ThinkEvent> {
+        match self {
+            Self::TagBased(t) => t.process_token(token_id, token_text),
+            Self::SpecialToken(t) => t.process_token(token_id, token_text),
+        }
+    }
 
-    /// Whether we are currently inside a thinking block.
-    fn in_think_block(&self) -> bool;
+    pub fn reset(&mut self) {
+        match self {
+            Self::TagBased(t) => t.reset(),
+            Self::SpecialToken(t) => t.reset(),
+        }
+    }
+
+    pub fn in_think_block(&self) -> bool {
+        match self {
+            Self::TagBased(t) => t.in_think_block(),
+            Self::SpecialToken(t) => t.in_think_block(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -333,9 +342,7 @@ pub trait ThinkingTokenizer: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Thinking-mode detector using byte-pattern tag matching.
-///
-/// Uses the existing `ThinkState` state machine. Compatible with Qwen3.6,
-/// DeepSeek-R1, QwQ, and any model using `<think>` / `</think>` tags.
+#[derive(Clone, Debug)]
 pub struct TagBasedThinking {
     state: ThinkState,
     was_in_think: bool,
@@ -345,20 +352,10 @@ impl TagBasedThinking {
     pub fn new() -> Self {
         Self { state: ThinkState::new(), was_in_think: false }
     }
-}
 
-impl Default for TagBasedThinking {
-    fn default() -> Self { Self::new() }
-}
-
-impl ThinkingTokenizer for TagBasedThinking {
-    fn process_token(&mut self, _token_id: u32, token_text: &str) -> Option<ThinkEvent> {
+    pub fn process_token(&mut self, _token_id: u32, token_text: &str) -> Option<ThinkEvent> {
         let before = self.was_in_think;
         self.state.push_token(token_text);
-        // Detect transitions by checking if in_think changed
-        // We approximate by whether the thinking buffer grew this step.
-        // A full transition detection requires peeking into ThinkState internals.
-        // For now: check if text contains an open or close tag.
         let text = token_text.to_lowercase();
         if !before && text.contains("<think>") {
             self.was_in_think = true;
@@ -371,12 +368,12 @@ impl ThinkingTokenizer for TagBasedThinking {
         None
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.state = ThinkState::new();
         self.was_in_think = false;
     }
 
-    fn in_think_block(&self) -> bool {
+    pub fn in_think_block(&self) -> bool {
         self.was_in_think
     }
 }
@@ -394,6 +391,7 @@ impl ThinkingTokenizer for TagBasedThinking {
 /// # Implementation
 /// The struct is fully implemented. The GGUF vocab lookup (`from_vocab_iter`)
 /// populates the ID sets based on Gemma4 token strings.
+#[derive(Clone, Debug)]
 pub struct SpecialTokenThinking {
     /// Token IDs that signal the start of a thinking block.
     pub think_start_ids: HashSet<u32>,
@@ -444,8 +442,8 @@ impl SpecialTokenThinking {
     }
 }
 
-impl ThinkingTokenizer for SpecialTokenThinking {
-    fn process_token(&mut self, token_id: u32, _token_text: &str) -> Option<ThinkEvent> {
+impl SpecialTokenThinking {
+    pub fn process_token(&mut self, token_id: u32, _token_text: &str) -> Option<ThinkEvent> {
         if self.think_start_ids.contains(&token_id) {
             self.in_think = true;
             return Some(ThinkEvent::ThinkStart);
@@ -457,11 +455,11 @@ impl ThinkingTokenizer for SpecialTokenThinking {
         None
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.in_think = false;
     }
 
-    fn in_think_block(&self) -> bool {
+    pub fn in_think_block(&self) -> bool {
         self.in_think
     }
 }

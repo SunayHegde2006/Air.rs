@@ -4,31 +4,27 @@
 //! Pipeline Parallel (PP) execution. Synchronized via the STRIX timeline semaphores.
 
 use crate::strix::hal::HalError;
-use async_trait::async_trait;
+use std::future::Future;
+use std::pin::Pin;
 
 /// Abstract communication backend for distributed orchestration.
-#[async_trait]
 pub trait Communicator: Send + Sync + std::fmt::Debug {
-
-
-
-
     /// Rank of the current node in the world.
     fn rank(&self) -> usize;
     /// Total number of nodes in the world.
     fn world_size(&self) -> usize;
     
     /// Blocking all-reduce operation (sum).
-    async fn all_reduce_sum(&self, data: &mut [f32]) -> Result<(), HalError>;
+    fn all_reduce_sum<'a>(&'a self, data: &'a mut [f32]) -> Pin<Box<dyn Future<Output = Result<(), HalError>> + Send + 'a>>;
     
     /// Synchronize all nodes.
-    async fn barrier(&self) -> Result<(), HalError>;
+    fn barrier<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<(), HalError>> + Send + 'a>>;
     
     /// Send a tensor shard to a specific rank.
-    async fn send(&self, to_rank: usize, data: &[u8]) -> Result<(), HalError>;
+    fn send<'a>(&'a self, to_rank: usize, data: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<(), HalError>> + Send + 'a>>;
     
     /// Receive a tensor shard from a specific rank.
-    async fn recv(&self, from_rank: usize, data: &mut [u8]) -> Result<(), HalError>;
+    fn recv<'a>(&'a self, from_rank: usize, data: &'a mut [u8]) -> Pin<Box<dyn Future<Output = Result<(), HalError>> + Send + 'a>>;
 }
 
 /// Software-agnostic TCP implementation of the [`Communicator`] trait.
@@ -84,146 +80,149 @@ impl TcpCommunicator {
     }
 }
 
-#[async_trait]
 impl Communicator for TcpCommunicator {
-
-
-
-
     fn rank(&self) -> usize { self.rank }
     fn world_size(&self) -> usize { self.world_size }
 
-    async fn all_reduce_sum(&self, data: &mut [f32]) -> Result<(), HalError> {
-        if self.world_size == 1 { return Ok(()); }
-        
-        let chunk_size = (data.len() + self.world_size - 1) / self.world_size;
-        
-        // Ring Reduce-Scatter
-        for i in 0..self.world_size - 1 {
-            let send_chunk_id = (self.rank + self.world_size - i) % self.world_size;
-            let recv_chunk_id = (self.rank + self.world_size - i - 1) % self.world_size;
+    fn all_reduce_sum<'a>(&'a self, data: &'a mut [f32]) -> Pin<Box<dyn Future<Output = Result<(), HalError>> + Send + 'a>> {
+        Box::pin(async move {
+            if self.world_size == 1 { return Ok(()); }
             
-            let send_start = send_chunk_id * chunk_size;
-            let send_end = std::cmp::min(send_start + chunk_size, data.len());
-            let recv_start = recv_chunk_id * chunk_size;
-            let recv_end = std::cmp::min(recv_start + chunk_size, data.len());
-
-            let send_to = (self.rank + 1) % self.world_size;
-            let recv_from = (self.rank + self.world_size - 1) % self.world_size;
-
-            if send_start < data.len() {
-                let send_slice = &data[send_start..send_end];
-                let send_bytes = unsafe { std::slice::from_raw_parts(send_slice.as_ptr() as *const u8, send_slice.len() * 4) };
+            let chunk_size = (data.len() + self.world_size - 1) / self.world_size;
+            
+            // Ring Reduce-Scatter
+            for i in 0..self.world_size - 1 {
+                let send_chunk_id = (self.rank + self.world_size - i) % self.world_size;
+                let recv_chunk_id = (self.rank + self.world_size - i - 1) % self.world_size;
                 
-                let mut recv_buf = vec![0u8; (recv_end - recv_start) * 4];
-                
-                // Concurrent send and receive to prevent deadlock in the ring
-                let (s_res, r_res) = tokio::join!(
-                    self.send(send_to, send_bytes),
-                    self.recv(recv_from, &mut recv_buf)
-                );
-                s_res?; r_res?;
+                let send_start = send_chunk_id * chunk_size;
+                let send_end = std::cmp::min(send_start + chunk_size, data.len());
+                let recv_start = recv_chunk_id * chunk_size;
+                let recv_end = std::cmp::min(recv_start + chunk_size, data.len());
 
-                let recv_vals = unsafe { std::slice::from_raw_parts(recv_buf.as_ptr() as *const f32, recv_end - recv_start) };
-                for (idx, &val) in recv_vals.iter().enumerate() {
-                    data[recv_start + idx] += val;
+                let send_to = (self.rank + 1) % self.world_size;
+                let recv_from = (self.rank + self.world_size - 1) % self.world_size;
+
+                if send_start < data.len() {
+                    let send_slice = &data[send_start..send_end];
+                    let send_bytes = unsafe { std::slice::from_raw_parts(send_slice.as_ptr() as *const u8, send_slice.len() * 4) };
+                    
+                    let mut recv_buf = vec![0u8; (recv_end - recv_start) * 4];
+                    
+                    // Concurrent send and receive to prevent deadlock in the ring
+                    let (s_res, r_res) = tokio::join!(
+                        self.send(send_to, send_bytes),
+                        self.recv(recv_from, &mut recv_buf)
+                    );
+                    s_res?; r_res?;
+
+                    let recv_vals = unsafe { std::slice::from_raw_parts(recv_buf.as_ptr() as *const f32, recv_end - recv_start) };
+                    for (idx, &val) in recv_vals.iter().enumerate() {
+                        data[recv_start + idx] += val;
+                    }
                 }
             }
-        }
 
-        // Ring All-Gather
-        for i in 0..self.world_size - 1 {
-            let send_chunk_id = (self.rank + self.world_size - i + 1) % self.world_size;
-            let recv_chunk_id = (self.rank + self.world_size - i) % self.world_size;
-            
-            let send_start = send_chunk_id * chunk_size;
-            let send_end = std::cmp::min(send_start + chunk_size, data.len());
-            let recv_start = recv_chunk_id * chunk_size;
-            let recv_end = std::cmp::min(recv_start + chunk_size, data.len());
+            // Ring All-Gather
+            for i in 0..self.world_size - 1 {
+                let send_chunk_id = (self.rank + self.world_size - i + 1) % self.world_size;
+                let recv_chunk_id = (self.rank + self.world_size - i) % self.world_size;
+                
+                let send_start = send_chunk_id * chunk_size;
+                let send_end = std::cmp::min(send_start + chunk_size, data.len());
+                let recv_start = recv_chunk_id * chunk_size;
+                let recv_end = std::cmp::min(recv_start + chunk_size, data.len());
 
-            let send_to = (self.rank + 1) % self.world_size;
-            let recv_from = (self.rank + self.world_size - 1) % self.world_size;
+                let send_to = (self.rank + 1) % self.world_size;
+                let recv_from = (self.rank + self.world_size - 1) % self.world_size;
 
-            if send_start < data.len() {
-                let send_slice = &data[send_start..send_end];
-                let send_bytes = unsafe { std::slice::from_raw_parts(send_slice.as_ptr() as *const u8, send_slice.len() * 4) };
-                let mut recv_buf = vec![0u8; (recv_end - recv_start) * 4];
+                if send_start < data.len() {
+                    let send_slice = &data[send_start..send_end];
+                    let send_bytes = unsafe { std::slice::from_raw_parts(send_slice.as_ptr() as *const u8, send_slice.len() * 4) };
+                    let mut recv_buf = vec![0u8; (recv_end - recv_start) * 4];
 
-                let (s_res, r_res) = tokio::join!(
-                    self.send(send_to, send_bytes),
-                    self.recv(recv_from, &mut recv_buf)
-                );
-                s_res?; r_res?;
+                    let (s_res, r_res) = tokio::join!(
+                        self.send(send_to, send_bytes),
+                        self.recv(recv_from, &mut recv_buf)
+                    );
+                    s_res?; r_res?;
 
-                let recv_vals = unsafe { std::slice::from_raw_parts(recv_buf.as_ptr() as *const f32, recv_end - recv_start) };
-                for (idx, &val) in recv_vals.iter().enumerate() {
-                    data[recv_start + idx] = val;
+                    let recv_vals = unsafe { std::slice::from_raw_parts(recv_buf.as_ptr() as *const f32, recv_end - recv_start) };
+                    for (idx, &val) in recv_vals.iter().enumerate() {
+                        data[recv_start + idx] = val;
+                    }
                 }
             }
-        }
 
-        Ok(())
+            Ok(())
+        })
     }
 
-    async fn barrier(&self) -> Result<(), HalError> {
-        if self.world_size == 1 { return Ok(()); }
-        let mut msg = [0u8; 1];
-        if self.rank == 0 {
-            for i in 1..self.world_size {
-                self.recv(i, &mut msg).await?;
+    fn barrier<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<(), HalError>> + Send + 'a>> {
+        Box::pin(async move {
+            if self.world_size == 1 { return Ok(()); }
+            let mut msg = [0u8; 1];
+            if self.rank == 0 {
+                for i in 1..self.world_size {
+                    self.recv(i, &mut msg).await?;
+                }
+                for i in 1..self.world_size {
+                    self.send(i, &msg).await?;
+                }
+            } else {
+                self.send(0, &msg).await?;
+                self.recv(0, &mut msg).await?;
             }
-            for i in 1..self.world_size {
-                self.send(i, &msg).await?;
-            }
-        } else {
-            self.send(0, &msg).await?;
-            self.recv(0, &mut msg).await?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
-    async fn send(&self, to_rank: usize, data: &[u8]) -> Result<(), HalError> {
-        use tokio::io::AsyncWriteExt;
-        if let Some(mutex) = &self.streams[to_rank] {
-            let mut stream = mutex.lock().await;
-            
-            // 1. Send size header
-            let len = data.len() as u64;
-            stream.write_all(&len.to_le_bytes()).await
-                .map_err(HalError::IoError)?;
-            
-            // 2. Send payload
-            stream.write_all(data).await
-                .map_err(HalError::IoError)?;
-            
-            stream.flush().await
-                .map_err(HalError::IoError)?;
-        }
-        Ok(())
+    fn send<'a>(&'a self, to_rank: usize, data: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<(), HalError>> + Send + 'a>> {
+        Box::pin(async move {
+            use tokio::io::AsyncWriteExt;
+            if let Some(mutex) = &self.streams[to_rank] {
+                let mut stream = mutex.lock().await;
+                
+                // 1. Send size header
+                let len = data.len() as u64;
+                stream.write_all(&len.to_le_bytes()).await
+                    .map_err(HalError::IoError)?;
+                
+                // 2. Send payload
+                stream.write_all(data).await
+                    .map_err(HalError::IoError)?;
+                
+                stream.flush().await
+                    .map_err(HalError::IoError)?;
+            }
+            Ok(())
+        })
     }
 
-    async fn recv(&self, from_rank: usize, data: &mut [u8]) -> Result<(), HalError> {
-        use tokio::io::AsyncReadExt;
-        if let Some(mutex) = &self.streams[from_rank] {
-            let mut stream = mutex.lock().await;
-            
-            // 1. Read size header
-            let mut len_bytes = [0u8; 8];
-            stream.read_exact(&mut len_bytes).await
-                .map_err(HalError::IoError)?;
-            let len = u64::from_le_bytes(len_bytes) as usize;
-            
-            if len != data.len() {
-                return Err(HalError::IoError(std::io::Error::other(
-                    format!("Distributed recv size mismatch: expected {}, got {}", data.len(), len)
-                )));
-            }
+    fn recv<'a>(&'a self, from_rank: usize, data: &'a mut [u8]) -> Pin<Box<dyn Future<Output = Result<(), HalError>> + Send + 'a>> {
+        Box::pin(async move {
+            use tokio::io::AsyncReadExt;
+            if let Some(mutex) = &self.streams[from_rank] {
+                let mut stream = mutex.lock().await;
+                
+                // 1. Read size header
+                let mut len_bytes = [0u8; 8];
+                stream.read_exact(&mut len_bytes).await
+                    .map_err(HalError::IoError)?;
+                let len = u64::from_le_bytes(len_bytes) as usize;
+                
+                if len != data.len() {
+                    return Err(HalError::IoError(std::io::Error::other(
+                        format!("Distributed recv size mismatch: expected {}, got {}", data.len(), len)
+                    )));
+                }
 
-            // 2. Read payload
-            stream.read_exact(data).await
-                .map_err(HalError::IoError)?;
-        }
-        Ok(())
+                // 2. Read payload
+                stream.read_exact(data).await
+                    .map_err(HalError::IoError)?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -267,10 +266,7 @@ impl NcclCommunicator {
     }
 }
 
-#[async_trait]
 impl Communicator for NcclCommunicator {
-
-
     fn rank(&self) -> usize {
         self.inner.rank()
     }
@@ -279,27 +275,35 @@ impl Communicator for NcclCommunicator {
         self.inner.world_size()
     }
 
-    async fn all_reduce_sum(&self, data: &mut [f32]) -> Result<(), HalError> {
-        if self.world_size() <= 1 {
-            return Ok(());
-        }
-        // Ring-AllReduce implementation across GPU shards
-        self.inner.all_reduce_sum(data).await
+    fn all_reduce_sum<'a>(&'a self, data: &'a mut [f32]) -> Pin<Box<dyn Future<Output = Result<(), HalError>> + Send + 'a>> {
+        Box::pin(async move {
+            if self.world_size() <= 1 {
+                return Ok(());
+            }
+            // Ring-AllReduce implementation across GPU shards
+            self.inner.all_reduce_sum(data).await
+        })
     }
 
-    async fn barrier(&self) -> Result<(), HalError> {
-        if self.world_size() <= 1 {
-            return Ok(());
-        }
-        self.inner.barrier().await
+    fn barrier<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<(), HalError>> + Send + 'a>> {
+        Box::pin(async move {
+            if self.world_size() <= 1 {
+                return Ok(());
+            }
+            self.inner.barrier().await
+        })
     }
 
-    async fn send(&self, to_rank: usize, data: &[u8]) -> Result<(), HalError> {
-        self.inner.send(to_rank, data).await
+    fn send<'a>(&'a self, to_rank: usize, data: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<(), HalError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.inner.send(to_rank, data).await
+        })
     }
 
-    async fn recv(&self, from_rank: usize, data: &mut [u8]) -> Result<(), HalError> {
-        self.inner.recv(from_rank, data).await
+    fn recv<'a>(&'a self, from_rank: usize, data: &'a mut [u8]) -> Pin<Box<dyn Future<Output = Result<(), HalError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.inner.recv(from_rank, data).await
+        })
     }
 }
 

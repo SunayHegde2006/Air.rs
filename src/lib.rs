@@ -52,6 +52,9 @@ pub mod turbo_quant;       // M.I.S.T. v4 — TurboQuant Lloyd-Max optimal 4-bit
 pub mod lora;              // LoRA / PEFT hot-swap — S-LoRA-style adapter LRU cache (v0.4.0)
 pub mod eagle2;            // EAGLE-2 dynamic draft tree speculative decoding (v0.5.0)
 pub mod paged_attention;   // PagedAttention v2 — block table + CoW KV management (v0.5.0)
+pub mod kv_swap;           // KV-Cache CPU Swap Manager — HBM-aware tiered offload (Imp2 §2C)
+pub mod w8a8;              // W8A8 INT8 matmul — direct PTX-style tile kernel (Imp2 §2A)
+pub mod ternary;           // Universal Ternary Resident Model & CDSC engine (Imp3 §1-6)
 pub mod flash_decode;      // FlashDecoding++ — split-k parallel softmax reduction (v0.5.0)
 pub mod eval;              // Evaluation harness — HellaSwag/ARC/MMLU/PPL + regression gate (v0.5.0)
 pub mod openai_api;        // OpenAI-compatible REST API types + auth + rate limiting (v0.5.0)
@@ -101,8 +104,6 @@ pub mod tq2_drafter;
 pub mod warp_protocol;
 pub mod fft;
 pub mod distributed;
-pub mod session_context;
-pub mod execution_policy;
 pub mod inference_step;
 pub mod layer_pipeline;
 pub mod speculative_council;

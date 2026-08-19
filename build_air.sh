@@ -59,7 +59,7 @@ done
 # ── Banner ───────────────────────────────────────────────────────────────────
 echo ""
 echo "${MAGENTA}  ======================================================${RESET}"
-echo "${MAGENTA}       Air.rs Build System — v1.2.2 (Stable)            ${RESET}"
+echo "${MAGENTA}       Air.rs Build System — v1.3.0 (Stable)            ${RESET}"
 echo "${MAGENTA}  ======================================================${RESET}"
 echo ""
 

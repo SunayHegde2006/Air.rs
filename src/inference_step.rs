@@ -23,15 +23,15 @@ impl InferenceGenerator {
         max_tokens: usize,
         streamer: &WeightStreamer,
     ) -> Result<String> {
-        self.session.reset();
-        self.session.metrics.start();
+        self.reset();
+        self.metrics.start();
 
         let embedding_table = streamer.load_embedding(&self.device)?;
         let (final_norm_weight, lm_head) = streamer.load_output(&self.device)?;
 
         let mut tokens: Vec<u32> = vec![tokenizer.bos_id];
         tokens.extend(tokenizer.encode(prompt));
-        self.session.metrics.prompt_tokens = tokens.len();
+        self.metrics.prompt_tokens = tokens.len();
 
         let mut generated_tokens: Vec<u32> = Vec::new();
         let mut all_tokens = tokens.clone();
@@ -54,7 +54,7 @@ impl InferenceGenerator {
         while generated_tokens.len() < max_tokens {
             if self.council_enabled {
                 let mut council = self.council_drafter.take().unwrap();
-                let draft_res = council.draft_pass(&all_tokens, 8, self.policy.sampler.config())?;
+                let draft_res = council.draft_pass(&all_tokens, 8, self.sampler.config())?;
                 self.council_drafter = Some(council);
 
                 if !draft_res.tokens.is_empty() {
@@ -78,7 +78,7 @@ impl InferenceGenerator {
                         print!("{}", token_str);
                         use std::io::Write;
                         let _ = std::io::stdout().flush();
-                        self.session.metrics.record_token();
+                        self.metrics.record_token();
 
                         if token == tokenizer.eos_id {
                             hit_eos = true;
@@ -99,7 +99,7 @@ impl InferenceGenerator {
                         print!("{}", token_str);
                         use std::io::Write;
                         let _ = std::io::stdout().flush();
-                        self.session.metrics.record_token();
+                        self.metrics.record_token();
 
                         if corr_token == tokenizer.eos_id {
                             eprint!("\r{:width$}\r", "", width = 80);
@@ -136,9 +136,9 @@ impl InferenceGenerator {
             step += 1;
 
             if step == 1 {
-                self.session.metrics.mark_first_token();
+                self.metrics.mark_first_token();
             }
-            self.session.metrics.record_token();
+            self.metrics.record_token();
 
             if next_token == tokenizer.eos_id {
                 eprint!("\r{:width$}\r", "", width = 80);
@@ -151,7 +151,7 @@ impl InferenceGenerator {
             use std::io::Write;
             let _ = std::io::stdout().flush();
 
-            if let Some(gbnf) = self.policy.gbnf.as_mut() {
+            if let Some(gbnf) = self.gbnf.as_mut() {
                 gbnf.push_token(&token_str);
                 if gbnf.is_complete() {
                     generated_tokens.push(next_token);
@@ -178,7 +178,7 @@ impl InferenceGenerator {
 
         eprint!("\r{:width$}\r", "", width = 80);
         println!();
-        println!("{}", self.session.metrics.summary());
+        println!("{}", self.metrics.summary());
 
         Ok(tokenizer.decode(&generated_tokens))
     }
@@ -212,14 +212,14 @@ impl InferenceGenerator {
             .index_select(&Tensor::new(draft_tokens, &candle_core::Device::Cpu)?, 0)?
             .to_device(&self.device)?;
 
-        let lm_head_matrix = self.session.lm_head_tensor.as_ref().cloned().unwrap_or_else(|| {
+        let lm_head_matrix = self.lm_head_tensor.as_ref().cloned().unwrap_or_else(|| {
              Tensor::zeros((self.config.vocab_size, self.config.hidden_dim), DType::F16, &self.device).unwrap()
         });
 
         let base_pos = all_tokens_len - draft_tokens.len();
 
         for layer_id in 0..self.config.n_layers {
-            let cache = self.session.kv_cache.load(layer_id)?;
+            let cache = self.kv_cache.load(layer_id)?;
             
             let (new_x, next_cache) = self.dispatcher.forward_layer(
                 layer_id,
@@ -227,12 +227,12 @@ impl InferenceGenerator {
                 Some(&cache),
                 base_pos,
                 Some(&self.rope_cache),
-                self.session.dual_rope.as_ref(),
+                self.dual_rope.as_ref(),
                 mask,
-                Some(&self.session.tp_config),
+                Some(&self.tp_config),
             )?;
 
-            self.session.kv_cache.save(layer_id, next_cache)?;
+            self.kv_cache.save(layer_id, next_cache)?;
             x = new_x;
             streamer.release_layer(layer_id);
         }
@@ -242,7 +242,7 @@ impl InferenceGenerator {
     }
 
     pub fn truncate_kv(&mut self, pos: usize) {
-        self.session.kv_cache.truncate_to(pos);
+        self.kv_cache.truncate_to(pos);
     }
 
     fn generate_stream_inner(
@@ -253,19 +253,19 @@ impl InferenceGenerator {
         streamer: &WeightStreamer,
         tx: &mpsc::Sender<GenerationEvent>,
     ) -> Result<()> {
-        self.session.reset();
-        self.session.metrics.start();
+        self.reset();
+        self.metrics.start();
 
         let embedding_table = streamer.load_embedding(&self.device)?;
         let (final_norm_weight, lm_head) = streamer.load_output(&self.device)?;
 
-        if self.config.arch == crate::model_variant::ModelVariant::Qwen3_6 && self.policy.medusa_heads.is_none() {
+        if self.config.arch == crate::model_variant::ModelVariant::Qwen3_6 && self.medusa_heads.is_none() {
             let _ = self.enable_wavefront(4, false, streamer);
         }
 
         let mut tokens: Vec<u32> = vec![tokenizer.bos_id];
         tokens.extend(tokenizer.encode(prompt));
-        self.session.metrics.prompt_tokens = tokens.len();
+        self.metrics.prompt_tokens = tokens.len();
 
         let mut generated_tokens: Vec<u32> = Vec::new();
         let mut all_tokens = tokens.clone();
@@ -282,7 +282,7 @@ impl InferenceGenerator {
         while generated_tokens.len() < max_tokens {
             if self.council_enabled {
                 let mut council = self.council_drafter.take().unwrap();
-                let draft_res = council.draft_pass(&all_tokens, 8, self.policy.sampler.config())?;
+                let draft_res = council.draft_pass(&all_tokens, 8, self.sampler.config())?;
                 self.council_drafter = Some(council);
 
                 if !draft_res.tokens.is_empty() {
@@ -304,7 +304,7 @@ impl InferenceGenerator {
                         all_tokens.push(token);
                         let token_str = tokenizer.decode_token(token).to_string();
                         if tx.try_send(GenerationEvent::Token(token_str)).is_err() { break; }
-                        self.session.metrics.record_token();
+                        self.metrics.record_token();
 
                         if token == tokenizer.eos_id {
                             hit_eos = true;
@@ -319,7 +319,7 @@ impl InferenceGenerator {
                         all_tokens.push(corr_token);
                         let token_str = tokenizer.decode_token(corr_token).to_string();
                         if tx.try_send(GenerationEvent::Token(token_str)).is_err() { break; }
-                        self.session.metrics.record_token();
+                        self.metrics.record_token();
 
                         if corr_token == tokenizer.eos_id {
                             break;
@@ -337,7 +337,7 @@ impl InferenceGenerator {
                 }
             }
 
-            if self.policy.medusa_heads.is_some() && step > 0 {
+            if self.medusa_heads.is_some() && step > 0 {
                 let wavefront_result = self.generate_wavefront(&all_tokens, &embedding_table, &final_norm_weight, &lm_head, streamer)?;
                 for next_token in wavefront_result.accepted_tokens {
                     let token_str = tokenizer.decode_token(next_token).to_string();
@@ -352,15 +352,15 @@ impl InferenceGenerator {
             let next_token = self.generate_step(step, &all_tokens, &embedding_table, &final_norm_weight, &lm_head, Some(streamer), prefill_done)?;
             step += 1;
 
-            if step == 1 { self.session.metrics.mark_first_token(); }
-            self.session.metrics.record_token();
+            if step == 1 { self.metrics.mark_first_token(); }
+            self.metrics.record_token();
 
             if next_token == tokenizer.eos_id { break; }
 
             let token_str = tokenizer.decode_token(next_token).to_string();
             if tx.try_send(GenerationEvent::Token(token_str.clone())).is_err() { break; }
 
-            if let Some(gbnf) = self.policy.gbnf.as_mut() {
+            if let Some(gbnf) = self.gbnf.as_mut() {
                 gbnf.push_token(&token_str);
                 if gbnf.is_complete() {
                     generated_tokens.push(next_token);
@@ -382,16 +382,16 @@ impl InferenceGenerator {
         }
         eprint!("\r{:width$}\r", "", width = 80);
 
-        let elapsed = self.session.metrics.elapsed_secs();
+        let elapsed = self.metrics.elapsed_secs();
         let _ = tx.try_send(GenerationEvent::Done(GenerationMetricsSummary {
-            prompt_tokens: self.session.metrics.prompt_tokens,
+            prompt_tokens: self.metrics.prompt_tokens,
             generated_tokens: generated_tokens.len(),
             tokens_per_second: if elapsed > 0.0 { generated_tokens.len() as f64 / elapsed } else { 0.0 },
-            time_to_first_token_ms: self.session.metrics.ttft_ms(),
+            time_to_first_token_ms: self.metrics.ttft_ms(),
             total_time_secs: elapsed,
         }));
 
-        println!("{}", self.session.metrics.summary());
+        println!("{}", self.metrics.summary());
         Ok(())
     }
 
@@ -419,19 +419,19 @@ impl InferenceGenerator {
             hidden = hidden.unsqueeze(0)?;
 
             for layer_id in 0..self.config.n_layers {
-                let cache = self.session.kv_cache.load(layer_id)?;
+                let cache = self.kv_cache.load(layer_id)?;
                 let (next_hidden, next_cache) = self.dispatcher.forward_layer(
                     layer_id,
                     &hidden,
                     Some(&cache),
                     chunk_start,
                     Some(&self.rope_cache),
-                    self.session.dual_rope.as_ref(),
+                    self.dual_rope.as_ref(),
                     None,
-                    Some(&self.session.tp_config)
+                    Some(&self.tp_config)
                 )?;
                 hidden = next_hidden;
-                self.session.kv_cache.save(layer_id, next_cache)?;
+                self.kv_cache.save(layer_id, next_cache)?;
             }
             println!("  Chunk {}/{} prefilled ({} tokens at pos {})", chunk_idx + 1, n_full_chunks, PREFILL_CHUNK_SIZE, chunk_start);
         }
@@ -467,21 +467,29 @@ impl InferenceGenerator {
             .to_device(&self.device)?;
         hidden = hidden.unsqueeze(0)?;
 
+        // Fire CUDA graph dispatch before the layer loop.
+        // On CUDA builds this replaces per-kernel CPU submissions with a single
+        // graph launch (~microsecond overhead vs. ~100µs for individual API calls).
+        // On CPU builds launch() returns Ok(()) immediately — zero cost.
+        if let Some(ref mut cg) = self.cuda_graph {
+            let _ = cg.launch(input_tokens.len()); // ignore HalError::Unsupported on non-CUDA
+        }
+
         let layer_loop_start = Instant::now();
         for layer_id in 0..self.config.n_layers {
-            let cache = self.session.kv_cache.load(layer_id)?;
+            let cache = self.kv_cache.load(layer_id)?;
             let (next_hidden, next_cache) = self.dispatcher.forward_layer(
-                layer_id, 
-                &hidden, 
-                Some(&cache), 
-                start_pos, 
-                Some(&self.rope_cache), 
-                self.session.dual_rope.as_ref(), 
-                None, 
-                Some(&self.session.tp_config)
+                layer_id,
+                &hidden,
+                Some(&cache),
+                start_pos,
+                Some(&self.rope_cache),
+                self.dual_rope.as_ref(),
+                None,
+                Some(&self.tp_config)
             )?;
             hidden = next_hidden;
-            self.session.kv_cache.save(layer_id, next_cache)?;
+            self.kv_cache.save(layer_id, next_cache)?;
         }
 
         if step == 0 {
@@ -492,7 +500,7 @@ impl InferenceGenerator {
         hidden = ops::rms_norm(&hidden, final_norm_weight, self.config.rms_norm_eps)?;
         let seq_len = hidden.dim(1)?;
         let last_hidden = hidden.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
-        self.session.metrics.last_hidden = Some(last_hidden.clone());
+        self.metrics.last_hidden = Some(last_hidden.clone());
 
         // Cast to F32: QMatMul requires F32 input regardless of model compute dtype.
         // Models running in BF16/F16 (common on Turing sm_75) produce non-F32 hidden
@@ -502,11 +510,15 @@ impl InferenceGenerator {
         let logits = lm_head.forward(&last_hidden_f32)?;
         let logits = logits.squeeze(0)?;
 
-        self.policy.sampler.sample_constrained(&logits, all_tokens, self.policy.gbnf.as_ref()).map_err(|e| anyhow::anyhow!("Sampling failed: {e}"))
+        self.sampler.sample_constrained(&logits, all_tokens, self.gbnf.as_ref()).map_err(|e| anyhow::anyhow!("Sampling failed: {e}"))
     }
 
-    pub fn reset(&mut self) { self.session.reset(); }
-    pub fn metrics(&self) -> &InferenceMetrics { &self.session.metrics }
+    pub fn reset(&mut self) {
+        self.metrics = InferenceMetrics::default();
+        self.wavefront_session = crate::wavefront::WavefrontSession::default();
+        self.kv_cache.clear();
+    }
+    pub fn metrics(&self) -> &InferenceMetrics { &self.metrics }
     pub fn device(&self) -> &candle_core::Device { &self.device }
 
     pub(crate) fn generate_wavefront(
@@ -520,12 +532,12 @@ impl InferenceGenerator {
         let mut stats = crate::wavefront::CycleStats::default();
         let start = Instant::now();
 
-        let last_hidden = self.session.metrics.last_hidden.as_ref().ok_or_else(|| {
+        let last_hidden = self.metrics.last_hidden.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Medusa draft requires previous hidden state")
         })?;
 
-        let m_heads = self.policy.medusa_heads.as_ref().unwrap();
-        let lm_head_matrix = self.session.lm_head_tensor.as_ref().cloned().unwrap_or_else(|| {
+        let m_heads = self.medusa_heads.as_ref().unwrap();
+        let lm_head_matrix = self.lm_head_tensor.as_ref().cloned().unwrap_or_else(|| {
             Tensor::zeros((self.config.vocab_size, self.config.hidden_dim), DType::F16, &self.device).unwrap()
         });
         
@@ -535,7 +547,7 @@ impl InferenceGenerator {
         stats.tokens_drafted = bundle.n_heads;
 
         let mut active_indices = Vec::new();
-        if let Some(bank) = &self.policy.sparsity_bank {
+        if let Some(bank) = &self.sparsity_bank {
             for layer_id in 0..self.config.n_layers {
                 let mut layer_preds = Vec::new();
                 for h in &bundle.hiddens {
@@ -584,8 +596,8 @@ impl InferenceGenerator {
         stats.verify_ms = verify_start.elapsed().as_secs_f64() * 1000.0;
         stats.tokens_accepted = accepted_count;
 
-        self.policy.wavefront_health.update(accepted_count, bundle.n_heads);
-        self.session.wavefront_session.record(&stats);
+        self.wavefront_health.update(accepted_count, bundle.n_heads);
+        self.wavefront_session.record(&stats);
 
         if self.config.arch == crate::model_variant::ModelVariant::Qwen2 {
              eprintln!("\r  {}", stats.display());

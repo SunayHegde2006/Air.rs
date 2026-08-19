@@ -29,24 +29,14 @@ impl RopeFreqTable {
     /// Actually pre-compute and load tensors to the device.
     pub fn init_on_device(&mut self, max_seq: usize, device: &Device) -> Result<()> {
         let half = self.head_dim / 2;
-        
-        // 1. Build inv_freq on CPU
         let inv_freq: Vec<f32> = (0..half)
             .map(|i| 1.0 / (self.theta as f32).powf(2.0 * i as f32 / self.head_dim as f32))
             .collect();
-        let inv_freq_t = Tensor::new(inv_freq, device)?;
-        
-        // 2. Build position indices on GPU if possible
-        let positions: Vec<f32> = (0..max_seq).map(|p| p as f32).collect();
-        let positions_t = Tensor::new(positions, device)?.unsqueeze(1)?;
-        
-        // 3. Compute angles: [max_seq, 1] * [1, half] -> [max_seq, half]
-        let angles = positions_t.matmul(&inv_freq_t.unsqueeze(0)?)?;
-        
-        // 4. Cache cos/sin
+        let inv_freq_t = Tensor::new(inv_freq, device)?.reshape((1, half))?;
+        let positions_t = Tensor::arange(0u32, max_seq as u32, device)?.to_dtype(candle_core::DType::F32)?.reshape((max_seq, 1))?;
+        let angles = positions_t.matmul(&inv_freq_t)?;
         self.cos = Some(angles.cos()?);
         self.sin = Some(angles.sin()?);
-        
         Ok(())
     }
 

@@ -140,53 +140,6 @@ impl DeviceMap {
 }
 
 // ---------------------------------------------------------------------------
-// DeviceMapBuilder — fluent constructor for tensor-parallel layouts
-// ---------------------------------------------------------------------------
-
-/// Fluent builder for constructing heterogeneous `DeviceMap` layouts.
-///
-/// ```no_run
-/// use air_rs::device_map::DeviceMapBuilder;
-/// use candle_core::Device;
-///
-/// let map = DeviceMapBuilder::new(32)
-///     .layers(0..16, Device::cuda_if_available(0).unwrap())
-///     .layers(16..32, Device::cuda_if_available(1).unwrap())
-///     .build();
-/// ```
-pub struct DeviceMapBuilder {
-    devices: Vec<Option<Device>>,
-}
-
-impl DeviceMapBuilder {
-    /// Create a builder for a model with `n_layers` layers.
-    ///
-    /// All layers default to `None` (unassigned). Call `layers()` to assign.
-    pub fn new(n_layers: usize) -> Self {
-        Self { devices: vec![None; n_layers] }
-    }
-
-    /// Assign `device` to all layers in `range`.
-    pub fn layers(mut self, range: std::ops::Range<usize>, device: Device) -> Self {
-        for i in range {
-            if i < self.devices.len() {
-                self.devices[i] = Some(device.clone());
-            }
-        }
-        self
-    }
-
-    /// Finalise. Unassigned layers fall back to `Device::Cpu`.
-    pub fn build(self) -> DeviceMap {
-        let resolved: Vec<Device> = self.devices
-            .into_iter()
-            .map(|d| d.unwrap_or(Device::Cpu))
-            .collect();
-        DeviceMap::from_devices(resolved)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -217,26 +170,6 @@ mod tests {
         assert_eq!(map.len(), 8);
         // Both halves are Cpu in test, so uniform
         assert!(map.is_uniform());
-    }
-
-    #[test]
-    fn builder_assigns_ranges() {
-        let map = DeviceMapBuilder::new(4)
-            .layers(0..2, Device::Cpu)
-            .layers(2..4, Device::Cpu)
-            .build();
-        assert_eq!(map.len(), 4);
-        assert!(matches!(map.get(0), Device::Cpu));
-        assert!(matches!(map.get(3), Device::Cpu));
-    }
-
-    #[test]
-    fn builder_unassigned_falls_back_to_cpu() {
-        let map = DeviceMapBuilder::new(4)
-            .layers(0..2, Device::Cpu)
-            // layers 2 & 3 are unassigned
-            .build();
-        assert!(matches!(map.get(2), Device::Cpu));
     }
 
     #[test]
