@@ -56,7 +56,6 @@ impl TQ2GhostDrafter {
             let weights = streamer.load_layer(i, &self.device, None)?;
             self.resident_layers.push((i, Arc::new(weights)));
         }
-        
         Ok(())
     }
 }

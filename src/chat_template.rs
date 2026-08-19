@@ -211,7 +211,11 @@ impl ChatTemplate {
     }
 
     fn apply_raw(&self, messages: &[ChatMessage]) -> String {
-        messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n")
+        messages.iter().map(|m| m.content.as_str()).fold(String::new(), |mut acc, s| {
+            if !acc.is_empty() { acc.push('\n'); }
+            acc.push_str(s);
+            acc
+        })
     }
 }
 

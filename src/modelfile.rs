@@ -6,7 +6,7 @@
 use crate::dispatcher::GenerateConfig;
 use anyhow::{Context, Result};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Modelfile {
     pub from: Option<String>,
     pub system: Option<String>,
@@ -15,20 +15,6 @@ pub struct Modelfile {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub max_tokens: Option<usize>,
-}
-
-impl Default for Modelfile {
-    fn default() -> Self {
-        Self {
-            from: None,
-            system: None,
-            template: None,
-            stop: Vec::new(),
-            temperature: None,
-            top_p: None,
-            max_tokens: None,
-        }
-    }
 }
 
 impl Modelfile {
@@ -123,14 +109,9 @@ impl Modelfile {
 }
 
 fn unquote(s: &str) -> &str {
-    let s = s.trim();
-    if ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
-        && s.len() >= 2
-    {
-        return &s[1..s.len() - 1];
-    }
-    s
+    s.trim().trim_matches(|c| c == '"' || c == '\'')
 }
+
 
 
 #[cfg(test)]

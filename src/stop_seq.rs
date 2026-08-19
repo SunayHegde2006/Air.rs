@@ -116,53 +116,6 @@ impl StopChecker {
         }
     }
 
-    /// Preset: Llama 3.x / Llama 4
-    pub fn llama3(max_tokens: usize) -> Self {
-        Self::new(
-            vec![
-                "<|eot_id|>".into(),
-                "<|end_of_text|>".into(),
-                "<|end_header_id|>".into(),
-            ],
-            Some(128009), // <|eot_id|> token id in Llama 3 tokenizer
-            max_tokens,
-        )
-    }
-
-    /// Preset: Qwen3 (dense, thinking, MoE)
-    pub fn qwen3(max_tokens: usize) -> Self {
-        Self::new(
-            vec![
-                "<|im_end|>".into(),
-                "</tool_call>".into(),
-                "</think>".into(),
-            ],
-            Some(151645), // <|im_end|> token id in Qwen3 tokenizer
-            max_tokens,
-        )
-    }
-
-    /// Preset: DeepSeek-R1
-    pub fn deepseek_r1(max_tokens: usize) -> Self {
-        Self::new(
-            vec![
-                "</think>".into(),
-                "</tool_call>".into(),
-            ],
-            Some(100001), // <|end_of_sentence|> in DeepSeek tokenizer
-            max_tokens,
-        )
-    }
-
-    /// Preset: Mistral / Phi-4
-    pub fn mistral(max_tokens: usize) -> Self {
-        Self::new(
-            vec!["[/INST]".into(), "</s>".into()],
-            Some(2), // </s> is token 2 in Mistral tokenizer
-            max_tokens,
-        )
-    }
-
     /// Push one generated token into the checker.
     ///
     /// Call this after each sampled token. If `reason()` returns anything
@@ -328,25 +281,6 @@ mod tests {
         let mut c = StopChecker::new(vec!["</tool_call>".into()], None, 100);
         c.push(1, "</tool"); // Partial — should not stop
         assert_eq!(c.reason(), &StopReason::NotStopped);
-    }
-
-    #[test]
-    fn test_llama3_preset() {
-        let mut c = StopChecker::llama3(512);
-        // Simulate EOS token id 128009
-        c.push(128009, "");
-        assert!(c.is_done());
-    }
-
-    #[test]
-    fn test_qwen3_preset_tool_call_stop() {
-        let mut c = StopChecker::qwen3(2048);
-        c.push(1, "I'll help. </");
-        c.push(2, "tool_call>");
-        assert!(c.is_done());
-        if let StopReason::StopString(ref s) = c.reason() {
-            assert_eq!(s, "</tool_call>");
-        }
     }
 
     #[test]

@@ -47,6 +47,8 @@ pub struct WeightStreamer {
     raw_fd: std::os::unix::io::RawFd,
     /// Asymmetric Residency — Attention weights pinned in VRAM.
     pinned_attn: std::sync::Mutex<Vec<Option<crate::model::QBlockWeights>>>,
+    /// GPUDirect Storage (cuFile API) HAL for zero-copy NVMe-to-VRAM DMA transfers.
+    gds_hal: std::sync::Mutex<Option<crate::strix::gpu_direct::GdsStorageHal>>,
 }
 
 impl WeightStreamer {
@@ -132,7 +134,27 @@ impl WeightStreamer {
             #[cfg(unix)]
             raw_fd,
             pinned_attn,
+            gds_hal: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Enable GPUDirect Storage (cuFile / PCIe P2P DMA direct NVMe to VRAM transfer).
+    pub fn enable_gds(&self) {
+        let mut gds = self.gds_hal.lock().unwrap();
+        if gds.is_none() {
+            let hal = crate::strix::gpu_direct::GdsStorageHal::new();
+            println!(
+                "  ⚡ [GDS] GPUDirect Storage initialized: usable={}, driver={}",
+                hal.capability().is_usable(),
+                hal.capability().driver_version
+            );
+            *gds = Some(hal);
+        }
+    }
+
+    /// Check if GPUDirect Storage is active.
+    pub fn gds_enabled(&self) -> bool {
+        self.gds_hal.lock().unwrap().is_some()
     }
 
     /// Number of transformer layers in this model.

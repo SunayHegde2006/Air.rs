@@ -135,16 +135,25 @@ pub struct MambaState {
     pub h: Option<Tensor>,
     /// Convolution buffer (ring buffer of last d_conv inputs): [batch, d_inner, d_conv]
     pub conv_state: Option<Tensor>,
+    /// INT8 CPU shadow of the SSM hidden state for CPU-side updates
+    /// during GPU I/O stalls (Improvements.md §3.4).
+    pub cpu_shadow: CpuStateShadow,
 }
 
 impl MambaState {
     pub fn new() -> Self {
-        Self { h: None, conv_state: None }
+        Self { h: None, conv_state: None, cpu_shadow: CpuStateShadow::new(0, 0) }
+    }
+
+    /// Create state pre-sized for a given config (avoids a realloc on first step).
+    pub fn with_config(cfg: &MambaConfig) -> Self {
+        Self { h: None, conv_state: None, cpu_shadow: CpuStateShadow::new(cfg.d_inner, cfg.d_state) }
     }
 
     pub fn reset(&mut self) {
         self.h = None;
         self.conv_state = None;
+        self.cpu_shadow.reset();
     }
 }
 
@@ -272,6 +281,22 @@ pub fn mamba_forward(
         let h_new = (delta_a.broadcast_mul(&h_prev)? + delta_b.broadcast_mul(&x_u)?)?;
         state.h = Some(h_new.clone());
 
+        // ── CPU shadow update: keep INT8 copy in L3 for overlap with PCIe stalls ──
+        // Extract flat f32 scalars from the discretised tensors for the shadow step.
+        // Only update shadow when the config dimensions are set (non-zero).
+        if state.cpu_shadow.d_inner > 0 {
+            let a_flat: Vec<f32> = delta_a
+                .flatten_all().and_then(|t| t.to_vec1::<f32>())
+                .unwrap_or_default();
+            let b_flat: Vec<f32> = b_t
+                .flatten_all().and_then(|t| t.to_vec1::<f32>())
+                .unwrap_or_default();
+            let x_flat: Vec<f32> = conv_act_2d
+                .flatten_all().and_then(|t| t.to_vec1::<f32>())
+                .unwrap_or_default();
+            state.cpu_shadow.step_shadow(&a_flat, &b_flat, &x_flat);
+        }
+
         // Output: y_t = C_t * h_t → sum over d_state
         // c_t: [b, d_state], h_new: [b, d_inner, d_state]
         let c_u = c_t.unsqueeze(1)?; // [b, 1, d_state]
@@ -346,4 +371,69 @@ mod tests {
         assert_eq!(cfg.d_model, 4096);
         assert_eq!(cfg.d_state, 16);
     }
+
+    #[test]
+    fn test_cpu_state_shadow() {
+        let mut shadow = CpuStateShadow::new(16, 4);
+        assert_eq!(shadow.shadow_h.len(), 64);
+        let a = vec![0.9f32; 64];
+        let b = vec![0.1f32; 4];
+        let x = vec![1.0f32; 16];
+        shadow.step_shadow(&a, &b, &x);
+        assert_ne!(shadow.shadow_h[0], 0);
+        shadow.reset();
+        assert_eq!(shadow.shadow_h[0], 0);
+    }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SSM / Mamba CPU State-Shadowing (Improvements.md §Part 3.4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// INT8 CPU State-Shadowing for Mamba / SSM blocks.
+///
+/// Keeps an INT8 shadow copy of the SSM hidden state matrix in CPU L3 cache
+/// to perform state updates while waiting for GPU NVMe/PCIe weight transfers.
+#[derive(Debug, Clone)]
+pub struct CpuStateShadow {
+    pub d_inner: usize,
+    pub d_state: usize,
+    pub shadow_h: Vec<i8>,
+    pub scale: f32,
+}
+
+impl CpuStateShadow {
+    pub fn new(d_inner: usize, d_state: usize) -> Self {
+        let size = d_inner * d_state;
+        Self {
+            d_inner,
+            d_state,
+            shadow_h: vec![0i8; size],
+            scale: 1.0 / 127.0,
+        }
+    }
+
+    /// Step the INT8 shadow state recurrence: h_t = quantize(A * h_{t-1} + B * x_t)
+    pub fn step_shadow(&mut self, a_mat: &[f32], b_vec: &[f32], x_t: &[f32]) {
+        if a_mat.is_empty() || b_vec.is_empty() || x_t.is_empty() {
+            return;
+        }
+        for i in 0..self.d_inner {
+            let x_val = x_t.get(i).copied().unwrap_or(0.0);
+            for j in 0..self.d_state {
+                let idx = i * self.d_state + j;
+                let prev_h = (self.shadow_h[idx] as f32) * self.scale;
+                let a_val = a_mat.get(idx).copied().unwrap_or(1.0);
+                let b_val = b_vec.get(j).copied().unwrap_or(0.0);
+                let next_h = a_val * prev_h + b_val * x_val;
+                let q = (next_h / self.scale).clamp(-128.0, 127.0) as i8;
+                self.shadow_h[idx] = q;
+            }
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.shadow_h.fill(0);
+    }
+}
+

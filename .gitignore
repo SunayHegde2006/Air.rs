@@ -19,6 +19,8 @@ uv.lock
 .env
 .env.*
 !.env.example
+air_rs_speculative_decoding_protocol.md
+.repowise-workspace.yaml
 
 # IDE
 .idea/
@@ -46,7 +48,7 @@ Thumbs.db
 !README.md
 !CONTEXT.md
 !docs/adr/*.md
-!air_rs_speculative_decoding_protocol.md
+
 
 #Indentifiers
 *:Zone.Identifier

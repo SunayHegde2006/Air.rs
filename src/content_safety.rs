@@ -19,10 +19,8 @@
 //! - Perspective API (Lees et al., 2022)
 //! - LlamaGuard (Inan et al., Meta, 2023)
 
-use std::collections::HashSet;
-
 // ---------------------------------------------------------------------------
-// Harm Categories
+// Harm Categories & Verdict
 // ---------------------------------------------------------------------------
 
 /// Category of harmful content detected by the safety gate.
@@ -46,10 +44,6 @@ impl HarmCategory {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Safety Verdict
-// ---------------------------------------------------------------------------
 
 /// Result of a content safety check.
 #[derive(Debug, Clone)]
@@ -80,61 +74,44 @@ impl SafetyVerdict {
 }
 
 // ---------------------------------------------------------------------------
-// Classifier Trait
+// Term Lists
 // ---------------------------------------------------------------------------
 
-/// Content safety classifier backend.
-pub trait SafetyClassifier: Send + Sync {
-    /// Classify `text`, returning a `SafetyVerdict`.
-    fn classify(&self, text: &str) -> SafetyVerdict;
-}
+const NSFW_TERMS: &[&str] = &[
+    "porn", "pornography", "explicit", "nude", "nudity", "sexual content",
+    "adult content", "xxx", "hentai", "onlyfans",
+];
+const TOXIC_TERMS: &[&str] = &[
+    "slur", "hate speech", "racist", "sexist", "homophobic", "transphobic",
+    "dehumanize", "subhuman", "inferior race",
+];
+const VIOLENCE_TERMS: &[&str] = &[
+    "how to kill", "murder instructions", "assassination", "bomb making",
+    "how to make a weapon", "mass shooting", "terrorist attack instructions",
+];
+const SELFHARM_TERMS: &[&str] = &[
+    "how to commit suicide", "kill myself", "self harm instructions",
+    "method of suicide", "hanging yourself",
+];
+const ILLEGAL_TERMS: &[&str] = &[
+    "how to hack", "sql injection", "malware code", "ransomware",
+    "credit card fraud", "phishing kit", "how to synthesize drugs",
+    "drug synthesis", "meth recipe",
+];
 
 // ---------------------------------------------------------------------------
 // KeywordClassifier — default zero-dependency classifier
 // ---------------------------------------------------------------------------
 
-/// Word-list based classifier. O(tokens) lookup via HashSet.
-///
-/// Not a replacement for a real classifier in high-stakes deployments,
-/// but provides a useful first layer of defense with zero VRAM cost.
-pub struct KeywordClassifier {
-    nsfw_terms:      HashSet<&'static str>,
-    toxic_terms:     HashSet<&'static str>,
-    violence_terms:  HashSet<&'static str>,
-    selfharm_terms:  HashSet<&'static str>,
-    illegal_terms:   HashSet<&'static str>,
-}
+/// Word-list based classifier. Zero VRAM cost.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KeywordClassifier;
 
 impl KeywordClassifier {
-    /// Construct with the built-in word lists.
-    pub fn new() -> Self {
-        Self {
-            nsfw_terms: [
-                "porn", "pornography", "explicit", "nude", "nudity", "sexual content",
-                "adult content", "xxx", "hentai", "onlyfans",
-            ].into_iter().collect(),
-            toxic_terms: [
-                "slur", "hate speech", "racist", "sexist", "homophobic", "transphobic",
-                "dehumanize", "subhuman", "inferior race",
-            ].into_iter().collect(),
-            violence_terms: [
-                "how to kill", "murder instructions", "assassination", "bomb making",
-                "how to make a weapon", "mass shooting", "terrorist attack instructions",
-            ].into_iter().collect(),
-            selfharm_terms: [
-                "how to commit suicide", "kill myself", "self harm instructions",
-                "method of suicide", "hanging yourself",
-            ].into_iter().collect(),
-            illegal_terms: [
-                "how to hack", "sql injection", "malware code", "ransomware",
-                "credit card fraud", "phishing kit", "how to synthesize drugs",
-                "drug synthesis", "meth recipe",
-            ].into_iter().collect(),
-        }
-    }
+    pub fn new() -> Self { Self }
 
-    fn check_category(&self, lower: &str, terms: &HashSet<&'static str>, cat: HarmCategory) -> Option<SafetyVerdict> {
-        for term in terms {
+    fn check_category(&self, lower: &str, terms: &[&str], cat: HarmCategory) -> Option<SafetyVerdict> {
+        for &term in terms {
             if lower.contains(term) {
                 return Some(SafetyVerdict::blocked(
                     cat,
@@ -145,23 +122,16 @@ impl KeywordClassifier {
         }
         None
     }
-}
 
-impl Default for KeywordClassifier {
-    fn default() -> Self { Self::new() }
-}
-
-impl SafetyClassifier for KeywordClassifier {
-    fn classify(&self, text: &str) -> SafetyVerdict {
+    pub fn classify(&self, text: &str) -> SafetyVerdict {
         if text.is_empty() { return SafetyVerdict::safe(); }
         let lower = text.to_lowercase();
 
-        // Priority order: illegal > violence > self-harm > nsfw > toxic
-        if let Some(v) = self.check_category(&lower, &self.illegal_terms, HarmCategory::Illegal) { return v; }
-        if let Some(v) = self.check_category(&lower, &self.violence_terms, HarmCategory::Violence) { return v; }
-        if let Some(v) = self.check_category(&lower, &self.selfharm_terms, HarmCategory::SelfHarm) { return v; }
-        if let Some(v) = self.check_category(&lower, &self.nsfw_terms, HarmCategory::Nsfw) { return v; }
-        if let Some(v) = self.check_category(&lower, &self.toxic_terms, HarmCategory::Toxic) { return v; }
+        if let Some(v) = self.check_category(&lower, ILLEGAL_TERMS, HarmCategory::Illegal) { return v; }
+        if let Some(v) = self.check_category(&lower, VIOLENCE_TERMS, HarmCategory::Violence) { return v; }
+        if let Some(v) = self.check_category(&lower, SELFHARM_TERMS, HarmCategory::SelfHarm) { return v; }
+        if let Some(v) = self.check_category(&lower, NSFW_TERMS, HarmCategory::Nsfw) { return v; }
+        if let Some(v) = self.check_category(&lower, TOXIC_TERMS, HarmCategory::Toxic) { return v; }
 
         SafetyVerdict::safe()
     }

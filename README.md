@@ -10,16 +10,18 @@
 </p>
 
 <p align="center">
-  <a href="#project-status"><img src="https://img.shields.io/badge/status-stable-brightgreen?style=flat-square&maxAge=2592000" alt="Status: Stable"></a>
-  <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/v/air-rs?style=flat-square&color=brightgreen" alt="PyPI"></a>
-  <a href="https://pepy.tech/project/air-rs"><img src="https://static.pepy.tech/badge/air-rs" alt="PyPI Downloads"></a>
-  <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/pyversions/air-rs?style=flat-square&maxAge=2592000" alt="Python 3.11+"></a>
-  <a href="#build"><img src="https://img.shields.io/badge/Rust-1.75+-F74C00?logo=rust&style=flat-square&maxAge=2592000" alt="Rust 1.75+"></a>
-  <a href="#build"><img src="https://img.shields.io/badge/CUDA-11.x%20|%2012.x%20|%2013.x-76B900?logo=nvidia&style=flat-square&maxAge=2592000" alt="CUDA 11-13"></a>
-  <a href="#build"><img src="https://img.shields.io/badge/platform-Windows%20|%20Linux%20|%20macOS-blue?style=flat-square&maxAge=2592000" alt="Cross-Platform"></a>
-  <a href="https://github.com/SunayHegde2006/Air.rs/actions"><img src="https://img.shields.io/github/actions/workflow/status/SunayHegde2006/Air.rs/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&maxAge=2592000" alt="License: MIT"></a>
-  <a href="https://github.com/SunayHegde2006/Air.rs/stargazers"><img src="https://img.shields.io/github/stars/SunayHegde2006/Air.rs?style=flat-square&color=yellow" alt="Stars"></a>
+  <a href="#project-status"><img src="https://img.shields.io/badge/status-stable-brightgreen" alt="Status: Stable"></a>
+  <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/v/air-rs?logo=pypi" alt="PyPI"></a>
+  <a href="https://pepy.tech/project/air-rs"><img src="https://img.shields.io/pypi/dm/air-rs?logo=pypi&label=downloads" alt="PyPI Downloads"></a>
+  <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/pyversions/air-rs?logo=python" alt="Python 3.11+"></a>
+  <a href="#build"><img src="https://img.shields.io/badge/Rust-1.75+-F74C00?logo=rust" alt="Rust 1.75+"></a>
+  <a href="#build"><img src="https://img.shields.io/badge/CUDA-11.x%20%7C%2012.x%20%7C%2013.x-76B900?logo=nvidia" alt="CUDA 11-13"></a>
+  <a href="#build"><img src="https://img.shields.io/badge/Metal-Apple%20Silicon-000000?logo=apple" alt="Apple Metal"></a>
+  <a href="#build"><img src="https://img.shields.io/badge/Vulkan-1.2+-RED?logo=vulkan" alt="Vulkan"></a>
+  <a href="#build"><img src="https://img.shields.io/badge/ROCm-AMD-ED1C24?logo=amd" alt="ROCm"></a>
+  <a href="#build"><img src="https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-007ec6" alt="Cross-Platform"></a>
+  <a href="https://github.com/SunayHegde2006/Air.rs/actions"><img src="https://img.shields.io/github/actions/workflow/status/SunayHegde2006/Air.rs/ci.yml?branch=main&logo=github&label=CI" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-007ec6" alt="License: MIT"></a>
 </p>
 
 ---
@@ -39,14 +41,24 @@
   - [Air.rs vs Competitors](#airrs-vs-competitors)
 - [Installation Quickstart](#installation-quickstart)
   - [Python API Installation](#python-api-installation-recommended)
-  - [Async Streaming](#async-streaming-astream-for-fastapi)
-- [✨ v1.2.2 New Features](#-v122-new-features)
+  - [Async Streaming (`astream` for FastAPI)](#async-streaming-astream-for-fastapi)
+- [✨ v1.3.0 New Features](#-v130-new-features)
+  - [Universal Ternary Model & Self-Speculative CDSC Engine](#universal-ternary-model--self-speculative-cdsc-engine)
+  - [W8A8 INT8 Matmul & AVX-512 VNNI Acceleration](#w8a8-int8-matmul--avx-512-vnni-acceleration)
+  - [HBM-Aware Tiered KV-Cache Offload (`--kv-swap`)](#hbm-aware-tiered-kv-cache-offload---kv-swap)
+  - [Per-Batch CUDA Graph Registry](#per-batch-cuda-graph-registry)
+  - [Draft Head Checkpoint Weight Loading & Flash Tree-Attention](#draft-head-checkpoint-weight-loading--flash-tree-attention)
+  - [AFIT Native Future Desugaring (Zero `async-trait` Overhead)](#afit-native-future-desugaring-zero-async-trait-overhead)
   - [Zero-Config Run (`air-rs --run`)](#zero-config-run-air-rs---run)
   - [Interactive TUI REPL (`--interactive`)](#interactive-tui-repl---interactive)
   - [Concurrent OpenAI REST Server (`--serve`)](#concurrent-openai-rest-server---serve)
   - [TLS / HTTPS (`--tls-cert` / `--tls-key`)](#tls--https----tls-cert----tls-key)
   - [Python `air_rs.load()`](#python-air_rsload)
   - [Metal Compute Kernels](#metal-compute-kernels-apple-silicon)
+- [💻 OS-Specific Usage Guides for v1.3.0 Features](#-os-specific-usage-guides-for-v130-features)
+  - [🐧 Linux / WSL (Ubuntu 22.04+)](#-linux--wsl-ubuntu-2204)
+  - [🪟 Windows (PowerShell / CMD)](#-windows-powershell--cmd)
+  - [🍎 macOS (Apple Silicon M1/M2/M3/M4)](#-macos-apple-silicon-m1m2m3m4)
 - [Feature Details](#feature-details)
   - [Core Features & Quantization](#-core-features--quantization)
   - [Security, Enterprise & Observability](#️-security-enterprise-compliance--observability)
@@ -356,7 +368,100 @@ asyncio.run(main())
 
 ---
 
-## ✨ v1.2.2 New Features
+## ✨ v1.3.0 New Features
+
+<details>
+<summary><strong>Universal Ternary Model & Self-Speculative CDSC Engine</strong></summary>
+
+Air.rs v1.3.0 introduces native support for 1.58-bit Universal Ternary Weight Format (UTWF) models (e.g. BitNet b1.58) and self-speculative CDSC execution:
+
+* **Ternary Weight Packing**: 5 trits per byte (`{-1, 0, +1}`) stored at ~1.6 bits per weight.
+* **SIMD Integer Addition**: Multiplications are replaced by high-speed addition/subtraction index loops across AVX-512, AVX2, and ARM NEON.
+* **Self-Speculative CDSC**: Dynamic tree depth self-speculation targeting up to ~5.2× throughput.
+
+```sh
+# Run inference on a ternary GGUF model
+air-rs generate --model ./bitnet-3b-b1.58.gguf --ternary --prompt "Explain quantum computing."
+
+# Enable self-speculative CDSC on ternary weights
+air-rs generate --model ./bitnet-3b-b1.58.gguf --ternary --ternary-cdsc --prompt "Write a Python web scraper."
+```
+
+</details>
+
+<details>
+<summary><strong>W8A8 INT8 Matmul & AVX-512 VNNI Acceleration</strong></summary>
+
+Hardware-accelerated quantization path fusing 8-bit weights and 8-bit activations:
+
+* **SIMD VNNI Acceleration**: Uses `vpdpbusd` dot-product instructions on Intel/AMD CPUs with AVX-512 VNNI.
+* **PTX GPU Acceleration**: Fused 8-bit matrix multiplication with block-tiled accumulation on NVIDIA GPUs.
+
+```sh
+# Build with AVX-512 / CUDA acceleration
+cargo build --release --features cuda,flash-attn
+```
+
+</details>
+
+<details>
+<summary><strong>HBM-Aware Tiered KV-Cache Offload (<code>--kv-swap</code>)</strong></summary>
+
+Dynamic memory manager (`KvSwapManager`) preventing VRAM/HBM out-of-memory errors by swapping inactive KV-cache blocks between GPU VRAM and host RAM:
+
+* **Block Granularity**: Configurable chunk size in KB via `--kv-swap-block-kb` (default: 64 KB).
+* **Tiered Management**: Keeps active sequence blocks in HBM while paging idle blocks to host RAM.
+
+```sh
+# Enable KV swapping with 64KB block granularity
+air-rs generate --model llama-70b.gguf --kv-swap --kv-swap-block-kb 64 --prompt "Summarize RFC 793."
+
+# Server mode with KV swapping for concurrent sessions
+air-rs serve --model llama-70b.gguf --kv-swap --kv-swap-block-kb 64 --port 8080
+```
+
+</details>
+
+<details>
+<summary><strong>Per-Batch CUDA Graph Registry</strong></summary>
+
+`PerBatchCudaGraphRegistry` provides dynamic per-batch-size CUDA execution graph caching:
+
+* **Microsecond Launch Overhead**: Replaces ~100µs CPU-side driver kernel submissions with a single ~1µs CUDA graph launch.
+* **Dynamic Batching**: Automatically instantiates and manages CUDA execution graphs for batch sizes $B \in \{1, 2, 4, 8, 16, \dots\}$.
+
+```sh
+# CUDA graph registry is active automatically on CUDA builds
+cargo build --release --features cuda,flash-attn
+air-rs generate --model llama-3.2-3b.gguf --council --resident
+```
+
+</details>
+
+<details>
+<summary><strong>Draft Head Checkpoint Weight Loading & Flash Tree-Attention</strong></summary>
+
+Speculative Council (`SpeculativeCouncilDrafter`) now supports pre-trained SVD draft head weights and block-sparse GPU tree attention:
+
+* **Checkpoint Loading**: Loads trained projection matrices $A \in \mathbb{R}^{r \times d_{in}}$ and $B \in \mathbb{R}^{d_{out} \times r}$ from model checkpoints with automatic fallback to rank-16 SVD initialization.
+* **Flash Tree Attention**: Dispatches parent-mask tree attention to block-sparse CUDA kernels for draft trees ($k > 16$) with CPU reference fallback for smaller trees.
+
+```sh
+# Run speculative council with draft head checkpoint loading
+air-rs generate --model llama-70b-q8.gguf --council --epsilon 0.15 --stream
+```
+
+</details>
+
+<details>
+<summary><strong>AFIT Native Future Desugaring (Zero <code>async-trait</code> Overhead)</strong></summary>
+
+Distributed inference communicator interface (`Communicator` in `src/distributed.rs`) now uses native Rust 1.75 desugared futures:
+
+* **Zero Macro Dependencies**: Eliminates `async-trait` dependency completely.
+* **Object Safety**: Explicit `Pin<Box<dyn Future<Output = Result<T, E>> + Send + '_>>` signature maintains full dynamic object safety across multi-GPU / TCP / NCCL backends.
+
+</details>
 
 <details>
 <summary><strong>Zero-Config Run (<code>air-rs --run</code>)</strong></summary>
@@ -470,6 +575,134 @@ Production Metal Shading Language (MSL) kernels for Apple Silicon M1/M2/M3/M4:
 Enable with:
 ```sh
 cargo build --release --features metal
+```
+
+</details>
+
+---
+
+## 💻 OS-Specific Usage Guides for v1.3.0 Features
+
+<details>
+<summary><strong>🐧 Linux / WSL (Ubuntu 22.04+ / Windows Subsystem for Linux)</strong></summary>
+
+### 1. Build Air.rs v1.3.0 with CUDA & FlashAttention
+```bash
+# Install system dependencies
+sudo apt update && sudo apt install -y build-essential libvulkan-dev
+
+# Build with CUDA + FlashAttention-2
+export CUDA_HOME=/usr/local/cuda
+export NVCC_ARCH=sm_86 # Set to sm_89 for RTX 40-series, sm_80 for A100, sm_90 for H100
+cargo build --release --features cuda,flash-attn
+```
+
+### 2. Run Universal Ternary Model with Self-Speculative CDSC
+```bash
+./target/release/air-rs generate \
+  --model ./models/bitnet-3b-b1.58.gguf \
+  --ternary \
+  --ternary-cdsc \
+  --prompt "Explain the architecture of transformer models." \
+  --stream
+```
+
+### 3. Server Mode with HBM-Aware KV-Cache Offloading & TLS
+```bash
+./target/release/air-rs serve \
+  --model /path/to/Llama-3.3-70B-Instruct-Q8_0.gguf \
+  --kv-swap \
+  --kv-swap-block-kb 64 \
+  --tls-cert /etc/ssl/certs/server.pem \
+  --tls-key /etc/ssl/private/server.key \
+  --port 8443 \
+  --host 0.0.0.0
+```
+
+### 4. Interactive TUI REPL with Multi-Batch CUDA Graph Registry
+```bash
+./target/release/air-rs --run ./models/llama-3.2-3b-instruct.gguf --interactive --council --resident
+```
+
+</details>
+
+<details>
+<summary><strong>🪟 Windows (PowerShell / Command Prompt)</strong></summary>
+
+### 1. Setup Build Environment & Compile v1.3.0
+```powershell
+# Execute build environment setup script in Developer PowerShell for VS 2022
+.\setup_build_env.ps1
+
+# Set target GPU architecture (sm_86 for RTX 30-series, sm_89 for RTX 40-series)
+$env:NVCC_ARCH="sm_86"
+cargo build --release --features cuda,flash-attn
+```
+
+### 2. Run Universal Ternary Model with Self-Speculative CDSC
+```powershell
+.\target\release\air-rs.exe generate `
+  --model C:\Models\bitnet-3b-b1.58.gguf `
+  --ternary `
+  --ternary-cdsc `
+  --prompt "Write a PowerShell script to audit disk usage." `
+  --stream
+```
+
+### 3. Server Mode with HBM-Aware KV-Cache Offloading
+```powershell
+.\target\release\air-rs.exe serve `
+  --model D:\Models\Llama-3.3-70B-Instruct-Q8_0.gguf `
+  --kv-swap `
+  --kv-swap-block-kb 64 `
+  --port 8080 `
+  --host 127.0.0.1
+```
+
+### 4. Zero-Config Run with Interactive REPL & Speculative Council
+```powershell
+.\target\release\air-rs.exe --run C:\Models\llama-3.2-3b.gguf --interactive --council --resident
+```
+
+</details>
+
+<details>
+<summary><strong>🍎 macOS (Apple Silicon M1 / M2 / M3 / M4)</strong></summary>
+
+### 1. Build Air.rs v1.3.0 with Apple Metal Compute
+```bash
+# Ensure Xcode command line tools are installed
+xcode-select --install
+
+# Build release binary with Apple Metal GPU acceleration
+cargo build --release --features metal
+```
+
+### 2. Run Universal Ternary Model with Self-Speculative CDSC
+```bash
+./target/release/air-rs generate \
+  --model ~/Models/bitnet-3b-b1.58.gguf \
+  --ternary \
+  --ternary-cdsc \
+  --prompt "Draft an email outlining a project timeline." \
+  --stream
+```
+
+### 3. High-Throughput 13B/70B Resident Speculative Council Run
+```bash
+# 13B Q8 model on M2 Max / M3 Pro (unified memory 200+ tok/s)
+./target/release/air-rs generate \
+  --model ~/Models/llama-3.2-13b-q8.gguf \
+  --council \
+  --resident \
+  --epsilon 0.15 \
+  --prompt "Explain principles of general relativity." \
+  --stream
+```
+
+### 4. Background REST Server with Interactive TUI REPL
+```bash
+./target/release/air-rs --run ~/Models/llama-3.2-3b.gguf --serve --interactive --port 8080
 ```
 
 </details>
@@ -710,6 +943,29 @@ We welcome structural research contributions!
 ---
 
 ## Changelog
+
+### v1.3.0 — 2026-08-19 — *Universal Ternary Model, Self-Speculative CDSC & Engine Refactor*
+
+- **feat(ternary)**: Universal Ternary Weight Format (UTWF) & Balanced Ternary Packing (`src/ternary.rs`) — 5 trits per byte packing scheme (1.6 bits/weight, `{-1, 0, +1}`).
+- **feat(ternary)**: SIMD Precomputed Mask CPU MatMul (`TernaryMatMulCpu`) — replaces FP multiplications with integer ADD/SUB loops via precomputed positive/negative index vectors.
+- **feat(ternary)**: Hardware Auto-Detection & Backend Dispatcher (`HardwareCapabilities` & `TernaryBackendChoice`) — auto-detects AVX2, AVX-512, NEON, DRAM bandwidth, and VRAM to select optimal backend (`CpuAvx512`, `CpuAvx2`, `CpuArmNeon`, `GpuVulkan`, `Hybrid`).
+- **feat(ternary)**: Ternary Resident Model & CDSC Self-Speculation Engine (`TernaryResidentModel` & `TernaryCdsc`) — dynamic tree depth self-speculation targeting up to ~5.2× throughput.
+- **feat(w8a8)**: W8A8 INT8 Matmul Kernel (`src/w8a8.rs`) — tile-blocked INT8 GEMM kernel with direct PTX/AVX tile accumulation and AVX-512 VNNI (`vpdpbusd`) SIMD acceleration.
+- **feat(kv_swap)**: HBM-Aware Tiered KV-Cache Offload (`src/kv_swap.rs`) — `KvSwapManager` for host system RAM offloading/restoration of KV blocks (`--kv-swap`, `--kv-swap-block-kb`).
+- **feat(gpu_direct)**: Multi-Batch CUDA Graph Registry (`src/strix/gpu_direct.rs`) — `PerBatchCudaGraphRegistry` providing dynamic CUDA graph caching per batch size $B \in \{1, 2, 4, 8, 16, \dots\}$ (~1µs launch overhead).
+- **feat(speculative)**: Draft Head Checkpoint Weight Loading (`src/speculative_council.rs`) — `SpeculativeCouncilDrafter::from_checkpoint` loads pre-trained SVD draft head matrices from `.safetensors`/GGUF files.
+- **feat(speculative)**: Flash Tree Attention GPU Kernel Dispatch (`src/speculative_council.rs`) — `FlashTreeAttentionMask::dispatch_sparse_attention` dispatches block-sparse tree attention to CUDA kernels for $k > 16$ with CPU reference fallback.
+- **feat(distributed)**: AFIT Native Future Desugaring (`src/distributed.rs`) — eliminated `async-trait` macro dependency across `Communicator`, desugaring to lifetime-bound futures `Pin<Box<dyn Future + Send>>` for zero macro overhead and full dynamic object safety.
+- **feat(batching)**: Continuous Batching & Chunked Prefill — integrated Orca-style `ContinuousBatchScheduler` in server mode with Sarathi-style prefill chunk budgets.
+- **feat(speculative)**: Consensus-Driven Speculative Council (`SpeculativeCouncilDrafter`) — fused draft pass, SVD early-exit projection, and JSD-based consensus voting.
+- **feat(hybrid)**: CPU-GPU Hybrid Layer Partitioning & Pinned Memory Streaming — dynamic layer placement and PCIe DMA pipeline overlap.
+- **feat(cli)**: CLI integration — added `--ternary` (`--bitnet`), `--ternary-cdsc`, `--kv-swap`, and `--kv-swap-block-kb` options to `air-rs generate` and `air-rs serve`.
+- **refactor(content_safety)**: Removed `SafetyClassifier` trait (single impl); `KeywordClassifier` is now a zero-size `Copy` struct with static `&[&str]` term lists — eliminates 5 runtime `HashSet` heap allocations per instance.
+- **refactor(stop_seq)**: Deleted `StopChecker` model-family preset constructors (`llama3`, `qwen3`, `deepseek_r1`, `mistral`) — callers use `StopChecker::new` directly with their tokenizer's stop strings and EOS ID.
+- **refactor(modelfile)**: Replaced manual `impl Default for Modelfile` with `#[derive(Default)]` — stdlib does it in one word.
+- **refactor(device_map)**: Removed `DeviceMapBuilder` fluent-builder struct — `DeviceMap` construction is now direct.
+- **refactor(chat_template)**: Eliminated intermediate `Vec` allocation in `ChatTemplate::apply_raw` — replaced `.collect::<Vec<_>>().join()` with a `fold`-based single-pass concatenation.
+- **chore**: Bumped version to `1.3.0` across `Cargo.toml`, `pyproject.toml`, `build_air.sh`, `build_air.ps1`, `scripts/tiered_ttft.sh`, `scripts/run_benchmarks.sh`.
 
 ### v1.2.2 — 2026-08-07 — *Zero-Config UX, TUI REPL, REST Server & TLS Release*
 

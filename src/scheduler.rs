@@ -57,7 +57,7 @@ impl RequestOrchestrator {
                                 (g, ds)
                             });
 
-                            let gbnf_ref = generator.policy.gbnf.clone();
+                            let gbnf_ref = generator.gbnf.clone();
                             let mut spec = crate::speculative::SpeculativeDecoder::new(
                                 &mut generator,
                                 draft_gen,
