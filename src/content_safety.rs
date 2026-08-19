@@ -230,7 +230,7 @@ impl ContentSafetyGate {
 
 impl Default for ContentSafetyGate {
     fn default() -> Self {
-        Self::new(KeywordClassifier::default(), SafetyPolicy::default())
+        Self::new(KeywordClassifier, SafetyPolicy::default())
     }
 }
 
