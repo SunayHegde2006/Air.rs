@@ -348,6 +348,12 @@ pub struct TagBasedThinking {
     was_in_think: bool,
 }
 
+impl Default for TagBasedThinking {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TagBasedThinking {
     pub fn new() -> Self {
         Self { state: ThinkState::new(), was_in_think: false }
