@@ -11,9 +11,9 @@
 
 <p align="center">
   <a href="#project-status"><img src="https://img.shields.io/badge/status-stable-brightgreen" alt="Status: Stable"></a>
-  <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/v/air-rs?logo=pypi" alt="PyPI"></a>
-  <a href="https://pepy.tech/project/air-rs"><img src="https://img.shields.io/pypi/dm/air-rs?logo=pypi&label=downloads" alt="PyPI Downloads"></a>
-  <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/pyversions/air-rs?logo=python" alt="Python 3.11+"></a>
+  <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/v/air-rs?logo=pypi&logoColor=white" alt="PyPI"></a>
+  <a href="https://pepy.tech/project/air-rs"><img src="https://img.shields.io/pypi/dm/air-rs?logo=pypi&logoColor=white&label=downloads" alt="PyPI Downloads"></a>
+  <a href="https://pypi.org/project/air-rs/"><img src="https://img.shields.io/pypi/pyversions/air-rs?logo=python&logoColor=white" alt="Python 3.11+"></a>
   <a href="#build"><img src="https://img.shields.io/badge/Rust-1.75+-F74C00?logo=rust" alt="Rust 1.75+"></a>
   <a href="#build"><img src="https://img.shields.io/badge/CUDA-11.x%20%7C%2012.x%20%7C%2013.x-76B900?logo=nvidia" alt="CUDA 11-13"></a>
   <a href="#build"><img src="https://img.shields.io/badge/Metal-Apple%20Silicon-000000?logo=apple" alt="Apple Metal"></a>
