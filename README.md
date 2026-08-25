@@ -70,6 +70,7 @@
 - [Troubleshooting & Support](#troubleshooting--support)
 - [How S.L.I.P. Works](#how-slip-works)
 - [Contributing](#contributing)
+- [AI Use Disclosure & Development Methodology](#ai-use-disclosure--development-methodology)
 - [Changelog](#changelog)
 - [Citation & Licensing](#citation--licensing)
 
@@ -939,6 +940,25 @@ We welcome structural research contributions!
 1. Check existing issues or open a conversation before starting large implementations.
 2. Maintain domain language terms defined in [CONTEXT.md](CONTEXT.md).
 3. Ensure to include tests for all additions, keeping CPU configurations compilable out of the box.
+
+---
+
+## AI Use Disclosure & Development Methodology
+
+<details>
+<summary><strong>🤖 AI Use Disclosure & Development Methodology</strong></summary>
+
+* **Project Concept & Architectural Direction**: The overall system design, S.L.I.P. (Slipstream Layer Inference Protocol) memory streaming model, Consensus-Driven Speculative Council (CDSC), Universal Ternary Weight Format (UTWF) specifications, hardware-aware roofline modeling, PagedAttention v2 sequence manager, and empirical benchmark harness methodology were conceived, formulated, designed, and directed entirely by **Sunay Hegde**.
+
+* **AI Pair Programming Assistance**: An AI coding assistant was utilized during development as an agentic pair programmer for minor administrative and auxiliary tasks. Specifically, AI tools assisted with:
+  * Generating minor repetitive Rust boilerplate code and routine struct definitions.
+  * Standardizing error handling (`HalError` / `anyhow::Context`) and trait glue implementations.
+  * Refactoring type definitions, helper methods, and unit test harness stubs.
+  * Formatting markdown documentation tables, CLI reference flags, and changelog entries.
+
+* **Hardware & Empirical Verification**: All core performance claims, S.L.I.P. streaming protocols, SIMD/VNNI vectorization routines, GPU CUDA/Metal kernel dispatches, and memory roofline sanity checks were engineered, benchmarked, and verified directly on physical hardware.
+
+</details>
 
 ---
 
