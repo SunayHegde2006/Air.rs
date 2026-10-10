@@ -1,14 +1,11 @@
-[env]
-# Force NVCC and CC to generate Position Independent Code (fPIC)
-# We prepend our 'scripts' directory to the PATH, which contains 
-# transparent wrappers for nvcc and cc that inject the -fPIC flag.
-PATH = { value = "scripts", relative = true, action = "prepend" }
-
-# Standard environment variables for build scripts that respect them
-CUDA_NVCC_FLAGS = "-Xcompiler -fPIC"
+[build]
+rustflags = ["-C", "target-cpu=native"]
 
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "relocation-model=pic"]
+rustflags = ["-C", "target-feature=+avx2,+fma"]
 
-[target.aarch64-unknown-linux-gnu]
-rustflags = ["-C", "relocation-model=pic"]
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+avx2,+fma"]
+
+[env]
+AIR_KERNEL_PATH = { value = "kernels/precompiled", relative = true }

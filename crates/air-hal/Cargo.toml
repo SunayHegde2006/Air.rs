@@ -1,0 +1,16 @@
+[package]
+name = "air-hal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+air-core = { path = "../air-core" }
+air-uqe = { path = "../air-uqe" }
+bytemuck.workspace = true
+half.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+libloading.workspace = true
+wgpu.workspace = true

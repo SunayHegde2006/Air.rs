@@ -1,0 +1,18 @@
+[package]
+name = "air-ice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+air-core = { path = "../air-core" }
+air-hal = { path = "../air-hal" }
+bytemuck.workspace = true
+half.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+io-uring = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7"

@@ -1,0 +1,21 @@
+[package]
+name = "air-bench"
+version = "2.0.0"
+edition = "2021"
+
+[[bin]]
+name = "air-bench"
+path = "src/main.rs"
+
+[dependencies]
+air-core = { path = "../air-core" }
+air-hal = { path = "../air-hal" }
+air-uqe = { path = "../air-uqe" }
+air-engine = { path = "../air-engine" }
+half = { workspace = true }
+bytemuck = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

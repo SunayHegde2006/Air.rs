@@ -1,0 +1,16 @@
+[defaults]
+backend = "auto"
+profile = "auto"
+
+[speculative]
+strategy = "auto"
+auto_tune = true
+
+[server]
+port = 8080
+cors = true
+
+[multimodal]
+video_fps = 1.0
+max_video_frames = 32
+npu_offload = true

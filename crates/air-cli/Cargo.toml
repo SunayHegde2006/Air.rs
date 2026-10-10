@@ -1,0 +1,25 @@
+[package]
+name = "air-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "air-rs"
+path = "src/main.rs"
+
+[dependencies]
+air-core = { path = "../air-core" }
+air-hal = { path = "../air-hal" }
+air-uqe = { path = "../air-uqe" }
+air-ice = { path = "../air-ice" }
+air-mie = { path = "../air-mie" }
+air-engine = { path = "../air-engine" }
+air-server = { path = "../air-server" }
+clap.workspace = true
+ratatui.workspace = true
+indicatif.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

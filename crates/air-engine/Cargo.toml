@@ -1,0 +1,19 @@
+[package]
+name = "air-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+air-core = { path = "../air-core" }
+air-hal = { path = "../air-hal" }
+air-uqe = { path = "../air-uqe" }
+air-ice = { path = "../air-ice" }
+air-mie = { path = "../air-mie" }
+bytemuck.workspace = true
+half.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true

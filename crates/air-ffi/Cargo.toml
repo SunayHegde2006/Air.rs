@@ -1,0 +1,16 @@
+[package]
+name = "air-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "air"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+air-core = { path = "../air-core" }
+air-engine = { path = "../air-engine" }
+air-server = { path = "../air-server" }
+tokio.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "air-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "air_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+air-core = { path = "../air-core" }
+air-engine = { path = "../air-engine" }
+air-server = { path = "../air-server" }
+pyo3 = { workspace = true }
+tokio.workspace = true
